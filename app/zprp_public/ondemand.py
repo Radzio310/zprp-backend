@@ -57,16 +57,105 @@ def needs_details(
     finished: bool,
     moment: datetime | None,
     now: datetime,
+    *,
+    complete: bool = True,
+    proel_done_at: datetime | None = None,
+    proel_linked: bool = False,
+    timed: bool = True,
 ) -> bool:
-    if not finished:
+    """Czy pobrać szczegóły meczu teraz.
+
+    Bez dodatkowych argumentów - dawna reguła (świeże 6 h przez 3 dni od meczu).
+    Mecz „gorący" (do 6 h od rozpoczęcia albo od końca w ProElu) z niepełnym
+    protokołem ZPRP odświeżamy co kilka minut - patrz `details_stale_after`.
+    """
+    if not finished and not _recent(proel_done_at, now):
         return False
     fetched = _aware(details_fetched_at)
     if fetched is None:
         return True
+    stale_after = details_stale_after(moment, now, complete=complete, proel_done_at=proel_done_at,
+                                      proel_linked=proel_linked, timed=timed)
+    if stale_after is not None:
+        return now - fetched > stale_after
+    return False
+
+
+# --- Kadencja „do skutku": mecz po końcowej syrenie, protokół ZPRP niepełny ---
+#
+# Sekretarz wysyła do ZPRP wynik i statystyki dopiero po meczu, pojedynczo.
+# Szczegóły pobrane w trakcie (albo w połowie wysyłki) dawały częściowy skład,
+# który przy 6-godzinnej świeżości wisiał na portalu do nocy. Teraz taki mecz
+# pobieramy ponownie co HOT_STALE_AFTER (ProEl już zakończył mecz - wysyłka
+# do ZPRP tuż-tuż) albo co HOT_STALE_PLAIN (mecz w toku, bez ProEla - mniej
+# pewne, że ZPRP w ogóle dostanie skład), aż protokół będzie kompletny albo
+# minie HOT_WINDOW. Te same reguły stosuje cykl LIVE (`sync._sync_hot_details`).
+HOT_WINDOW = timedelta(hours=6)
+HOT_STALE_AFTER = timedelta(minutes=max(2, int(os.getenv("ZPRP_PUBLIC_HOT_STALE_MIN", "5"))))
+HOT_STALE_PLAIN = timedelta(minutes=max(5, int(os.getenv("ZPRP_PUBLIC_HOT_STALE_PLAIN_MIN", "15"))))
+#: Mecz bez godziny (00:00) jest „gorący" przez całą swoją dobę i jeszcze HOT_WINDOW.
+_UNTIMED_SPAN = timedelta(days=1)
+
+
+def _recent(at: datetime | None, now: datetime) -> bool:
+    at = _aware(at)
+    return at is not None and timedelta(0) <= now - at <= HOT_WINDOW
+
+
+def in_hot_window(moment: datetime | None, now: datetime, proel_done_at: datetime | None = None, timed: bool = True) -> bool:
+    """Mecz rozpoczął się nie dawniej niż HOT_WINDOW temu albo ProEl zakończył go w tym oknie."""
+    if _recent(proel_done_at, now):
+        return True
+    moment = _aware(moment)
+    if moment is None:
+        return False
+    span = HOT_WINDOW if timed else HOT_WINDOW + _UNTIMED_SPAN
+    return timedelta(0) <= now - moment <= span
+
+
+def lineups_complete(
+    home_players: int,
+    away_players: int,
+    score_home: Any,
+    score_away: Any,
+    home_goals: int | None = None,
+    away_goals: int | None = None,
+) -> bool:
+    """Protokół ZPRP kompletny: obie strony mają zawodników i jest wynik.
+
+    Bramki zawodników (gdy podane i niezerowe) muszą dać wynik strony - suma
+    mniejsza od wyniku to wysyłka w połowie (sekretarz wysyła po jednym).
+    """
+    if int(home_players or 0) <= 0 or int(away_players or 0) <= 0:
+        return False
+    if score_home is None or score_away is None:
+        return False
+    for goals, score in ((home_goals, score_home), (away_goals, score_away)):
+        if goals and int(goals) != int(score):
+            return False
+    return True
+
+
+def details_stale_after(
+    moment: datetime | None,
+    now: datetime,
+    *,
+    complete: bool = True,
+    proel_done_at: datetime | None = None,
+    proel_linked: bool = False,
+    timed: bool = True,
+) -> timedelta | None:
+    """Po jakim czasie szczegóły są nieaktualne; None = nie odświeżamy (stary mecz)."""
+    if not complete and in_hot_window(moment, now, proel_done_at, timed):
+        # Koniec w ProElu = wysyłka do ZPRP tuż-tuż. Mecz w toku (także prowadzony w ProElu) - rzadziej.
+        if proel_done_at is not None:
+            return HOT_STALE_AFTER
+        # Bez godziny (00:00) okno trwa całą dobę - rzadziej, póki ProEl nie powie „koniec".
+        return HOT_STALE_PLAIN if timed else HOT_STALE_PLAIN * 2
     moment = _aware(moment)
     if moment is not None and now - moment <= RECENT_WINDOW:
-        return now - fetched > STALE_AFTER
-    return False
+        return STALE_AFTER
+    return None
 
 
 def backfill_sort_key(
@@ -127,12 +216,89 @@ def _get_client() -> Any:
     return _client
 
 
-async def ensure_details(match: Any) -> bool:
-    """Zwraca True, gdy szczegóły są w toku/nieaktualne i nie udało się ich pobrać (``details_pending``)."""
+async def freshness_inputs(match_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Dla kadencji: zawodnicy i bramki na stronę (ZPRP) oraz koniec meczu w ProElu.
+
+    -> {match_id: {"players": {side: n}, "goals": {side: n}, "proel_done_at", "proel_linked"}}.
+    Dwa lekkie zapytania po kluczach z indeksem; błąd = puste dane (dawna reguła).
+    """
+    out: dict[str, dict[str, Any]] = {
+        str(m): {"players": {}, "goals": {}, "proel_done_at": None, "proel_linked": False} for m in match_ids if m
+    }
+    if not out:
+        return out
+    try:
+        from sqlalchemy import func, select
+
+        from app.db import database, zprp_public_match_players as MP
+
+        ids = list(out)
+        rows = await database.fetch_all(
+            select(MP.c.match_id, MP.c.side, func.count().label("n"), func.coalesce(func.sum(MP.c.goals), 0).label("g"))
+            .where(MP.c.match_id.in_(ids)).group_by(MP.c.match_id, MP.c.side)
+        )
+        for r in rows:
+            item = out.get(str(r["match_id"]))
+            if item is not None:
+                item["players"][r["side"]] = int(r["n"] or 0)
+                item["goals"][r["side"]] = int(r["g"] or 0)
+        try:
+            from app.db import saved_matches as T
+
+            proel = await database.fetch_all(
+                select(T.c.zprp_match_id, T.c.status, T.c.updated_at).where(T.c.zprp_match_id.in_(ids))
+            )
+            for r in proel:
+                item = out.get(str(r["zprp_match_id"]))
+                if item is None:
+                    continue
+                item["proel_linked"] = True
+                if r["status"] in ("finished", "approved"):
+                    at = _aware(r["updated_at"])
+                    if at is not None and (item["proel_done_at"] is None or at > item["proel_done_at"]):
+                        item["proel_done_at"] = at
+        except Exception:  # protokół ProEl to tylko przyspieszenie kadencji
+            log.debug("[zprp_public] kadencja: odczyt ProEl", exc_info=True)
+    except Exception:
+        log.debug("[zprp_public] kadencja: odczyt składów", exc_info=True)
+    return out
+
+
+def cadence_for(match: Any, info: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
+    """Argumenty `needs_details` dla wiersza meczu (czysta funkcja nad tym, co zwraca `freshness_inputs`)."""
+    info = info or {}
+    players, goals = info.get("players") or {}, info.get("goals") or {}
+    local = match["played_at"] or match["scheduled_at"]
+    return {
+        "complete": lineups_complete(players.get("home", 0), players.get("away", 0), match["score_home"], match["score_away"],
+                                     goals.get("home"), goals.get("away")),
+        "proel_done_at": info.get("proel_done_at"),
+        "proel_linked": bool(info.get("proel_linked")),
+        "timed": has_kickoff_time(local) if isinstance(local, datetime) else True,
+    }
+
+
+def lineups_hot(match: Any, info: dict[str, Any] | None, now: datetime) -> bool:
+    """Czy portal ma jeszcze czekać na protokół (front odświeża stronę co minutę)."""
+    cad = cadence_for(match, info, now)
+    moment = match_moment(match["played_at"], match["scheduled_at"])
+    return not cad["complete"] and in_hot_window(moment, now, cad["proel_done_at"], cad["timed"])
+
+
+async def ensure_details(match: Any, info: dict[str, Any] | None = None) -> bool:
+    """Zwraca True, gdy szczegóły są w toku/nieaktualne i nie udało się ich pobrać (``details_pending``).
+
+    `info` (z `freshness_inputs`) włącza kadencję „do skutku" dla świeżo
+    zakończonych meczów z niepełnym protokołem.
+    """
     now = datetime.now(timezone.utc)
     moment = match_moment(match["played_at"], match["scheduled_at"])
     finished = is_finished(match["score_home"], match["played_at"], match["scheduled_at"], now)
-    if not needs_details(match["details_fetched_at"], finished, moment, now):
+    cad = cadence_for(match, info, now) if info is not None else {}
+    if cad and not finished and match["score_home"] is None:
+        # termin minął (bez daty rozegrania) - w gorącym oknie też pytamy ZPRP
+        finished = in_hot_window(moment, now, None, cad.get("timed", True)) and moment is not None and moment <= now
+    if not needs_details(match["details_fetched_at"], finished, moment, now, **cad):
         return False
     match_id = str(match["match_id"])
     if _negative.blocked(match_id):
@@ -169,6 +335,112 @@ async def ensure_details(match: Any) -> bool:
     finally:
         if not lock.locked():
             _locks.pop(match_id, None)
+
+
+# --- Odświeżenie szczegółów po sygnale z ProEla (koniec meczu, wysyłka do ZPRP) ---
+#
+# Koniec meczu w ProElu, wynik skrócony i statystyki wysłane do ZPRP to znak, że
+# publiczny protokół właśnie się zmienia. Zamiast czekać na cykl synchronizacji
+# pobieramy szczegóły tego meczu w tle, po krótkiej zwłoce (ZPRP potrzebuje
+# chwili). Jedno zadanie na mecz: kolejne sygnały przesuwają termin (statystyki
+# lecą po jednym zawodniku - pobieramy po ostatnim), ale nie dalej niż
+# KICK_MAX_DEFER od pierwszego sygnału. Limit równoległości wspólny z wejściami
+# na stronę (`_slots`), osobna pamięć porażek nie jest potrzebna - błąd to log.
+KICK_MAX_DEFER = 120.0
+KICK_TIMEOUT = float(os.getenv("ZPRP_PUBLIC_KICK_TIMEOUT", "20"))
+_kick_due: dict[str, tuple[float, float]] = {}   # match_id -> (pierwszy sygnał, termin)
+_kick_tasks: dict[str, "asyncio.Task[None]"] = {}
+
+
+def next_due(current: tuple[float, float] | None, now: float, delay: float, debounce: bool) -> tuple[float, float]:
+    """Termin pobrania po kolejnym sygnale: (pierwszy sygnał, termin).
+
+    Bez `debounce` wygrywa wcześniejszy termin (pilny sygnał przyspiesza),
+    z `debounce` - późniejszy, ale najwyżej KICK_MAX_DEFER od pierwszego sygnału.
+    """
+    want = now + max(0.0, delay)
+    if current is None:
+        return (now, want)
+    first, due = current
+    if debounce:
+        return (first, min(max(due, want), first + KICK_MAX_DEFER))
+    return (first, min(due, want))
+
+
+async def fetch_details_now(match_id: str, timeout: float = KICK_TIMEOUT) -> bool:
+    """Pobiera szczegóły meczu teraz (czeka na wolne miejsce). True = zapisane."""
+    match_id = str(match_id)
+    lock = _locks.setdefault(match_id, asyncio.Lock())
+    try:
+        async with lock:
+            async with _slots:
+                from app.zprp_public.sync import Counters, _sync_match_details
+
+                counters = Counters()
+                await asyncio.wait_for(_sync_match_details(_get_client(), match_id, counters), timeout=timeout)
+            return bool(counters.get("match_details"))
+    except Exception as exc:
+        log.warning("[zprp_public] odświeżenie po ProElu %s: %r", match_id, exc)
+        return False
+    finally:
+        if not lock.locked():
+            _locks.pop(match_id, None)
+
+
+async def _kick_runner(match_id: str) -> None:
+    loop = asyncio.get_running_loop()
+    try:
+        # Sygnał w trakcie pobierania zostawia nowy termin - pętla zrobi kolejne pobranie.
+        while True:
+            slot = _kick_due.get(match_id)
+            if slot is None:
+                return
+            wait = slot[1] - loop.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+                continue
+            _kick_due.pop(match_id, None)
+            await fetch_details_now(match_id)
+    finally:
+        if _kick_tasks.get(match_id) is asyncio.current_task():
+            _kick_tasks.pop(match_id, None)
+
+
+def kick_on_status(match_id: Any, previous: str | None, final: str | None) -> bool:
+    """ProEl zmienił status meczu: koniec (albo zatwierdzenie) = pobierz szczegóły ZPRP za chwilę.
+
+    Sekretarz zwykle wysyła wynik i składy tuż po syrenie; cykl „do skutku"
+    (`_sync_hot_details`) dokończy, jeśli wysyłka potrwa dłużej.
+    """
+    if final not in ("finished", "approved") or previous == final:
+        return False
+    return kick_details_refresh(match_id, delay=30.0)
+
+
+def _kicks_enabled() -> bool:
+    """Wyłączone razem z synchronizacją; w testach domyślnie wyłączone (bez sieci w tle)."""
+    on = {"1", "true", "yes", "on"}
+    if os.getenv("ZPRP_PUBLIC_SYNC_ENABLED", "1").strip().lower() not in on:
+        return False
+    default = "0" if os.getenv("ENVIRONMENT", "").strip().lower() == "test" else "1"
+    return os.getenv("ZPRP_PUBLIC_KICK_ENABLED", default).strip().lower() in on
+
+
+def kick_details_refresh(match_id: Any, delay: float = 20.0, debounce: bool = False) -> bool:
+    """Zaplanuj pobranie szczegółów meczu ZPRP w tle. Nigdy nie rzuca; False = nie zaplanowano."""
+    try:
+        mid = str(match_id or "").strip()
+        if not mid or mid in {"0", "None"} or not _kicks_enabled():
+            return False
+        loop = asyncio.get_running_loop()
+        _kick_due[mid] = next_due(_kick_due.get(mid), loop.time(), delay, debounce)
+        task = _kick_tasks.get(mid)
+        if task is None or task.done():
+            _kick_tasks[mid] = loop.create_task(_kick_runner(mid))
+        return True
+    except Exception:
+        log.debug("[zprp_public] kick_details_refresh %r", match_id, exc_info=True)
+        return False
 
 
 # --- Odświeżenie meczu na żądanie (wejście na stronę meczu / profil sędziego) ---

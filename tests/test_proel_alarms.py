@@ -128,3 +128,37 @@ def test_okablowanie():
     hist = (ROOT / "app/proel_match_history.py").read_text(encoding="utf-8")
     assert "dependencies=[Depends(proel_admin_guard)]" in hist
     assert hist.count("await _require_admin(actor)") == 3
+
+
+def test_push_tylko_dla_meczu_z_terminarza_zprp():
+    """Decyzja 24.10.2026: mecz testowy, cwiczenie i recznie wpisany numer - bez pushu."""
+    from app.proel_alarm_scan import oficjalny_mecz
+
+    assert oficjalny_mecz("IMB/49", {"matchId": "123456"}, None, False)
+    assert oficjalny_mecz("IMB/49", {}, "123456", False)
+    assert oficjalny_mecz("IMB/49", {}, None, True)  # numer stoi w terminarzu okregu
+    assert not oficjalny_mecz("GG", {"origin": "manual"}, None, False)  # recznie wpisany
+    assert not oficjalny_mecz("IMB/49", {"matchId": "123456", "isTest": True}, "123456", True)
+    assert not oficjalny_mecz("T-N37FNRQ3/LCM/1", {"matchId": "1"}, "1", True)
+    assert not oficjalny_mecz("IMB/49", {"training": {"eventId": "x"}}, None, True)
+    assert not oficjalny_mecz("", {}, "1", True)
+
+
+def test_opis_meczu_do_powiadomienia():
+    from app.proel_alarm_scan import opis_meczu
+
+    o = opis_meczu({"numer": "IMB/49", "gospodarze": "SGH", "goscie": "DBAM", "data": "14.11.2026, 19:00"}, "IMB/49")
+    assert o == {"numer": "IMB/49", "druzyny": "SGH – DBAM", "linia": "SGH – DBAM · 14.11.2026, 19:00"}
+    assert opis_meczu({}, "T-ABCDEF12/SPM/1")["numer"] == "SPM/1"
+    assert opis_meczu({}, "GG")["linia"] == ""
+
+
+def test_trwanie_w_godzinach_i_dniach():
+    from app.raport_dowodowy.alarmy import _trwanie
+
+    assert _trwanie(45) == "45 s"
+    assert _trwanie(635) == "10 min 35 s"
+    assert _trwanie(3600) == "1 h"
+    assert _trwanie(7500) == "2 h 5 min"
+    assert _trwanie(86400) == "1 dzień"
+    assert _trwanie(14349 * 60 + 8) == "9 dni 23 h"

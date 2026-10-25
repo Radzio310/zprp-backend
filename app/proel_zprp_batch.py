@@ -329,6 +329,9 @@ async def run_job(job: BatchJob) -> None:
             len(job.items),
             job.renewed,
         )
+        if counts[SENT]:
+            # Pakiet zmienił publiczny protokół - portal dociąga go od razu, nie w cyklu synchronizacji.
+            zprp._kick_public(job.id_zawody, 5.0)
 
 
 def _job_task_done(task: "asyncio.Task[None]") -> None:

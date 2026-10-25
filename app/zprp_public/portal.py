@@ -49,9 +49,12 @@ from app.zprp_public import corrections, geocode, portal_rules as R
 from app.zprp_public import match_rules as MR
 from app.zprp_public import referee_placeholder as RP
 from app.zprp_public import search_rules as SR
+from app.zprp_public import round_rules as ROUNDS
 from app.zprp_public.protocol_times import attach_protocol_times
 from app.zprp_public.enrich import attach_standing_records, enrich_matches, seasons_info
-from app.zprp_public.ondemand import ensure_details
+from app.zprp_public.ondemand import ensure_details, freshness_inputs, in_hot_window, lineups_complete, match_moment
+from app.zprp_public import proel_lineup_rules as PL
+from app.zprp_public.proel_lineups import fallback_for as proel_fallback_for
 from app.zprp_public.api import _dict, _public_player, search as base_search
 from app.zprp_public.privacy import public_club, public_team
 
@@ -785,7 +788,8 @@ async def match_overview(match_id: str) -> dict[str, Any]:
     match = await database.fetch_one(select(M).where(M.c.match_id == match_id))
     if not match:
         raise HTTPException(404, "Nie znaleziono meczu")
-    details_pending = await ensure_details(match)
+    fresh = (await freshness_inputs([str(match_id)])).get(str(match_id))
+    details_pending = await ensure_details(match, fresh)
     if not details_pending:
         match = await database.fetch_one(select(M).where(M.c.match_id == match_id)) or match
     m = RP.clean_match_officials({k: v for k, v in _dict(match).items() if k not in {"source_hash", "source_json"}})
@@ -839,6 +843,35 @@ async def match_overview(match_id: str) -> dict[str, Any]:
             if it.get("side") in ("home", "away"):
                 it["side"] = "away" if it["side"] == "home" else "home"
         sums = {"home": sums["away"], "away": sums["home"]}
+    # Protokół ZPRP niepełny (sekretarz jeszcze wysyła albo portal nie zdążył pobrać):
+    # strona bez składu w ZPRP bierze numery i statystyki z protokołu elektronicznego,
+    # nazwiska wyłącznie z publicznego ZPRP (proel_lineup_rules). Komplet w ZPRP = tylko ZPRP.
+    # Wynik WYŁĄCZNIE z ZPRP (wiersz z bazy): karta może mieć już wynik z ProEla (`score_source`).
+    zs_h, zs_a = match["score_home"], match["score_away"]
+    complete = lineups_complete(len(lineups["home"]), len(lineups["away"]), zs_h, zs_a, sums["home"], sums["away"])
+    fallback = None if complete else await proel_fallback_for(m)
+    sources = PL.choose_sources(lineups, fallback["lineups"] if fallback else None, complete)
+    zprp_players = [p for side_list in lineups.values() for p in side_list]
+    zprp_staff = list(staff_items)
+    if fallback:
+        for key in PL.SIDES:
+            if sources[key] == "proel":
+                lineups[key] = fallback["lineups"][key]
+                staff_items = [it for it in staff_items if it.get("side") != key] + [
+                    it for it in fallback["staff"] if it.get("side") == key]
+        sums = {k: sum(int(p.get("goals") or 0) for p in v) for k, v in lineups.items()}
+    lineups_score = None
+    if zs_h is None or zs_a is None:
+        # Ten sam wynik co karta meczu (enrich: `score_source == "proel"`), a gdy jej zapas nie zadziałał - z protokołu tutaj.
+        if m.get("score_source") == "proel" and sc_h is not None and sc_a is not None:
+            lineups_score = {"home": int(sc_h), "away": int(sc_a)}
+        elif fallback and fallback.get("score"):
+            lineups_score = fallback["score"]
+    goals_h, goals_a = (lineups_score["home"], lineups_score["away"]) if lineups_score else (sc_h, sc_a)
+    hot = not complete and in_hot_window(
+        match_moment(m.get("played_at"), m.get("scheduled_at")), TP.utc_now(), (fresh or {}).get("proel_done_at"),
+        TP.has_kickoff_time(m.get("played_at") or m.get("scheduled_at")),
+    )
     # Dotychczasowe spotkania tych drużyn (po klubach - id drużyn zmieniają się z sezonem).
     h2h_rows = []
     if m.get("home_club_id") and m.get("away_club_id"):
@@ -868,7 +901,13 @@ async def match_overview(match_id: str) -> dict[str, Any]:
     standing = [r for r in await _standing_rows(team_ids, m.get("season_id")) if r["competition_id"] == m.get("competition_id")]
     officials = RP.match_officials(m)
     status = _status(m)
-    m["times_source"] = await attach_protocol_times(m, [p for side_list in lineups.values() for p in side_list], staff_items)
+    # Czasy kar z protokołu BAZA tylko dla wierszy ZPRP - skład z ProEla ma je już wpisane.
+    m["times_source"] = await attach_protocol_times(
+        m, [p for p in zprp_players if p.get("side") in sources and sources[p["side"]] != "proel"],
+        [it for it in zprp_staff if sources.get(it.get("side")) != "proel"],
+    )
+    if fallback and "proel" in sources.values():
+        m["times_source"] = m["times_source"] or "baza_protocol"
     return {
         "match": m,
         "status": status,
@@ -878,7 +917,14 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         "officials": officials,
         "lineups": lineups,
         # False = źródło nie podało bramek zawodników (front pokazuje "brak danych", nie 0).
-        "lineups_goals_known": MR.goals_known(sums["home"], sums["away"], sc_h, sc_a),
+        "lineups_goals_known": MR.goals_known(sums["home"], sums["away"], goals_h, goals_a),
+        # Skład z protokołu elektronicznego, póki ZPRP go nie opublikuje (na stronę: zprp | proel | null).
+        "lineups_source": sources,
+        "lineups_complete": complete,
+        # True = mecz świeżo po syrenie, protokół ZPRP niepełny - serwer dociąga go co kilka minut.
+        "lineups_refresh": bool(hot),
+        # Wynik z zakończonego protokołu ProEl, gdy ZPRP jeszcze go nie podał (tylko do sum składów).
+        "lineups_score": lineups_score,
         "staff": staff_items,
         "head_to_head": await _cards(h2h_rows),
         "standings": standing,
@@ -944,6 +990,11 @@ async def _schedule_payload(competition, rounds, matchdays, cards, team_id) -> d
             day_index[did]["matches"].append(card)
         else:
             unassigned.append(card)
+    for day in day_index.values():
+        # W dniu: mecze z godziną przed „do ustalenia" (godzina z ProEla mogła dojść na karcie).
+        day["matches"].sort(key=lambda c: TP.kickoff_sort_key(c.get("scheduled_at")))
+        # „Kolejka 8" zamiast „Seria 8", zakres dat i liczniki (pola addytywne, surowe zostają).
+        ROUNDS.decorate_matchday(day, day["matches"])
     out_rounds = []
     for r in rounds:
         days = [d for d in days_by_round.get(r["round_id"], []) if d["matches"] or not team_id]

@@ -193,6 +193,20 @@ def _as_dict(row: Any) -> Dict[str, Any]:
     return dict(row) if row is not None else {}
 
 
+def _kick_public_details(zprp_match_id: Any, previous: Optional[str], final: Optional[str]) -> None:
+    """Koniec meczu w ProElu: portal publiczny dociąga protokół z ZPRP w tle (nigdy nie rzuca).
+
+    Bez tego skład na stronie meczu czekał na cykl synchronizacji - patrz
+    `app/zprp_public/ondemand.py` (kick_on_status).
+    """
+    try:
+        from app.zprp_public.ondemand import kick_on_status
+
+        kick_on_status(zprp_match_id, previous, final)
+    except Exception:
+        pass
+
+
 class _MatchIdConflict(Exception):
     """Sygnał z wnętrza transakcji: blob opisuje inny mecz niż ten pod numerem.
 
@@ -1465,6 +1479,8 @@ async def create_proel_match(
                 writer_install=str(x_installation_id or "").strip(),
             )
 
+    if not is_training_key(req.match_number):
+        _kick_public_details(zprp_id, None, new_status)
     await log_match_event(
         match_number=req.match_number,
         event="match.created",
@@ -2105,6 +2121,8 @@ async def update_proel_match(
                 app_version=x_app_version,
                 ip=_client_ip(request, x_forwarded_for),
             )
+        if not is_training_key(match_number):
+            _kick_public_details(incoming_id or known_id, current_status, final_status)
 
     await journal_absorbed(
         match_number,

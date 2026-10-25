@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from app.time_pl import has_kickoff_time, to_warsaw_naive, warsaw_to_utc
+from app.zprp_public.round_rules import card_matchday_label
 
 WARSAW = ZoneInfo("Europe/Warsaw")
 
@@ -135,6 +136,9 @@ def apply_match_extras(
     if "scheduled_at" in item:
         # 00:00 / sam dzień ze ZPRP = godzina do ustalenia (klient: nie "00:00", nie start o północy).
         item["kickoff_time_known"] = has_kickoff_time(item.get("scheduled_at"))
+    if "matchday_name" in item:
+        # „Seria 8" (Superliga) i „8. kolejka" -> „Kolejka 8"; surowe matchday_name zostaje.
+        item["matchday_label"] = card_matchday_label(item.get("matchday_name"))
     return item
 
 

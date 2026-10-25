@@ -41,6 +41,7 @@ from app import time_pl as TP
 from app.standings_refresh import apply_provisional
 from app.zprp_public import corrections, match_rules as MR, portal_rules as R, referee_stats as RS
 from app.zprp_public import referee_placeholder as RP
+from app.zprp_public import round_rules as ROUNDS
 from app.zprp_public.api import _dict
 from app.zprp_public import geocode
 from app.zprp_public.enrich import seasons_info
@@ -831,7 +832,10 @@ async def round_review(competition_id: str, round: str) -> dict[str, Any]:  # no
                     "club_id": club_id, "club_logo_url": (lookup.get(club_id) or {}).get("logo_url"),
                     "match_id": d["match_id"], "goals": d["goals"], "penalty_goals": d["penalty_goals"],
                     "rule": "najwięcej bramek w kolejce"}
-    return {"competition_id": competition_id, "round": {k: target[k] for k in ("matchday_id", "number", "name", "round_name")},
+    day = ROUNDS.decorate_matchday({k: target[k] for k in ("matchday_id", "number", "name", "round_name", "starts_on", "ends_on")}, results)
+    return {"competition_id": competition_id,
+            "round": {k: day.get(k) for k in ("matchday_id", "number", "name", "round_name", "label", "date_from", "date_to",
+                                               "matches_played", "matches_total")},
             "results": results, "table_moves": moves, "player_of_round": potr}
 
 

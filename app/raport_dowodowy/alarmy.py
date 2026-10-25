@@ -147,6 +147,14 @@ def alarmy_meczu(zrzut: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _trwanie(s: int) -> str:
+    """„10 min 35 s", „2 h 5 min", „9 dni 23 h" - kara zdjęta po wznowieniu
+    meczu sprzed tygodnia nie może stać w protokole „14349 min 8 s"."""
+    if s >= 86400:
+        dni, h = s // 86400, (s % 86400) // 3600
+        return f"{dni} {'dzień' if dni == 1 else 'dni'}" + (f" {h} h" if h else "")
+    if s >= 3600:
+        m = (s % 3600) // 60
+        return f"{s // 3600} h" + (f" {m} min" if m else "")
     return f"{s // 60} min {s % 60} s" if s >= 60 else f"{s} s"
 
 

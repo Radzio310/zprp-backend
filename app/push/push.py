@@ -439,7 +439,17 @@ async def list_admin_alerts(installation_id: str, limit: int = 100):
         .order_by(admin_alert_notifications.c.created_at.desc())
         .limit(limit)
     )
-    return {"items": [dict(row) for row in rows]}
+    items = [dict(row) for row in rows]
+    # Podejrzana zmiana w meczu testowym albo wpisanym ręcznie („GG") nie
+    # obchodzi administratora (decyzja 24.10.2026) - także wpisy sprzed reguły.
+    alarmy = {i.get("reference") for i in items if i.get("kind") == "proel_suspicious"}
+    if alarmy:
+        from app.proel_alarm_scan import oficjalne_klucze
+
+        oficjalne = await oficjalne_klucze(alarmy)
+        items = [i for i in items
+                 if i.get("kind") != "proel_suspicious" or str(i.get("reference") or "").strip() in oficjalne]
+    return {"items": items}
 
 
 @router.get("/match-monitor/status")
