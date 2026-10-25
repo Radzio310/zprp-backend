@@ -34,7 +34,9 @@ async def build_report(st: S.Store, who: S.Who, exam_id: str, now: Optional[date
         S.attempts_list(st, who, exam_id), S.exam_stats(st, who, exam_id), S.missing(st, who, exam_id),
         S.load_bank(st, exam["bank_version"]))
     attempts, missing = listed["attempts"], missed["missing"]
-    photos = await _photos(st, [cut] if cut else S._exam_provinces(exam), {a["judge_id"] for a in attempts})
+    # Zdjęcia także dla nieobecnych - kartoteka Zdających pokazuje twarze wszystkich zaproszonych.
+    photos = await _photos(st, [cut] if cut else S._exam_provinces(exam),
+                           {a["judge_id"] for a in attempts} | {S._s(m.get("judge_id")) for m in missing})
 
     questions = []
     for q in stats["questions"]:
@@ -74,7 +76,11 @@ async def build_report(st: S.Store, who: S.Who, exam_id: str, now: Optional[date
     if cut:
         view.update(can_manage=False, read_only=True, cut_province=cut)
     summary = R.summary(attempts, len(missing), pass_percent)
-    summary["web_people"] = await _web_people(st, exam_id, {a["judge_id"] for a in attempts})
+    web = await _web_judges(st, exam_id, {a["judge_id"] for a in attempts})
+    summary["web_people"] = None if web is None else len(web)
+    from app import exam_results_actions as A
+
+    reminders = await A.reminder_status(st, exam_id)
     return {
         "exam": view,
         "generated_at": now.isoformat(),
@@ -87,17 +93,21 @@ async def build_report(st: S.Store, who: S.Who, exam_id: str, now: Optional[date
         "ranking": R.ranking(attempts),
         "missing": missing,
         "attempts": attempts,
-        #: Zdjęcia sędziów z listy okręgu (`province_judges.photo_url`) - podium i arkusze Areny.
+        #: Zdjęcia sędziów z listy okręgu (`province_judges.photo_url`) - podium, rozkład, kartoteka.
         "photos": photos,
+        #: Numery osób, które pisały na komputerze (filtr Zdających); None = nie umiemy policzyć.
+        "web_judges": None if web is None else sorted(web),
+        #: Ostatnie ręczne przypomnienie komisji (licznik przy „Przypomnij niepiszącym").
+        "reminders": reminders,
     }
 
 
-async def _web_people(st: S.Store, exam_id: str, judge_ids: set) -> Optional[int]:
-    """Ilu zdających pisało na komputerze (sesja `exam_web_sessions` w tym egzaminie).
+async def _web_judges(st: S.Store, exam_id: str, judge_ids: set) -> Optional[set]:
+    """Kto pisał na komputerze (sesja `exam_web_sessions` w tym egzaminie).
     Tylko osoby z podejściem w raporcie (komisja okręgu nie liczy cudzych). Brak tabeli
-    albo błąd odczytu = None - pasek Areny pokaże wtedy myślnik, raport nie pada."""
+    albo błąd odczytu = None - pasek liczb pokaże wtedy myślnik, raport nie pada."""
     if not judge_ids:
-        return 0
+        return set()
     try:
         from sqlalchemy import MetaData
 
@@ -107,7 +117,7 @@ async def _web_people(st: S.Store, exam_id: str, judge_ids: set) -> Optional[int
         rows = await st.database.fetch_all(select(ws.c.judge_id).where(ws.c.exam_id == exam_id).distinct())
     except Exception:
         return None
-    return len({S._s(r["judge_id"]) for r in rows} & {S._s(j) for j in judge_ids})
+    return {S._s(r["judge_id"]) for r in rows} & {S._s(j) for j in judge_ids}
 
 
 async def _photos(st: S.Store, provinces: List[str], judge_ids: set) -> Dict[str, str]:

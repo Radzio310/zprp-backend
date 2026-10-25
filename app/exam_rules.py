@@ -490,6 +490,8 @@ def clean_config(raw: Mapping[str, Any], *, template: Any = None) -> Dict[str, A
         "reminders_hours": reminders,
         "results_push": bool(merged.get("results_push")),
         "anti": anti,
+        #: Kolejne podejścia dane przez komisję (numer sędziego -> ile ponad limit), 25.10.2026.
+        "extra_attempts": clean_extra_attempts(merged.get("extra_attempts")),
     }
 
 
@@ -888,8 +890,10 @@ def start_refusal(
     config: Mapping[str, Any],
     now: datetime,
     attempts: Sequence[Mapping[str, Any]],
+    extra: int = 0,
 ) -> Optional[ExamError]:
-    """Czy wolno zacząć NOWE podejście. Zwraca błąd do rzucenia albo None."""
+    """Czy wolno zacząć NOWE podejście. Zwraca błąd do rzucenia albo None.
+    `extra` = podejścia dane temu sędziemu przez komisję ponad limit egzaminu."""
     start = parse_time(config.get("window_start"))
     end = parse_time(config.get("window_end"))
     if start and now < start:
@@ -899,13 +903,46 @@ def start_refusal(
         return ExamError("EXAM_CLOSED", "Okno egzaminu jest już zamknięte, nie można zacząć podejścia.", 409,
                          {"closed_at": end.isoformat()})
     done = [a for a in attempts if a.get("status") != "in_progress"]
-    if len(attempts) >= int(config.get("max_attempts") or 1):
-        return ExamError("EXAM_NO_ATTEMPTS", f"Wykorzystano wszystkie podejścia ({config.get('max_attempts')}).", 409)
-    if done and config.get("retake") == "only_failed":
+    limit = int(config.get("max_attempts") or 1) + max(0, int(extra or 0))
+    if len(attempts) >= limit:
+        return ExamError("EXAM_NO_ATTEMPTS", f"Wykorzystano wszystkie podejścia ({limit}).", 409)
+    # Podejście dane przez komisję jest świadomą decyzją - zasada „tylko po niezaliczeniu" go nie blokuje.
+    if done and config.get("retake") == "only_failed" and not (extra and len(attempts) >= int(config.get("max_attempts") or 1)):
         last = sorted(done, key=lambda a: a.get("attempt_no") or 0)[-1]
         if (last.get("score") or {}).get("passed"):
             return ExamError("EXAM_ALREADY_PASSED", "Egzamin już zdany - ponowne podejście przysługuje tylko po niezaliczeniu.", 409)
     return None
+
+
+MAX_EXTRA_ATTEMPTS = 5
+
+
+def clean_extra_attempts(raw: Any) -> Dict[str, int]:
+    """`{numer: ile}` - tylko dodatnie liczby całkowite, najwyżej MAX_EXTRA_ATTEMPTS na osobę."""
+    out: Dict[str, int] = {}
+    if not isinstance(raw, Mapping):
+        return out
+    for jid, n in raw.items():
+        try:
+            v = int(n)
+        except (TypeError, ValueError):
+            continue
+        key = _s(jid)
+        if key and v > 0:
+            out[key] = min(MAX_EXTRA_ATTEMPTS, v)
+    return out
+
+
+def extra_attempts_for(config: Mapping[str, Any], judge_id: Any) -> int:
+    return int(clean_extra_attempts(config.get("extra_attempts")).get(_s(judge_id), 0))
+
+
+def integrity_signal(event: Mapping[str, Any]) -> Optional[Tuple[str, Optional[str]]]:
+    """(rodzaj, flaga) zdarzenia, które liczy się do wskaźnika rzetelności; inne = None."""
+    kind = _s(event.get("kind"))
+    detail = event.get("detail") if isinstance(event.get("detail"), Mapping) else {}
+    flag = _s(detail.get("flag")) if kind == "time_flag" else ""
+    return (kind, flag or None) if (kind, flag) in _INTEGRITY_KEY_OF else None
 
 
 def finish_attempt(attempt: Dict[str, Any], at: datetime, reason: str) -> None:

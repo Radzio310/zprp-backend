@@ -8,6 +8,10 @@ Egzamin z przepisów - wyniki komisji i eksport (etap 4, 16.10.2026). Trasy cien
                                                (`background: true` -> zadanie z postępem)
   GET  /exam-exports/jobs/{job_id}             postęp zadania (tylko zlecający)
   GET  /exam-exports/files/{token}             plik (bez logowania - token jest sekretem, 30 min)
+  GET  /exams/{id}/questions/{qid}/answers     kto jak odpowiedział na pytanie
+  GET  /exams/{id}/signals                     sygnały rzetelności z czasem (kto, co, kiedy)
+  POST /exams/{id}/remind                      przypomnienie push do niepiszących (okno otwarte)
+  POST /exams/{id}/results/{judge_id}/extra-attempt  kolejne podejście ponad limit
 
 Uprawnienia jak w komisji (`_managed_exam`): krajowy: admin (całość) albo komisja/Teach Master
 okręgu (odczyt przycięty do jego okręgu, bez unieważniania); okręgowy admin / komisja TEGO okręgu / Teach Master. Kontrakt: BAZA/docs/egzamin-api.md.
@@ -58,6 +62,34 @@ async def report(exam_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
     from app import exam_report_service as RS
 
     return await _run(RS.build_report(_store(), who, exam_id))
+
+
+@router.get("/exams/{exam_id}/questions/{qid}/answers", summary="Kto jak odpowiedział na pytanie (zakończone arkusze)")
+async def question_answers(exam_id: str, qid: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
+    from app import exam_results_actions as A
+
+    return await _run(A.question_answers(_store(), who, exam_id, qid))
+
+
+@router.get("/exams/{exam_id}/signals", summary="Sygnały rzetelności z czasem: kto, co, kiedy")
+async def signals(exam_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
+    from app import exam_results_actions as A
+
+    return await _run(A.signals(_store(), who, exam_id))
+
+
+@router.post("/exams/{exam_id}/remind", summary="Przypomnij niepiszącym (push, tylko gdy egzamin trwa)")
+async def remind(exam_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
+    from app import exam_results_actions as A
+
+    return await _run(A.remind_missing(_store(), who, exam_id))
+
+
+@router.post("/exams/{exam_id}/results/{judge_id}/extra-attempt", summary="Kolejne podejście dla sędziego ponad limit egzaminu")
+async def extra_attempt(exam_id: str, judge_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
+    from app import exam_results_actions as A
+
+    return await _run(A.grant_attempt(_store(), who, exam_id, judge_id))
 
 
 @router.get("/exams/{exam_id}/questions/{qid}/void-preview", summary="Skutki unieważnienia pytania (drop i credit)")

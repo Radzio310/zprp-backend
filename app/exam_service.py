@@ -533,7 +533,7 @@ async def list_for_judge(st: Store, who: Who, now: Optional[datetime] = None) ->
         view = exam_view(exam, now, full=False)
         mine_list = sorted(attempts.get(exam["id"], []), key=lambda a: a["attempt_no"])
         view["my_attempts"] = [_attempt_summary(exam["config"], a, now) for a in mine_list]
-        view["attempts_left"] = max(0, exam["config"]["max_attempts"] - len(mine_list))
+        view["attempts_left"] = max(0, exam["config"]["max_attempts"] + X.extra_attempts_for(exam["config"], who.judge_id) - len(mine_list))
         items.append(view)
     return {"exams": items, "server_now": now.isoformat()}
 
@@ -921,7 +921,7 @@ async def start_attempt(st: Store, who: Who, exam_id: str, body: Mapping[str, An
     attempts = await _my_attempts(st, exam_id, who.judge_id)
     running = next((a for a in attempts if a["status"] == "in_progress"), None)
     if running is None:
-        refusal = X.start_refusal(config, now, attempts)
+        refusal = X.start_refusal(config, now, attempts, X.extra_attempts_for(config, who.judge_id))
         if refusal:
             raise refusal
         if config["anti"]["room_code"] and not X.room_code_ok(st.secret, exam_id, body.get("room_code"), now):

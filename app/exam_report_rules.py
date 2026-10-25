@@ -468,6 +468,10 @@ def clean_export_options(raw: Mapping[str, Any], *, national: bool) -> Dict[str,
         "provinces": sorted({str(p) for p in provinces if str(p).strip()}),
         "sort": _choice(people_raw, "sort", PEOPLE_SORTS, "place",
                         "Sortowanie: miejsce, nazwisko, wynik od najniższego, rzetelność, okręg albo czas pisania."),
+
+        #: Wybrani zdający (np. arkusz jednej osoby z ekranu wyników); puste = wszyscy.
+        "judge_ids": sorted({str(j).strip() for j in (people_raw.get("judge_ids") or []) if str(j).strip()})[:500]
+        if isinstance(people_raw.get("judge_ids"), (list, tuple)) else [],
     }
 
     q_raw = _as_dict(raw.get("questions"), "Filtr pytań")
@@ -568,8 +572,11 @@ def apply_people(rows: Sequence[Mapping[str, Any]], people: Optional[Mapping[str
     lo = float(people.get("min_percent") if people.get("min_percent") is not None else 0)
     hi = float(people.get("max_percent") if people.get("max_percent") is not None else 100)
     provinces = {province_key(p) for p in people.get("provinces") or []}
+    only = {str(j) for j in people.get("judge_ids") or []}
     out: List[Dict[str, Any]] = []
     for r in rows:
+        if only and str(r.get("judge_id")) not in only:
+            continue
         if flags == "only" and not _flagged(r):
             continue
         if flags == "none" and _flagged(r):
