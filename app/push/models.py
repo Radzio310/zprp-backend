@@ -8,6 +8,8 @@ class PushRegisterRequest(BaseModel):
     platform: Optional[str] = None
     app_variant: Optional[str] = None
     app_id: Optional[str] = None
+    # Wersja aplikacji; starsze APK nie wysyłają, wtedy zostaje None (= stara).
+    app_version: Optional[str] = None
     # Kto jest zalogowany na tym urządzeniu. Starsze wersje aplikacji tego nie
     # wysyłają — wtedy zostaje None i push kierowany po judge_id ich pominie.
     judge_id: Optional[str] = None
@@ -19,6 +21,7 @@ class PushRegisterRequest(BaseModel):
 
 class PushIdentityRequest(BaseModel):
     installation_id: str
+    app_version: Optional[str] = None
     judge_id: Optional[str] = None
     province: Optional[str] = None
     notification_prefs: Dict[str, Any] = Field(default_factory=dict)

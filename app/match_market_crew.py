@@ -18,7 +18,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import and_, func, insert, select, update
 
@@ -42,7 +42,11 @@ from app.match_market import (
     _spawn_background,
     market_actor,
 )
-from app.match_market_access import may_approve
+from app.client_version import CREW_MARKET_UPDATE_MESSAGE, MIN_CREW_MARKET_VERSION, supports_crew_market
+from app.deps import get_jwt_payload
+from app.match_market_access import may_approve, normalize_province
+from app.province_panel_access import PANEL_ASSIGNMENTS
+from app.province_panel_guard import ensure_panel_write
 from app.match_market_rules import slots_held_by, state_dict
 from app.settlement_province import spellings
 
@@ -237,6 +241,68 @@ def _market_change_id(claim_id: Any) -> str:
     return f"market-{claim_id}"
 
 
+# ─────────────────── kto zarządza ofertami: sędzia albo panel ───────────────────
+
+
+class PanelActor(Actor):
+    """Konto z panelu Obsady w BAZA_web (token organizacji bez numeru sędziego).
+
+    Uprawnienie to dokładnie to, co chroni zapis w Obsadzie: konto VIP okręgu z
+    uprawnieniem Obsady. Województwo sprawdza `_require_manager` przy KAŻDEJ
+    operacji, bo przy trasach z numerem oferty pochodzi ono z oferty.
+    """
+
+    panel = True
+
+    def __init__(self, payload: Dict[str, Any]):
+        super().__init__(payload, None, False)
+        login = _s(payload.get("sub"))
+        self.payload = payload
+        self.judge_id = f"vip:{login}" if login else ""
+        self.full_name = login
+
+
+def _refuse_old_client(request: Request) -> None:
+    """Aplikacja zgłaszająca wersję poniżej minimalnej dostaje wyjaśnienie.
+
+    Brak nagłówka przechodzi: panel BAZA_web go nie wysyła, a stara aplikacja i
+    tak nie zna tych tras (nie zobaczy oferty, nie dostanie pusha).
+    """
+    sent = _s(request.headers.get("x-app-version"))
+    if sent and not supports_crew_market(sent):
+        raise HTTPException(426, CREW_MARKET_UPDATE_MESSAGE)
+
+
+async def market_actor_v(request: Request, payload: Dict[str, Any] = Depends(get_jwt_payload)) -> Actor:
+    _refuse_old_client(request)
+    return await market_actor(payload)
+
+
+async def manager_actor(request: Request, payload: Dict[str, Any] = Depends(get_jwt_payload)) -> Actor:
+    if _s(payload.get("judge_id")):
+        _refuse_old_client(request)
+        return await market_actor(payload)
+    return PanelActor(payload)
+
+
+def _key(actor: Actor, requested: Optional[str]) -> str:
+    if getattr(actor, "panel", False):
+        key = normalize_province(requested)
+        if not key:
+            raise HTTPException(400, "Podaj województwo (parametr province) - to konto nie jest przypisane do żadnego okręgu.")
+        return key
+    return _market_province(actor, requested)
+
+
+async def _require_manager(actor: Actor, province: str) -> None:
+    if getattr(actor, "panel", False):
+        await ensure_panel_write(
+            actor.payload, province=province, panel=PANEL_ASSIGNMENTS, action="Giełda ofert obsadowego"
+        )
+        return
+    await _require_approver(actor, province)
+
+
 # ───────────────────────────── push ─────────────────────────────
 
 
@@ -260,7 +326,8 @@ async def _push(judge_ids: List[str], text: tuple, offer: Dict[str, Any], *, bro
         from app.push.push import send_push_to_judges_report
 
         await send_push_to_judges_report(
-            targets, text[0], text[1], _push_data(offer), app_variant="baza", market_broadcast=broadcast
+            targets, text[0], text[1], _push_data(offer), app_variant="baza", market_broadcast=broadcast,
+            min_app_version=MIN_CREW_MARKET_VERSION,
         )
     except Exception:  # noqa: BLE001 - powiadomienie nie wywraca operacji
         logger.warning("giełda obsadowego: powiadomienie nieudane", exc_info=True)
@@ -389,6 +456,9 @@ def _offer_view(
 
 async def _viewer(actor: Actor, province: str):
     cfg = await _config(province)
+    if getattr(actor, "panel", False):
+        await _require_manager(actor, province)
+        return cfg, True
     allowed = cfg["approver_badges"]
     can_manage = may_approve(
         is_admin=actor.is_admin, province=province, judge_province=actor.province,
@@ -426,11 +496,11 @@ def _visibility_refusal(actor: Actor, offer: Dict[str, Any], can_manage: bool, m
 async def suggest(
     matchId: str = Query(...),
     province: Optional[str] = Query(None),
-    actor: Actor = Depends(market_actor),
+    actor: Actor = Depends(manager_actor),
 ) -> Dict[str, Any]:
-    key = _market_province(actor, province)
+    key = _key(actor, province)
     await _require_enabled(key)
-    await _require_approver(actor, key)
+    await _require_manager(actor, key)
     ctx = await _match_context(key, matchId)
     access = ctx["access"]
     editable = [s for s in access["editable_slots"] if s in R.CREW_SLOTS]
@@ -492,10 +562,10 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
 
 
 @router.post("", status_code=201, summary="Wystaw mecz jako ofertę obsadowego")
-async def create_offer(body: CreateRequest, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
-    key = _market_province(actor, body.province)
+async def create_offer(body: CreateRequest, actor: Actor = Depends(manager_actor)) -> Dict[str, Any]:
+    key = _key(actor, body.province)
     await _require_enabled(key)
-    await _require_approver(actor, key)
+    await _require_manager(actor, key)
     ctx = await _match_context(key, body.matchId)
     if not ctx["access"]["manual"]:
         raise HTTPException(403, "Okręg nie obsadza tego meczu (obsadę ustala inny organizator), więc nie można go wystawić.")
@@ -550,9 +620,9 @@ async def create_offer(body: CreateRequest, actor: Actor = Depends(market_actor)
 async def list_offers(
     scope: str = Query("open", description="open | all (all: także zamknięte z ostatnich 30 dni)"),
     province: Optional[str] = Query(None),
-    actor: Actor = Depends(market_actor),
+    actor: Actor = Depends(manager_actor),
 ) -> Dict[str, Any]:
-    key = _market_province(actor, province)
+    key = _key(actor, province)
     await _require_enabled(key)
     await _sweep(key)
     cfg, can_manage = await _viewer(actor, key)
@@ -612,7 +682,7 @@ async def _detail(offer_id: int, actor: Actor) -> Dict[str, Any]:
 
 
 @router.get("/{offer_id}", summary="Oferta w całości (dla obsadowego także lista zgłoszeń wg roli)")
-async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
+async def get_offer(offer_id: int, actor: Actor = Depends(manager_actor)) -> Dict[str, Any]:
     return await _detail(offer_id, actor)
 
 
@@ -765,7 +835,7 @@ class ClaimRequest(BaseModel):
 
 
 @router.post("/{offer_id}/claims", status_code=201, summary="Zgłoś się na ofertę obsadowego")
-async def create_claim(offer_id: int, body: ClaimRequest, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
+async def create_claim(offer_id: int, body: ClaimRequest, actor: Actor = Depends(market_actor_v)) -> Dict[str, Any]:
     offer = await _load_offer(offer_id)
     key = offer["province"]
     if not actor.known or actor.province != key:
@@ -826,7 +896,7 @@ async def create_claim(offer_id: int, body: ClaimRequest, actor: Actor = Depends
 
 
 @router.delete("/{offer_id}/claims/me", summary="Wycofaj swoje zgłoszenie")
-async def withdraw_claim(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
+async def withdraw_claim(offer_id: int, actor: Actor = Depends(market_actor_v)) -> Dict[str, Any]:
     await _load_offer(offer_id)
     claim = await database.fetch_one(
         select(claims_t).where(and_(claims_t.c.offer_id == offer_id, claims_t.c.judge_id == actor.judge_id))
@@ -888,10 +958,10 @@ async def _assign_one(offer: Dict[str, Any], claim: Dict[str, Any], slot: str, a
 
 
 @router.post("/{offer_id}/assign", summary="Przydziel zgłoszonego do gniazda (wpis do kolejki Obsady)")
-async def assign(offer_id: int, body: AssignRequest, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
+async def assign(offer_id: int, body: AssignRequest, actor: Actor = Depends(manager_actor)) -> Dict[str, Any]:
     offer = await _load_offer(offer_id)
     key = offer["province"]
-    await _require_approver(actor, key)
+    await _require_manager(actor, key)
     if _s(offer["status"]) != R.OPEN:
         raise HTTPException(409, "Ta oferta jest już zamknięta, więc nie da się w niej nikogo przydzielić.")
     claims = await _claims_of(offer_id)
@@ -940,10 +1010,10 @@ async def _maybe_fill(offer: Dict[str, Any], actor: Actor) -> None:
 
 
 @router.post("/{offer_id}/claims/{claim_id}/unassign", summary="Cofnij przydział")
-async def unassign(offer_id: int, claim_id: int, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
+async def unassign(offer_id: int, claim_id: int, actor: Actor = Depends(manager_actor)) -> Dict[str, Any]:
     offer = await _load_offer(offer_id)
     key = offer["province"]
-    await _require_approver(actor, key)
+    await _require_manager(actor, key)
     claims = await _claims_of(offer_id)
     claim = next((c for c in claims if c["id"] == claim_id), None)
     if claim is None or _s(claim["status"]) != R.ASSIGNED:
@@ -1004,9 +1074,9 @@ async def unassign(offer_id: int, claim_id: int, actor: Actor = Depends(market_a
 
 
 @router.delete("/{offer_id}", summary="Wycofaj ofertę (obsadowy)")
-async def withdraw_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
+async def withdraw_offer(offer_id: int, actor: Actor = Depends(manager_actor)) -> Dict[str, Any]:
     offer = await _load_offer(offer_id)
-    await _require_approver(actor, offer["province"])
+    await _require_manager(actor, offer["province"])
     if _s(offer["status"]) not in (R.OPEN, R.FILLED):
         raise HTTPException(409, "Ta oferta jest już zamknięta.")
     claims = await _claims_of(offer_id)

@@ -2410,6 +2410,9 @@ push_tokens = Table(
     # applicationId / bundleIdentifier. `app_variant` jest "baza" zarówno dla
     # wydania sklepowego, jak i DEV, więc nie potrafi ich rozróżnić.
     Column("app_id", String, nullable=True),
+    # Wersja aplikacji (np. "2.1.3"). Brak = starsza aplikacja, która jej nie
+    # wysyła; push dostępny dopiero od nowej wersji (oferty obsadowego) do niej nie trafia.
+    Column("app_version", String, nullable=True),
     # Kto siedzi na tym urządzeniu — potrzebne, żeby wysłać push konkretnemu
     # sędziemu (np. odpowiedź admina na zgłoszenie). Nullable, bo starsze
     # wersje aplikacji nie wysyłają tego pola przy rejestracji tokenu.
@@ -4702,6 +4705,7 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS deleted_by varchar"))
     _conn.execute(text("ALTER TABLE admin_settings ADD COLUMN IF NOT EXISTS allow_dev_pushes boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS app_id varchar"))
+    _conn.execute(text("ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS app_version varchar"))
     _conn.execute(text("ALTER TABLE push_schedules ADD COLUMN IF NOT EXISTS dedupe_key varchar"))
     _conn.execute(
         text(

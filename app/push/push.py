@@ -34,6 +34,9 @@ router = APIRouter(prefix="/push", tags=["push"])
 logger = logging.getLogger("app.push")
 
 
+from app.client_version import version_at_least
+
+
 def _utc_now():
     return datetime.now(timezone.utc)
 
@@ -69,6 +72,7 @@ async def send_push_to_judges_report(
     app_variant: Optional[str] = None,
     market_broadcast: bool = False,
     preference_key: Optional[str] = None,
+    min_app_version: Optional[str] = None,
 ) -> PushDeliveryReport:
     """
     Wysyła push NATYCHMIAST na wszystkie urządzenia podanych sędziów.
@@ -110,6 +114,7 @@ async def send_push_to_judges_report(
                 push_tokens.c.token_type,
                 push_tokens.c.notification_prefs,
                 push_tokens.c.app_id,
+                push_tokens.c.app_version,
             ).where(push_tokens.c.judge_id.in_(ids))
         if app_variant:
             query = query.where(or_(
@@ -140,6 +145,10 @@ async def send_push_to_judges_report(
     muted = 0
     for row in rows:
         if not device_allowed(row, allow_dev):
+            continue
+        # Funkcja dostępna dopiero od wersji X: starsza aplikacja (albo bez
+        # zapisanej wersji) nie umie otworzyć takiego powiadomienia.
+        if min_app_version and not version_at_least(row["app_version"], min_app_version):
             continue
         judge_id = str(row["judge_id"] or "").strip()
         if row["token_type"] != "device_fcm" or not str(row["token"] or "").strip():
@@ -273,6 +282,8 @@ async def register(req: PushRegisterRequest):
                 platform=req.platform,
                 app_variant=req.app_variant,
                 app_id=req.app_id,
+                # Wersji nie kasujemy, gdy żądanie przyjdzie ze starej aplikacji.
+                **({"app_version": req.app_version.strip()} if (req.app_version or "").strip() else {}),
                 # Nie kasujemy zapisanego judge_id, gdy przyjdzie żądanie ze
                 # starszej aplikacji, która tego pola nie zna.
                 **identity_values,
@@ -288,6 +299,7 @@ async def register(req: PushRegisterRequest):
             platform=req.platform,
             app_variant=req.app_variant,
             app_id=req.app_id,
+            app_version=(req.app_version or "").strip() or None,
             judge_id=_clean_judge_id(req.judge_id),
             province=normalize_province(req.province) or None,
             notification_prefs=req.notification_prefs or {},
@@ -308,6 +320,8 @@ async def update_push_identity(req: PushIdentityRequest):
         "province": normalize_province(req.province) or None,
         "updated_at": _utc_now(),
     }
+    if (req.app_version or "").strip():
+        values["app_version"] = req.app_version.strip()
     if req.notification_prefs:
         values["notification_prefs"] = req.notification_prefs
     changed = await database.execute(
