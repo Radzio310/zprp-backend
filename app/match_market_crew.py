@@ -838,8 +838,14 @@ class ClaimRequest(BaseModel):
 async def create_claim(offer_id: int, body: ClaimRequest, actor: Actor = Depends(market_actor_v)) -> Dict[str, Any]:
     offer = await _load_offer(offer_id)
     key = offer["province"]
-    if not actor.known or actor.province != key:
-        raise HTTPException(403, "Ta oferta jest z innego okręgu niż Twój.")
+    # Obsadowy i admin też mogą się zgłosić (swoim numerem sędziego) - bez
+    # filtra odznak, który kieruje ofertę do zwykłych sędziów.
+    _, manager = await _viewer(actor, key)
+    where = R.claim_province_refusal(
+        known=actor.known, judge_province=actor.province, offer_province=key, manager=manager
+    )
+    if where:
+        raise HTTPException(403, where)
     await _require_enabled(key)
     await _sweep(key)
     offer = await _load_offer(offer_id)
@@ -855,6 +861,7 @@ async def create_claim(offer_id: int, body: ClaimRequest, actor: Actor = Depends
         flt=offer["badge_filter"], badges_raw=actor.badges,
         holds_slot_in_match=bool(slots_held_by(offer["match_snapshot"], actor.judge_id, actor.full_name)),
         role_blocked=blocked,
+        manager=manager,
     )
     if refusal:
         raise HTTPException(403, refusal)

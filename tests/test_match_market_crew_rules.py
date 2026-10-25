@@ -97,6 +97,24 @@ def test_odmowa_zgloszenia():
     assert R.claim_refusal(**{**base, "role_blocked": "delegat - nie na boisko"}) == "delegat - nie na boisko"
 
 
+def test_obsadowy_i_admin_moga_sie_zglosic():
+    base = dict(status="open", deadline=MATCH - timedelta(hours=24), match_at=MATCH, now=NOW,
+                flt={"mode": "include", "badges": ["Liga"]}, badges_raw="{}", holds_slot_in_match=False)
+    # Zwykły sędzia bez odznaki - odmowa z wyjaśnieniem; obsadowy przechodzi.
+    assert "odznak" in R.claim_refusal(**base)
+    assert R.claim_refusal(**base, manager=True) is None
+    # Reszta reguł obowiązuje obsadowego tak samo.
+    assert "obsadzie" in R.claim_refusal(**{**base, "holds_slot_in_match": True}, manager=True)
+    assert "zamknięta" in R.claim_refusal(**{**base, "status": "filled"}, manager=True)
+    assert R.claim_refusal(**base, manager=True, role_blocked="delegat") == "delegat"
+    # Okręg: zwykły tylko swój, obsadowy/admin zawsze swoim numerem.
+    gate = dict(known=True, judge_province="śląskie", offer_province="śląskie", manager=False)
+    assert R.claim_province_refusal(**gate) is None
+    assert "innego okręgu" in R.claim_province_refusal(**{**gate, "judge_province": "opolskie"})
+    assert "liście" in R.claim_province_refusal(**{**gate, "known": False})
+    assert R.claim_province_refusal(**{**gate, "known": False, "judge_province": "", "manager": True}) is None
+
+
 def test_partner():
     kw = dict(role="field", partner_id="2", self_id="1", offer_field_slots=2, partner_known=True, partner_passes=True)
     assert R.partner_refusal(**kw) is None

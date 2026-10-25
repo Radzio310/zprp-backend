@@ -252,20 +252,48 @@ def claim_refusal(
     badges_raw: Any,
     holds_slot_in_match: bool,
     role_blocked: Optional[str] = None,
+    manager: bool = False,
 ) -> Optional[str]:
-    """Powód odmowy zgłoszenia albo None. Zawsze zdanie, nigdy cisza."""
+    """Powód odmowy zgłoszenia albo None. Zawsze zdanie, nigdy cisza.
+
+    `manager` - obsadowy okręgu albo administrator. Sam wystawia ofertę, więc
+    filtr odznak (skierowany do zwykłych sędziów) go nie dotyczy; termin,
+    zamknięcie, miejsce w obsadzie i reguły ról - tak jak każdego.
+    """
     if _s(status) != OPEN:
         return "Ta oferta jest już zamknięta."
     if match_at is not None and now >= _utc(match_at):
         return "Ten mecz już się rozpoczął."
     if deadline is not None and now >= _utc(deadline):
         return "Minął termin zgłoszeń do tego meczu."
-    if not passes_filter(badges_raw, flt):
+    if not manager and not passes_filter(badges_raw, flt):
         return "Ta oferta jest ograniczona odznakami, a Ty nie spełniasz warunku. " + filter_sentence(flt)
     if holds_slot_in_match:
         return "Jesteś już w obsadzie tego meczu."
     if role_blocked:
         return role_blocked
+    return None
+
+
+def claim_province_refusal(
+    *,
+    known: bool,
+    judge_province: Any,
+    offer_province: Any,
+    manager: bool,
+) -> Optional[str]:
+    """Czy ten numer sędziego może zgłosić się na ofertę z tego okręgu.
+
+    Zwykły sędzia - tylko we własnym okręgu (z listy sędziów okręgu). Obsadowy
+    i administrator, który może zarządzać ofertą, zgłasza się swoim numerem
+    sędziego także wtedy, gdy na liście okręgu go nie ma (admin z innego okręgu).
+    """
+    if manager:
+        return None
+    if not known:
+        return "Nie ma Cię na liście sędziów okręgu, więc nie możesz zgłosić się na tę ofertę. Zgłoś to administratorowi okręgu."
+    if _s(judge_province) != _s(offer_province):
+        return "Ta oferta jest z innego okręgu niż Twój."
     return None
 
 
