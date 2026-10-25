@@ -204,6 +204,10 @@ async def load_state(ls: LiveStore, session_id: str, now: datetime) -> Dict[str,
     if s["phase"] == "leaderboard" and 0 <= s["q_index"] < s["q_total"]:
         # Ranking po pytaniu: rzutnik pokazuje wyścig od miejsc sprzed tego pytania.
         last_points = {pid: int(a.get("points") or 0) for pid, a in (await _answers_for(ls, session_id, s["q_index"])).items()}
+    streaks: Dict[str, int] = {}
+    if s["phase"] in ("leaderboard", "end") and s["q_index"] >= 0:
+        # Seria trafień (żeton z płomieniem w wyścigu): ile pytań z rzędu, licząc wstecz od bieżącego.
+        streaks = L.streaks_of(await _all_answers(ls, session_id), s["q_index"])
     if s["phase"] != "end" and s["q_index"] + 1 < s["q_total"]:
         # Zapowiedź dla prowadzącego (`session.next`); bank siedzi w pamięci podręcznej.
         next_question = (await S.load_bank(ls.exam, s["bank_version"])).get(s["question_ids"][s["q_index"] + 1])
@@ -211,7 +215,7 @@ async def load_state(ls: LiveStore, session_id: str, now: datetime) -> Dict[str,
         "session": s, "participants": parts, "answers": answers, "question": question, "next_question": next_question,
         "result": S._loads(s.get("result_json"), None) if s["phase"] == "end" else None,
         "links": links_for(s["token"], s.get("projector_token"), s.get("pin")), "server_now": now,
-        "last_points": last_points,
+        "last_points": last_points, "streaks": streaks,
     }
 
 

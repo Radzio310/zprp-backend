@@ -443,20 +443,40 @@ def _previous_places(state: Mapping[str, Any]) -> Dict[str, Dict[str, int]]:
             for r in rank_participants(before)}
 
 
+def streaks_of(answers: Sequence[Mapping[str, Any]], q_index: int) -> Dict[str, int]:
+    """Seria pełnych trafień każdego uczestnika: kolejne pytania (q_index, q_index-1, ...) z ułamkiem 1.
+    Brak odpowiedzi albo odpowiedź niepełna przerywa serię."""
+    hit: Dict[str, Set[int]] = {}
+    for a in answers:
+        if float(a.get("fraction") or 0) >= 1.0:
+            hit.setdefault(str(a["participant_id"]), set()).add(int(a.get("q_index") or 0))
+    out: Dict[str, int] = {}
+    for pid, idx in hit.items():
+        n = 0
+        while (q_index - n) in idx:
+            n += 1
+        if n:
+            out[pid] = n
+    return out
+
+
 def _board(state: Mapping[str, Any], role: str, viewer: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     ranked = rank_participants(state["participants"])
     cfg = state["session"]["config"]["ranking"]
     top = [dict(r) for r in ranked if r["place"] <= cfg["top_n"]][:TOP_ROWS_MAX]
     prev = _previous_places(state)
+    streaks = state.get("streaks") or {}
     for row in top:
         before = prev.get(row["participant_id"]) or {}
         row["key"] = public_key(row["participant_id"])
         row["prev_place"] = before.get("place", row["place"])
         row["prev_score"] = before.get("score", row["score"])
         row["gained"] = before.get("gained", 0)
+        row["streak"] = int(streaks.get(row["participant_id"]) or 0)
     board: Dict[str, Any] = {"mode": cfg["mode"], "top": top, "total_players": len(ranked)}
     if role == "host":
-        board["full"] = [{**r, "key": public_key(r["participant_id"])} for r in ranked[:FULL_RANKING_MAX]]
+        board["full"] = [{**r, "key": public_key(r["participant_id"]), "streak": int(streaks.get(r["participant_id"]) or 0)}
+                         for r in ranked[:FULL_RANKING_MAX]]
     if viewer is not None:
         mine = next((r for r in ranked if r["participant_id"] == viewer["id"]), None)
         board["you"] = ({"place": mine["place"], "score": mine["score"], "name": mine["name"]}
@@ -544,4 +564,9 @@ def view_for(role: str, state: Mapping[str, Any], viewer: Optional[Mapping[str, 
         # Najnowsi na końcu listy: przy tłumie rzutnik pokazuje tych, którzy właśnie wbiegli.
         view["participants"] = [{"key": public_key(p["id"]), "name": p["name"], "kind": p["kind"]}
                                 for p in parts[-LOBBY_NAMES_MAX:]]
+    elif role == "projector" and phase == "question":
+        # Pas żetonów „kto oddał” pod pytaniem: sama obecność odpowiedzi, bez treści i bez poprawności.
+        answered_ids = set(state["answers"])
+        view["participants"] = [{"key": public_key(p["id"]), "name": p["name"], "kind": p["kind"], "answered": p["id"] in answered_ids}
+                                for p in parts[:LOBBY_NAMES_MAX]]
     return view

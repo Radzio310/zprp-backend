@@ -318,3 +318,27 @@ async def test_zmiana_trybu_punktow_tylko_w_lobby(ls):
     await V.control(ls, HOST, sid, "next", T0)
     assert await code_of(ls, V.patch_session(ls, HOST, sid, {"ranking": {"mode": "speed"}}, T0)) == "LIVE_LOCKED"
     await V.patch_session(ls, HOST, sid, {"ranking": {"top_n": 8}}, T0)
+
+
+def test_seria_trafien_liczona_wstecz():
+    rows = [{"participant_id": "a", "q_index": 0, "fraction": 1.0}, {"participant_id": "a", "q_index": 1, "fraction": 1.0},
+            {"participant_id": "b", "q_index": 0, "fraction": 1.0}, {"participant_id": "b", "q_index": 1, "fraction": 0.5},
+            {"participant_id": "c", "q_index": 0, "fraction": 1.0}]
+    assert L.streaks_of(rows, 1) == {"a": 2}
+    assert L.streaks_of(rows, 0) == {"a": 1, "b": 1, "c": 1}
+
+
+async def test_rzutnik_zetony_kto_oddal_i_seria_w_rankingu(ls):
+    sid, _ = await new_session(ls)
+    p = await join_players(ls, sid, 2)
+    await V.control(ls, HOST, sid, "next", T0)
+    await V.submit_answer(ls, sid, p[0]["id"], [CORRECT["q1-1"]], T0 + timedelta(seconds=2))
+    view = L.view_for("projector", await V.load_state(ls, sid, T0), None, T0 + timedelta(seconds=3))
+    flags = {x["name"]: x["answered"] for x in view["participants"]}
+    assert flags == {p[0]["name"]: True, p[1]["name"]: False}
+    assert all("id" not in x and "selected" not in x for x in view["participants"])
+    await V.submit_answer(ls, sid, p[1]["id"], ["d"], T0 + timedelta(seconds=4))  # wszyscy = odsłonięcie
+    state = await V.control(ls, HOST, sid, "next", T0 + timedelta(seconds=6))
+    assert state["session"]["phase"] == "leaderboard"
+    top = {r["name"]: r["streak"] for r in L.view_for("projector", state, None, T0)["leaderboard"]["top"]}
+    assert top == {p[0]["name"]: 1, p[1]["name"]: 0}

@@ -267,7 +267,7 @@ def build_router(deps: LiveDeps) -> APIRouter:
 
     async def projector_view(state: Dict[str, Any], now: datetime) -> Dict[str, Any]:
         """Widok rzutnika + oprawa (herb, barwy, krótki adres) + zdjęcia na koszulkach.
-        Zdjęcia tylko w lobby i rankingu - w pytaniu rzutnik nie pokazuje osób."""
+        Zdjęcia na żetonach: lobby, pas „kto oddał” w pytaniu i ranking."""
         view = L.view_for("projector", state, None, now)
         s = state["session"]
         brand = brand_of(s)
