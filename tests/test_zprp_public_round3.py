@@ -127,6 +127,8 @@ def env(monkeypatch, tmp_path):
     extras = importlib.import_module("app.zprp_public.extras")
     extras.clear_cache()
     importlib.import_module("app.zprp_public.enrich").invalidate()
+    # Korekty trzymaja 30 s pamieci z cudzej bazy (np. po tescie portalu).
+    importlib.import_module("app.zprp_public.corrections").invalidate()
     yield extras, fake.database, {t.name: t for t in list(pub) + list(nat)}
     for name in MODULES:
         sys.modules.pop(name, None)

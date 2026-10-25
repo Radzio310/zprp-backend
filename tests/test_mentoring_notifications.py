@@ -23,7 +23,7 @@ class MentoringNotificationsTests(unittest.IsolatedAsyncioTestCase):
         db.push_tokens = Table("push_tokens", metadata, Column("judge_id", String), Column("app_variant", String))
         db.database = AsyncMock()
         monitor = types.ModuleType("app.province_match_monitor")
-        monitor._prefs_allow = lambda prefs, event: True
+        monitor._prefs_allow = lambda prefs, event, **kwargs: True
         self.modules = patch.dict(sys.modules, {"app.db": db, "app.province_match_monitor": monitor})
         self.modules.start()
         self.addCleanup(self.modules.stop)

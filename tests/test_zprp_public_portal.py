@@ -229,6 +229,7 @@ def test_korekty_nakladane_przy_odczycie_i_wycofywane(portal):
         player = await m.player_overview("p1")
         assert await C.revoke(second["correction_id"], "tester") and not await C.revoke(first["correction_id"], "tester")
         after = await m.club_overview("c1")
+        C.invalidate()   # nie zostawiaj korekt w pamieci dla kolejnych testow
         return club, match, player, after
 
     club, match, player, after = run(portal, go)
