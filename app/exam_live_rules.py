@@ -17,6 +17,8 @@ i zdaniem po polsku.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import random
 import re
 from datetime import datetime
@@ -47,6 +49,30 @@ ACTIVE_TTL_S = 8 * 3600
 LOBBY_NAMES_MAX = 80
 FULL_RANKING_MAX = 400
 TOP_ROWS_MAX = 25
+
+#: Ekran sali i strona uczestnika żyją w BAZA_web (25.10.2026, styl „Hala nocą”). Tylko www:
+#: domena bez www przekierowuje (308), a App Links / Universal Links nie znoszą przekierowań.
+WEB_BASE = os.getenv("EXAM_LIVE_WEB_BASE", "https://www.bazapodreka.app").rstrip("/")
+#: Krótki adres do przepisania z ekranu (bez https i www).
+WEB_SHORT = "bazapodreka.app/sala"
+
+
+def web_join_url(pin: Optional[str]) -> str:
+    """Adres z kodu QR i z linku: `https://www.bazapodreka.app/sala/482913` (bez PIN-u - strona wpisywania)."""
+    digits = clean_pin(pin)
+    return f"{WEB_BASE}/sala/{digits}" if digits else f"{WEB_BASE}/sala"
+
+
+def web_projector_url(projector_token: str) -> str:
+    """Ekran sali (rzutnik) w BAZA_web. Token rzutnika, nie PIN: PIN widzi cała sala."""
+    return f"{WEB_BASE}/sala/ekran/{projector_token}"
+
+
+def public_key(participant_id: Any) -> str:
+    """Stały, jawny klucz osoby dla rzutnika (animacje wbiegania i wyścigu w rankingu).
+    Skrót zamiast numeru uczestnika: z klucza nie da się odpowiadać ani podszyć."""
+    return hashlib.sha1(f"live:{participant_id}".encode("utf-8")).hexdigest()[:12]
+
 
 DEFAULT_LIVE_CONFIG: Dict[str, Any] = {
     "question_time_s": 20,
@@ -408,13 +434,29 @@ def _reveal_block(state: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     return block
 
 
+def _previous_places(state: Mapping[str, Any]) -> Dict[str, Dict[str, int]]:
+    """Miejsca i punkty sprzed bieżącego pytania (wyścig pasków na rzutniku: kto kogo wyprzedził).
+    `last_points` = punkty za pytanie, po którym stoi ranking; bez nich wszyscy stoją w miejscu."""
+    gained = state.get("last_points") or {}
+    before = [{**p, "score": int(p.get("score") or 0) - int(gained.get(p["id"]) or 0)} for p in state["participants"]]
+    return {r["participant_id"]: {"place": r["place"], "score": r["score"], "gained": int(gained.get(r["participant_id"]) or 0)}
+            for r in rank_participants(before)}
+
+
 def _board(state: Mapping[str, Any], role: str, viewer: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     ranked = rank_participants(state["participants"])
     cfg = state["session"]["config"]["ranking"]
     top = [dict(r) for r in ranked if r["place"] <= cfg["top_n"]][:TOP_ROWS_MAX]
+    prev = _previous_places(state)
+    for row in top:
+        before = prev.get(row["participant_id"]) or {}
+        row["key"] = public_key(row["participant_id"])
+        row["prev_place"] = before.get("place", row["place"])
+        row["prev_score"] = before.get("score", row["score"])
+        row["gained"] = before.get("gained", 0)
     board: Dict[str, Any] = {"mode": cfg["mode"], "top": top, "total_players": len(ranked)}
     if role == "host":
-        board["full"] = ranked[:FULL_RANKING_MAX]
+        board["full"] = [{**r, "key": public_key(r["participant_id"])} for r in ranked[:FULL_RANKING_MAX]]
     if viewer is not None:
         mine = next((r for r in ranked if r["participant_id"] == viewer["id"]), None)
         board["you"] = ({"place": mine["place"], "score": mine["score"], "name": mine["name"]}
@@ -432,7 +474,7 @@ def _me_block(state: Mapping[str, Any], viewer: Mapping[str, Any]) -> Dict[str, 
     phase = s["phase"]
     mine = state["answers"].get(viewer["id"])
     block: Dict[str, Any] = {
-        "participant_id": viewer["id"], "name": viewer["name"], "kind": viewer["kind"],
+        "participant_id": viewer["id"], "key": public_key(viewer["id"]), "name": viewer["name"], "kind": viewer["kind"],
         "answered": mine is not None and phase in ("question", "reveal"),
     }
     if mine is not None and phase in ("question", "reveal"):
@@ -494,10 +536,12 @@ def view_for(role: str, state: Mapping[str, Any], viewer: Optional[Mapping[str, 
         answered_ids = set(state["answers"]) if phase in ("question", "reveal") else set()
         ranked = {r["participant_id"]: r for r in rank_participants(parts)}
         view["participants"] = [
-            {"id": p["id"], "name": p["name"], "kind": p["kind"], "answered": p["id"] in answered_ids,
+            {"id": p["id"], "key": public_key(p["id"]), "name": p["name"], "kind": p["kind"], "answered": p["id"] in answered_ids,
              "score": int(p.get("score") or 0),
              "place": ranked[p["id"]]["place"] if phase not in ("lobby", "question") else None}
             for p in parts[:FULL_RANKING_MAX]]
     elif role == "projector" and phase == "lobby":
-        view["participants"] = [{"name": p["name"], "kind": p["kind"]} for p in parts[:LOBBY_NAMES_MAX]]
+        # Najnowsi na końcu listy: przy tłumie rzutnik pokazuje tych, którzy właśnie wbiegli.
+        view["participants"] = [{"key": public_key(p["id"]), "name": p["name"], "kind": p["kind"]}
+                                for p in parts[-LOBBY_NAMES_MAX:]]
     return view

@@ -166,7 +166,8 @@ def test_kod_sesji_tylko_dla_prowadzacego_i_admina(client):
     assert client.get(f"/exam-live/{sid}/qr.json").status_code == 401
     assert err(client.get(f"/exam-live/{sid}/qr.json", headers=h("p1"))) == "LIVE_NOT_HOST"
     data = client.get(f"/exam-live/{sid}/qr.json", headers={**h("host"), "host": "baza.example"}).json()
-    assert data["url"] == f"http://baza.example/exam-live/j/{jtok}" and data["pin"] == v["session"]["pin"]
+    assert data["url"] == f"https://www.bazapodreka.app/sala/{v['session']['pin']}" and data["pin"] == v["session"]["pin"]
+    assert data["join_page"] == "https://www.bazapodreka.app/sala" and data["short"] == "bazapodreka.app/sala"
     assert data["crest_url"] == "/exam-live/assets/img/okregi/slaskie.png" and len(data["modules"]) == data["size"]
     assert client.get(f"/exam-live/{sid}/qr.json", headers=h("admin")).status_code == 200
     svg = client.get(f"/exam-live/{sid}/qr.svg?style=brand", headers=h("host"))
@@ -201,22 +202,21 @@ def test_obraz_relacji_i_plakat(client):
         assert poster.status_code == 200 and poster.content[:4] == b"%PDF"
 
 
-def test_strona_dolaczania_ma_karte_open_graph(client):
+def test_stare_strony_przekierowuja_na_bazapodreka_a_karty_zostaja(client):
     from PIL import Image
 
-    v, _p, jtok = create(client)
+    v, ptok, jtok = create(client)
+    pin = v["session"]["pin"]
     for path in (f"/exam-live/join/{jtok}", f"/exam-live/j/{jtok}"):
-        page = client.get(path, headers={"host": "baza.example"})
-        assert page.status_code == 200 and "script-src 'self'" in page.headers["content-security-policy"]
-        assert f'og:image" content="http://baza.example/exam-live/join/{jtok}/card.png"' in page.text
-        assert "Dołącz: Quiz &lt;b&gt;śląski&lt;/b&gt;" in page.text and "<b>śląski" not in page.text
-        assert v["session"]["pin"] in page.text
-    generic = client.get("/exam-live/join")
-    assert "/exam-live/card.png" in generic.text and "og:title" in generic.text
+        moved = client.get(path, follow_redirects=False)
+        assert moved.status_code == 302 and moved.headers["location"] == f"https://www.bazapodreka.app/sala/{pin}"
+    assert client.get("/exam-live/join", follow_redirects=False).headers["location"] == "https://www.bazapodreka.app/sala"
+    assert client.get("/exam-live/join/nieznany", follow_redirects=False).headers["location"] == "https://www.bazapodreka.app/sala"
+    screen = client.get(f"/exam-live/projector/{ptok}", follow_redirects=False)
+    assert screen.status_code == 302 and screen.headers["location"] == f"https://www.bazapodreka.app/sala/ekran/{ptok}"
     card = client.get(f"/exam-live/join/{jtok}/card.png")
     assert card.status_code == 200 and Image.open(io.BytesIO(card.content)).size == (1200, 630)
     assert client.get("/exam-live/join/nieznany/card.png").status_code == 200  # ogólna karta, nie błąd
-    assert "/exam-live/card.png" in client.get("/exam-live/join/nieznany").text
 
 
 def test_podglad_sesji_przed_dolaczeniem(client):

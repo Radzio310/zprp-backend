@@ -188,3 +188,21 @@ def test_wynik_trwaly_egzamin_z_progiem():
     assert res["passed"] == 1 and res["questions"][0]["distribution"] == {"a": 1, "b": 1} and res["questions"][0]["correct_keys"] == ["a"]
     quiz = L.build_result(character="quiz", pass_percent=None, question_ids=["q1-1"], bank=bank, participants=parts, answers=answers)
     assert quiz["passed"] is None and all(e["passed"] is None for e in quiz["ranking"])
+
+
+def test_wyscig_pasków_miejsca_sprzed_pytania_i_klucze_rzutnika():
+    parts = [{"id": "p1", "kind": "user", "name": "Ala", "score": 1500}, {"id": "p2", "kind": "user", "name": "Bob", "score": 1400},
+             {"id": "p3", "kind": "guest", "name": "Cyd", "score": 1200}]
+    st = state("leaderboard", parts=parts)
+    st["last_points"] = {"p1": 0, "p2": 900, "p3": 0}
+    top = L.view_for("projector", st, None, NOW)["leaderboard"]["top"]
+    bob = next(r for r in top if r["name"] == "Bob")
+    assert bob["place"] == 2 and bob["prev_place"] == 3 and bob["prev_score"] == 500 and bob["gained"] == 900
+    assert next(r for r in top if r["name"] == "Cyd")["prev_place"] == 2
+    assert all(len(r["key"]) == 12 and "participant_id" not in r for r in top)
+    # bez punktów za ostatnie pytanie nikt się nie rusza
+    still = L.view_for("projector", state("leaderboard", parts=parts), None, NOW)["leaderboard"]["top"]
+    assert all(r["prev_place"] == r["place"] and r["gained"] == 0 for r in still)
+    lobby = L.view_for("projector", state("lobby", parts=parts), None, NOW)["participants"]
+    assert [p["key"] for p in lobby] == [L.public_key(p["id"]) for p in parts]
+    assert L.web_join_url("482 913") == "https://www.bazapodreka.app/sala/482913" and L.web_join_url(None).endswith("/sala")

@@ -65,7 +65,9 @@ def test_tworzenie_wymaga_tokenu_i_uprawnien(client):
     assert denied.status_code == 403 and err(denied) == "EXAM_FORBIDDEN"
     view = create(client)
     assert view["role"] == "host" and len(view["session"]["pin"]) == 6 and view["session"]["guests_allowed"] is False
-    assert view["session"]["links"]["projector_url"].startswith("/exam-live/projector/")
+    links = view["session"]["links"]
+    assert links["projector_url"].startswith("https://www.bazapodreka.app/sala/ekran/")
+    assert links["web_join"] == f"https://www.bazapodreka.app/sala/{view['session']['pin']}"
 
 
 def test_dolaczanie_goscie_i_polling_since_rev(client):
@@ -126,11 +128,11 @@ def test_rzutnik_bez_logowania_qr_i_strony(client):
     assert client.get("/exam-live/projector/niezgadniete/state").status_code == 404
     qr = client.get(f"/exam-live/projector/{token}/qr.svg", headers={"host": "baza.example"})
     assert qr.status_code == 200 and qr.headers["content-type"].startswith("image/svg+xml") and b"<svg" in qr.content
-    for url in (f"/exam-live/projector/{token}", "/exam-live/join", f"/exam-live/join/{token}"):
-        page = client.get(url)
-        assert page.status_code == 200 and "<html" in page.text and "script-src 'self'" in page.headers["content-security-policy"]
-    assert "wakeLock" in client.get("/exam-live/assets/projector.js").text
-    assert client.get("/exam-live/assets/live.css").status_code == 200
+    for url in (f"/exam-live/projector/{token}", "/exam-live/join"):
+        moved = client.get(url, follow_redirects=False)
+        assert moved.status_code == 302 and moved.headers["location"].startswith("https://www.bazapodreka.app/sala")
+    proj = state.json()
+    assert proj["brand"]["short"] == "bazapodreka.app/sala" and proj["brand"]["join_url"].endswith(proj["session"]["pin"])
     assert client.get("/exam-live/assets/sekret.txt").status_code == 404
 
 

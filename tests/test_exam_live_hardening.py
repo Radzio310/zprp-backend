@@ -31,11 +31,11 @@ def test_rzutnik_przyjmuje_tylko_token_rzutnika(client):
     ptoken, jtoken = proj_token(view), join_token(view)
     assert ptoken != jtoken
     assert client.get(f"/exam-live/projector/{ptoken}/state").status_code == 200
-    assert client.get(f"/exam-live/projector/{ptoken}").status_code == 200
+    assert client.get(f"/exam-live/projector/{ptoken}", follow_redirects=False).status_code == 302
     qr = client.get(f"/exam-live/projector/{ptoken}/qr.svg")
     assert qr.status_code == 200 and b"<svg" in qr.content
     for url in (f"/exam-live/projector/{jtoken}/state", f"/exam-live/projector/{jtoken}", f"/exam-live/projector/{jtoken}/qr.svg"):
-        assert client.get(url).status_code == 404
+        assert client.get(url, follow_redirects=False).status_code == 404
     # token z QR nadal służy do dołączania
     joined = client.post("/exam-live/join", json={"token": jtoken}, headers=h("p1"))
     assert joined.status_code == 200

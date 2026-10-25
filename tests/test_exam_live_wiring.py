@@ -26,16 +26,6 @@ def test_moduly_logiki_nie_importuja_bazy_na_gorze():
                 assert node.module not in ("app.db", "app.exams", "app.province_events"), f"{name}: import bazy na górze"
 
 
-def test_strony_rzutnika_bez_zewnetrznych_zasobow_i_z_wakelock():
-    web = ROOT / "app" / "exam_live_web"
-    for page in web.glob("*"):
-        text = page.read_text(encoding="utf-8")
-        assert "http://" not in text and "https://" not in text.replace("https://\"", ""), f"{page.name}: zewnętrzny adres"
-    assert "wakeLock" in (web / "projector.js").read_text(encoding="utf-8")
-    assert "innerHTML" not in (web / "projector.js").read_text(encoding="utf-8")
-    assert "innerHTML" not in (web / "guest.js").read_text(encoding="utf-8")
-
-
 async def test_zegar_terminu_uruchamia_odslonicie_i_nowy_termin_zastepuje_stary():
     from app.exam_live_hub import Hub
 

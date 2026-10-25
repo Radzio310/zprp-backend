@@ -12,7 +12,9 @@ własny widok z `exam_live_rules.view_for` - klucz poprawnych odpowiedzi jest ty
 Gniazda: tylko w pamięci jednego procesu, granica opisana w `exam_live_hub.py`.
 
 Trasy publiczne (bez logowania, dostęp przez nie do zgadnięcia token sesji z adresu):
-rzutnik (`/projector/{token}`), jego migawka i kod QR, strona gościa (`/join`).
+migawka rzutnika i kod QR. Same strony (ekran sali, dołączanie z przeglądarki) są od 25.10.2026
+w BAZA_web (`www.bazapodreka.app/sala/ekran/{token}`, `/sala/{PIN}`); stare adresy tutaj
+(`/projector/{token}`, `/join`, `/join/{token}`, `/j/{token}`) odpowiadają 302 na nowe.
 Gość odpowiada tylko z `guest_token` wydanym przy dołączeniu, i tylko gdy prowadzący włączył gości.
 """
 
@@ -26,13 +28,11 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from html import escape
-from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Mapping, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from app import exam_live_brand as BR
@@ -44,12 +44,6 @@ from app.exam_rules import ExamError
 from app.pod_reka_login_rules import client_key as _forwarded_key
 
 logger = logging.getLogger(__name__)
-
-WEB_DIR = Path(__file__).resolve().parent / "exam_live_web"
-ASSETS = {"live.css": "text/css; charset=utf-8", "live.js": "application/javascript; charset=utf-8",
-          "projector.js": "application/javascript; charset=utf-8", "guest.js": "application/javascript; charset=utf-8"}
-PAGE_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-            "connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'")
 
 WS_BAD_AUTH = 4401
 WS_FORBIDDEN = 4403
@@ -154,12 +148,6 @@ async def _run(call: Awaitable[Any]) -> Any:
         raise _http(error)
 
 
-def _page(name: str, og: str = "") -> HTMLResponse:
-    html = (WEB_DIR / name).read_text(encoding="utf-8").replace("<!--OG-->", og)
-    return HTMLResponse(html, headers={"Content-Security-Policy": PAGE_CSP, "Cache-Control": "no-store",
-                                       "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
-
-
 def _ip(request: Request) -> str:
     """Klucz limitu prób: pierwszy adres z X-Forwarded-For (Railway), inaczej adres połączenia.
     Bez tego cała sala za proxy dzieliłaby jeden limit błędnych PIN-ów."""
@@ -235,9 +223,65 @@ def build_router(deps: LiveDeps) -> APIRouter:
                         pass
                     continue
                 view = L.view_for("player", state, viewer, now)
+            elif conn.role == "projector":
+                if "projector" not in shared:
+                    shared["projector"] = await projector_view(state, now)
+                view = shared["projector"]
             else:
                 view = shared.get(conn.role) or shared.setdefault(conn.role, L.view_for(conn.role, state, None, now))
             await hub.send(sid, conn, {"type": "snapshot", "rev": view["rev"], "snapshot": view})
+
+    photo_cache: Dict[str, tuple] = {}
+
+    async def photos_of(state: Mapping[str, Any]) -> Dict[str, str]:
+        """numer sędziego -> zdjęcie z listy okręgu (koszulki na rzutniku). Pamięć na sesję:
+        nowa osoba odświeża listę najwyżej co 15 s, inaczej co 5 min. Błąd = inicjały, nie awaria."""
+        s = state["session"]
+        ids = {str(p.get("judge_id")).strip() for p in state["participants"] if p.get("judge_id")}
+        if not ids:
+            return {}
+        now_m = time.monotonic()
+        hit = photo_cache.get(s["id"])
+        if hit and ((ids <= hit[1] and now_m - hit[0] < 300) or now_m - hit[0] < 15):
+            return hit[2]
+        out: Dict[str, str] = {}
+        try:
+            provinces = (list(S.ALL_PROVINCES) if s.get("scope") == "national" or not s.get("province")
+                         else [S.display(s["province"])])
+            lists = await asyncio.gather(*(ls().exam.judges(p) for p in provinces), return_exceptions=True)
+            for judges in lists:
+                if isinstance(judges, BaseException):
+                    continue
+                for j in judges or []:
+                    jid = str(j.get("judge_id") or "").strip()
+                    url = str(j.get("photo_url") or "").strip()
+                    if jid in ids and url.startswith("http"):
+                        out[jid] = url
+        except Exception:  # noqa: BLE001 - lista okręgu niedostępna: koszulki z inicjałami
+            logger.info("egzamin na żywo: brak zdjęć dla sesji %s", s["id"], exc_info=True)
+        if len(photo_cache) > 200:
+            photo_cache.clear()
+        photo_cache[s["id"]] = (now_m, ids, out)
+        return out
+
+    async def projector_view(state: Dict[str, Any], now: datetime) -> Dict[str, Any]:
+        """Widok rzutnika + oprawa (herb, barwy, krótki adres) + zdjęcia na koszulkach.
+        Zdjęcia tylko w lobby i rankingu - w pytaniu rzutnik nie pokazuje osób."""
+        view = L.view_for("projector", state, None, now)
+        s = state["session"]
+        brand = brand_of(s)
+        view["brand"] = {"palette": brand["palette"], "crest_url": brand["crest_url"], "province_label": brand["province_label"],
+                         "join_url": L.web_join_url(s.get("pin")), "short": L.WEB_SHORT}
+        rows = list(view.get("participants") or []) + list((view.get("leaderboard") or {}).get("top") or [])
+        if rows:
+            photos = await photos_of(state)
+            if photos:
+                judge_of = {L.public_key(p["id"]): str(p.get("judge_id") or "").strip() for p in state["participants"]}
+                for row in rows:
+                    url = photos.get(judge_of.get(row.get("key") or "", ""))
+                    if url:
+                        row["photo"] = url
+        return view
 
     def changed(sid: str, *, immediate: bool) -> None:
         hub.schedule(sid, render, immediate=immediate)
@@ -337,15 +381,19 @@ def build_router(deps: LiveDeps) -> APIRouter:
         async def go() -> Dict[str, Any]:
             s = await V.session_by_projector(ls(), token)
             state = await fresh_state(s["id"])
-            return view_response(state, "projector", None, since_rev, response)
+            response.headers["Cache-Control"] = "no-store"
+            if since_rev is not None and since_rev == state["session"]["rev"] and state["session"]["phase"] != "question":
+                return {"unchanged": True, "rev": since_rev, "server_now": deps.now().isoformat()}
+            return await projector_view(state, deps.now())
 
         return await _run(go())
 
     # -- oprawa marki: kod QR, karty, plakat ------------------------------
 
     def join_url_for(request: Request, s: Mapping[str, Any]) -> str:
-        """Adres z kodu QR: krótki `/exam-live/j/{token}` (mniej modułów = większe kropki z końca sali)."""
-        return f"{_base_url(request)}/exam-live/j/{s['token']}"
+        """Adres z kodu QR: `https://www.bazapodreka.app/sala/{PIN}` (25.10.2026). Krótki, więc kropki
+        kodu są duże z końca sali; z aplikacją (App Links) telefon otwiera BAZĘ, bez niej stronę sali."""
+        return L.web_join_url(s.get("pin"))
 
     def brand_of(s: Mapping[str, Any]) -> Dict[str, Any]:
         palette = BR.palette_for(s.get("scope"), s.get("province"))
@@ -372,7 +420,7 @@ def build_router(deps: LiveDeps) -> APIRouter:
         brand = brand_of(s)
         extra: Dict[str, Any] = {"title": s.get("title") or "", "character": s.get("character"), "pin": s.get("pin"),
                                  "province_label": brand["province_label"],
-                                 "join_page": f"{_base_url(request)}/exam-live/join"}
+                                 "join_page": L.web_join_url(None), "short": L.WEB_SHORT}
         return BR.qr_json(join_url_for(request, s), brand["palette"], brand["crest_url"], extra)
 
     async def hosted_session(sid: str, who: S.Who) -> Dict[str, Any]:
@@ -408,11 +456,10 @@ def build_router(deps: LiveDeps) -> APIRouter:
 
     async def story_response(request: Request, s: Mapping[str, Any]) -> Response:
         brand = brand_of(s)
-        host = _base_url(request).split("://", 1)[-1]
         png = await run_in_threadpool(
             lambda: BR.story_png(title=s.get("title") or "", pin=s["pin"], character=s.get("character") or "quiz",
                                  palette=brand["palette"], url=join_url_for(request, s), province_label=brand["province_label"],
-                                 join_hint=f"albo {host}/exam-live/join i kod PIN"))
+                                 join_hint=f"albo {L.WEB_SHORT} i kod PIN"))
         return Response(png, media_type="image/png", headers={"Cache-Control": "private, max-age=300",
                                                               "Content-Disposition": f'inline; filename="egzamin-{s["pin"]}.png"'})
 
@@ -423,7 +470,7 @@ def build_router(deps: LiveDeps) -> APIRouter:
         when = s.get("created_at") or deps.now()
         return BR.poster_html(title=s.get("title") or "Egzamin z przepisów", pin=s["pin"], character=s.get("character") or "quiz",
                               palette=brand["palette"], url=join_url_for(request, s),
-                              join_page=f"{_base_url(request)}/exam-live/join", province_label=brand["province_label"],
+                              join_page=L.web_join_url(None), province_label=brand["province_label"],
                               seal=seal_svg(132, brand["palette"]["from"], "NA ŻYWO", when.strftime("%d.%m.%Y")))
 
     @router.get("/{sid}/poster.pdf", summary="Plakat A4 do druku (weasyprint)")
@@ -467,30 +514,6 @@ def build_router(deps: LiveDeps) -> APIRouter:
             return await V.session_by_token(ls(), token)
         except ExamError:
             return None
-
-    def og_meta(request: Request, s: Optional[Mapping[str, Any]], token: Optional[str]) -> str:
-        """Karta podglądu linku (Messenger, WhatsApp, SMS): tytuł, opis z PIN-em i obraz 1200x630."""
-        base = _base_url(request)
-        if s is not None and s["phase"] != "end" and token:
-            brand = brand_of(s)
-            kind = "Egzamin na sali" if s.get("character") == "exam" else "Quiz szkoleniowy"
-            title = f"Dołącz: {s.get('title') or 'Egzamin z przepisów'}"
-            desc = (f"{kind} · {brand['province_label']} · na żywo w BAZIE. Kod PIN {s.get('pin')}. "
-                    "Zaloguj się kontem BAZY i odpowiadaj z telefonu.")
-            image, url = f"{base}/exam-live/join/{token}/card.png", f"{base}/exam-live/j/{token}"
-        else:
-            title = "Egzamin z przepisów na żywo"
-            desc = "Dołącz kodem PIN z ekranu prowadzącego i odpowiadaj z telefonu. BAZA · ZPRP."
-            image, url = f"{base}/exam-live/card.png", f"{base}/exam-live/join"
-
-        def e(v: Any) -> str:
-            return escape(str(v), quote=True)
-
-        return (f'<meta property="og:type" content="website"><meta property="og:site_name" content="BAZA">'
-                f'<meta property="og:title" content="{e(title)}"><meta property="og:description" content="{e(desc)}">'
-                f'<meta property="og:url" content="{e(url)}"><meta property="og:image" content="{e(image)}">'
-                f'<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">'
-                f'<meta name="twitter:card" content="summary_large_image"><meta name="description" content="{e(desc)}">')
 
     @router.get("/card.png", summary="Ogólna karta podglądu linku (1200x630)")
     async def generic_card(request: Request) -> Response:
@@ -552,34 +575,36 @@ def build_router(deps: LiveDeps) -> APIRouter:
         response.headers["Cache-Control"] = "private, max-age=600"
         return qr_json_payload(request, s)
 
-    @router.get("/projector/{token}", summary="Strona rzutnika", response_class=HTMLResponse)
-    async def projector_page(token: str) -> HTMLResponse:
-        await _run(V.session_by_projector(ls(), token))
-        return _page("projector.html")
+    def moved(url: str) -> RedirectResponse:
+        return RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
-    @router.get("/join", summary="Strona uczestnika: PIN, logowanie kontem BAZY albo nick gościa", response_class=HTMLResponse)
-    async def join_page(request: Request) -> HTMLResponse:
-        return _page("guest.html", og_meta(request, None, None))
+    async def web_join_for(token: str) -> str:
+        """Stary link z tokenem dołączania -> `/sala/{PIN}` trwającej sesji, inaczej strona wpisywania PIN-u."""
+        s = await session_for_join(token)
+        return L.web_join_url(s.get("pin") if s is not None and s["phase"] != "end" else None)
 
-    @router.get("/join/{token}", summary="Strona uczestnika z linku (karta podglądu Open Graph)", response_class=HTMLResponse)
-    async def join_page_token(token: str, request: Request) -> HTMLResponse:
-        return _page("guest.html", og_meta(request, await session_for_join(token), token))
+    @router.get("/projector/{token}", summary="Stary adres rzutnika: 302 na ekran sali w BAZA_web")
+    async def projector_page(token: str) -> RedirectResponse:
+        await _run(V.session_by_projector(ls(), token))  # zły token: 404 jak dawniej, bez przekierowania donikąd
+        return moved(L.web_projector_url(token))
 
-    @router.get("/j/{token}", summary="Krótki adres z kodu QR (ta sama strona uczestnika)", response_class=HTMLResponse)
-    async def join_page_short(token: str, request: Request) -> HTMLResponse:
-        return _page("guest.html", og_meta(request, await session_for_join(token), token))
+    @router.get("/join", summary="Stary adres strony uczestnika: 302 na bazapodreka.app/sala")
+    async def join_page() -> RedirectResponse:
+        return moved(L.web_join_url(None))
+
+    @router.get("/join/{token}", summary="Stary link uczestnika: 302 na bazapodreka.app/sala/{PIN}")
+    async def join_page_token(token: str) -> RedirectResponse:
+        return moved(await web_join_for(token))
+
+    @router.get("/j/{token}", summary="Stary krótki adres z kodu QR: 302 na bazapodreka.app/sala/{PIN}")
+    async def join_page_short(token: str) -> RedirectResponse:
+        return moved(await web_join_for(token))
 
     @router.get("/assets/img/{name:path}", summary="Herby okręgów i znak ZPRP (kod QR, strony, karty)")
     async def asset_img(name: str) -> Response:
         if not re.fullmatch(r"(zprp|okregi/[a-z_]+)\.png", name) or not (BR.IMG_DIR / name).exists():
             raise HTTPException(404, detail={"code": "LIVE_ASSET", "message": "Nie ma takiego pliku."})
         return Response((BR.IMG_DIR / name).read_bytes(), media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
-
-    @router.get("/assets/{name}", summary="Style i skrypty stron rzutnika i gościa")
-    async def asset(name: str) -> Response:
-        if name not in ASSETS:
-            raise HTTPException(404, detail={"code": "LIVE_ASSET", "message": "Nie ma takiego pliku."})
-        return Response((WEB_DIR / name).read_bytes(), media_type=ASSETS[name], headers={"Cache-Control": "public, max-age=300"})
 
     # -- zalogowani: stan, sterowanie, odpowiedzi -------------------------
 

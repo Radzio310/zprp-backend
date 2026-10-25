@@ -173,12 +173,14 @@ async def _all_answers(ls: LiveStore, session_id: str) -> List[Dict[str, Any]]:
     return out
 
 
-def links_for(token: str, projector_token: Optional[str] = None) -> Dict[str, str]:
-    """Adresy WZGLĘDNE (rzutnik i QR składają z nich pełny adres z bieżącego hosta).
-    Rzutnik i jego QR mają własny token; `join_url` niesie token dołączania."""
+def links_for(token: str, projector_token: Optional[str] = None, pin: Optional[str] = None) -> Dict[str, str]:
+    """Adresy zasobów są WZGLĘDNE (aplikacja składa je z hostem serwera). Ekran sali i strona
+    uczestnika są w BAZA_web (25.10.2026) - te adresy są pełne: `projector_url`, `join_page`, `web_join`.
+    Rzutnik i jego QR mają własny token; `join_url` niesie token dołączania (stary adres przekierowuje)."""
     ptoken = projector_token or token
     return {"join_url": f"/exam-live/join/{token}", "qr_url": f"/exam-live/projector/{ptoken}/qr.svg",
-            "projector_url": f"/exam-live/projector/{ptoken}", "join_page": "/exam-live/join",
+            "projector_url": L.web_projector_url(ptoken), "join_page": L.web_join_url(None),
+            "web_join": L.web_join_url(pin), "web_short": L.WEB_SHORT, "hall_url": L.web_projector_url(ptoken),
             # 17.10.2026: krótki adres z markowego kodu i macierz kodu dla animowanego rysowania
             "join_short": f"/exam-live/j/{token}", "qr_json": f"/exam-live/projector/{ptoken}/qr.json",
             "qr_brand": f"/exam-live/projector/{ptoken}/qr.svg?style=brand",
@@ -198,13 +200,18 @@ async def load_state(ls: LiveStore, session_id: str, now: datetime) -> Dict[str,
         answers = await _answers_for(ls, session_id, s["q_index"])
         bank = await S.load_bank(ls.exam, s["bank_version"])
         question = bank.get(s["question_ids"][s["q_index"]])
+    last_points: Dict[str, int] = {}
+    if s["phase"] == "leaderboard" and 0 <= s["q_index"] < s["q_total"]:
+        # Ranking po pytaniu: rzutnik pokazuje wyścig od miejsc sprzed tego pytania.
+        last_points = {pid: int(a.get("points") or 0) for pid, a in (await _answers_for(ls, session_id, s["q_index"])).items()}
     if s["phase"] != "end" and s["q_index"] + 1 < s["q_total"]:
         # Zapowiedź dla prowadzącego (`session.next`); bank siedzi w pamięci podręcznej.
         next_question = (await S.load_bank(ls.exam, s["bank_version"])).get(s["question_ids"][s["q_index"] + 1])
     return {
         "session": s, "participants": parts, "answers": answers, "question": question, "next_question": next_question,
         "result": S._loads(s.get("result_json"), None) if s["phase"] == "end" else None,
-        "links": links_for(s["token"], s.get("projector_token")), "server_now": now,
+        "links": links_for(s["token"], s.get("projector_token"), s.get("pin")), "server_now": now,
+        "last_points": last_points,
     }
 
 
