@@ -133,7 +133,7 @@ from app.match_market_rules import (
     state_dict,
     with_slot_holder,
 )
-from app.match_market_bench import bench_fields, bench_metrics, claim_metrics, km_value, merge_metrics, nearest_km
+from app.match_market_bench import bench_fields, bench_metrics, claim_metrics, km_value, merge_metrics, metrics_pending, nearest_km
 from app.proel_auth import is_admin
 from app.push.push import send_push_to_judges_report
 from app.settlement_province import spellings
@@ -3109,7 +3109,12 @@ async def _require_approver(actor: Actor, province: str) -> None:
 
 
 @router.get("/offers/{offer_id}", summary="Zgłoszenie w całości - widok decyzji")
-async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
+async def get_offer(
+    offer_id: int,
+    actor: Actor = Depends(market_actor),
+    fast: int = Query(0, description="1 = bez dopytywania Google: okno otwiera się od razu, brakujące km dociąga drugie pobranie"),
+) -> Dict[str, Any]:
+    quick = bool(fast)
     row = await database.fetch_one(
         select(match_market_offers).where(match_market_offers.c.id == offer_id)
     )
@@ -3180,7 +3185,7 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
                     + ([actor.judge_id] if not mine else []),
                 }
             ],
-            ask_google=True,
+            ask_google=not quick,
             with_season=approver or mine,
         )
     ).get(int(offer["id"]), {})
@@ -3222,6 +3227,7 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
             province,
             offer,
             [_s(c["judge_id"]) for c in claims if _s(c["status"]) == "pending"],
+            ask_google=not quick,
         )
         payload["claims"] = [
             {
@@ -3237,6 +3243,8 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
         ]
     else:
         payload["claims"] = []
+    # Szybki odczyt: czy są chętni bez kilometrów, które może jeszcze dać Google.
+    payload["metricsPending"] = metrics_pending(quick, payload["claims"])
 
     # Wlasne kolizje dostaje kazdy - to jego wlasny terminarz i to jest
     # informacja, ktorej potrzebuje ZANIM sie zglosi.

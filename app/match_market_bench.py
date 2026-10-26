@@ -101,7 +101,20 @@ def merge_metrics(fields: Mapping[str, Any], metric: Optional[Mapping[str, Any]]
     return out
 
 
-async def claim_metrics(province: str, offer: Mapping[str, Any], judge_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+def metrics_pending(quick: bool, claims: Iterable[Mapping[str, Any]]) -> bool:
+    """Szybki odczyt (bez Google) i ktoś czekający bez kilometrów = drugie pobranie ma sens."""
+    if not quick:
+        return False
+    return any(_s(c.get("status")) == "pending" and c.get("km") is None for c in claims)
+
+
+async def claim_metrics(
+    province: str,
+    offer: Mapping[str, Any],
+    judge_ids: List[str],
+    *,
+    ask_google: bool = True,
+) -> Dict[str, Dict[str, Any]]:
     """Metryki obsadowego dla chętnych zwykłej oferty; błąd = brak liczb, nie błąd odpowiedzi."""
     if not judge_ids:
         return {}
@@ -118,7 +131,9 @@ async def claim_metrics(province: str, offer: Mapping[str, Any], judge_ids: List
             "match_id": offer.get("match_id"),
             "match_code": _s(offer.get("match_code")),
         }
-        return await asyncio.wait_for(_metrics(pseudo, [{"judge_id": j} for j in judge_ids]), timeout=5.0)
+        return await asyncio.wait_for(
+            _metrics(pseudo, [{"judge_id": j} for j in judge_ids], ask_google=ask_google), timeout=5.0
+        )
     except Exception:  # noqa: BLE001 - liczby to dodatek
         logger.warning("giełda: ławka bez metryk obsadowego (%s)", province, exc_info=True)
         return {}

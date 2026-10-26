@@ -769,7 +769,9 @@ async def _claims_view(offer: Dict[str, Any], claims: List[Dict[str, Any]], card
     }
 
 
-async def _metrics(offer: Dict[str, Any], claims: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+async def _metrics(
+    offer: Dict[str, Any], claims: List[Dict[str, Any]], *, ask_google: bool = True
+) -> Dict[str, Dict[str, Any]]:
     """Liczby przy zgłoszeniach. Brak danych = null, nigdy zmyślone zero."""
     if not claims:
         return {}
@@ -813,7 +815,7 @@ async def _metrics(offer: Dict[str, Any], claims: List[Dict[str, Any]]) -> Dict[
 
     origins = {j: roster.city_of(j, day) for j in {_s(c["judge_id"]) for c in claims}}
     missing = [(o, city) for o in origins.values() if o and city and chain(o, city)["source"] == "unknown"]
-    if missing:
+    if missing and ask_google:
         try:
             import asyncio
 

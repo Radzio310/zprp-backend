@@ -60,7 +60,9 @@ def test_list_offers_knows_decision_right_and_skips_network():
 
 def test_get_offer_asks_for_missing_km_and_season_only_for_deciders():
     code = _code("get_offer")
-    assert "ask_google=True" in code
+    # Szczegóły dopytują Google, chyba że aplikacja prosi o szybki odczyt (fast=1).
+    assert "ask_google=not quick" in code
+    assert "metricsPending" in code
     assert "with_season=approver or mine" in code
 
 
@@ -89,3 +91,13 @@ def test_lawka_dostaje_metryki_obsadowego_bez_nadpisywania():
     assert out2["season"]["total"] == 1
     # Bez metryk - wiersz bez zmian (zgodność wstecz).
     assert merge_metrics(known, None) == known
+
+
+def test_szybki_odczyt_mowi_czy_dociagac_km():
+    from app.match_market_bench import metrics_pending
+
+    claims = [{"status": "pending", "km": None}, {"status": "pending", "km": 12.0}]
+    assert metrics_pending(True, claims) is True
+    # Pełny odczyt (z Google) nigdy nie każe pobierać drugi raz.
+    assert metrics_pending(False, claims) is False
+    assert metrics_pending(True, [{"status": "pending", "km": 3.0}, {"status": "withdrawn", "km": None}]) is False
