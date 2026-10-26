@@ -15,7 +15,10 @@ def normalized_video_url(value: Optional[str]) -> str:
     value = str(value or "").strip()
     if not value:
         return ""
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError as exc:
+        raise ValueError("Niepoprawny link do nagrania - sprawdź, czy został wklejony w całości.") from exc
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("Link do nagrania musi zaczynać się od http:// lub https://.")
     # Host i schemat nie są semantycznie czułe na wielkość liter. Usuwamy też

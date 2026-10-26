@@ -489,7 +489,7 @@ def probe(source: str) -> Dict[str, Any]:
     data = json.loads(done.stdout or "{}")
     video = next((s for s in data.get("streams") or [] if s.get("codec_type") == "video"), None)
     if not video:
-        raise ValueError("Plik nie zawiera obrazu wideo.")
+        raise UserFacingError("Plik nie zawiera obrazu wideo.")
     duration = float((data.get("format") or {}).get("duration") or video.get("duration") or 0) or None
     return {"duration_s": duration, "width": int(video.get("width") or 0) or None, "height": int(video.get("height") or 0) or None}
 
@@ -569,10 +569,14 @@ async def process_upload(row: Dict[str, Any]) -> None:
         await asyncio.to_thread(shutil.rmtree, folder, True)
 
 
+class UserFacingError(ValueError):
+    """Komunikat po polsku, który wolno pokazać użytkownikowi (reszta wyjątków dostaje ogólny)."""
+
+
 async def process_clip(clip: Dict[str, Any]) -> None:
     upload = await _clip_upload(clip)
     if not upload or upload.get("status") != "ready" or not upload.get("play_key"):
-        raise ValueError("nagranie klipu nie jest gotowe")
+        raise ValueError("Nagranie klipu nie jest jeszcze gotowe.")
     await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip["id"]).values(mp4_status="working"))
     source = presign_get(upload["play_key"], SOURCE_URL_TTL)
     folder = await asyncio.to_thread(_tmpdir)
@@ -619,7 +623,7 @@ async def process_next() -> bool:
             await database.execute(update(mentor_clips).where(mentor_clips.c.id == row["id"]).values(mp4_status="failed"))
             await C.touch(row["pair_id"], row["author_id"], "clip_mp4_failed", "clips", row["match_id"], {"id": row["id"]})
         else:
-            message = str(exc) if isinstance(exc, ValueError) else "Nie udało się przetworzyć nagrania. Sprawdź plik i wgraj go ponownie."
+            message = str(exc) if isinstance(exc, UserFacingError) else "Nie udało się przetworzyć nagrania. Sprawdź plik i wgraj go ponownie."
             await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == row["id"]).values(status="failed", error=message[:300]))
             await C.touch(row["pair_id"], row["uploader_id"], "upload_failed", "videos", row["match_id"], {"id": row["id"]})
     return True

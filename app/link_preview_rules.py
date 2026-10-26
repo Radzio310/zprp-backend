@@ -49,7 +49,10 @@ def check_url_shape(url: str) -> str:
     value = str(url or "").strip()
     if not value or len(value) > 2048:
         raise UnsafeUrl("Link jest pusty albo za długi.")
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError as exc:
+        raise UnsafeUrl("Niepoprawny adres linku - sprawdź, czy został wklejony w całości.") from exc
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise UnsafeUrl("Link musi zaczynać się od http:// lub https://.")
     if parsed.username or parsed.password:
@@ -59,7 +62,7 @@ def check_url_shape(url: str) -> str:
     except ValueError as exc:
         raise UnsafeUrl("Niepoprawny port w linku.") from exc
     if port not in ALLOWED_PORTS:
-        raise UnsafeUrl("Podgląd działa tylko dla zwykłych stron (port 80 lub 443).")
+        raise UnsafeUrl("Podgląd działa tylko dla zwykłych stron internetowych (bez niestandardowego portu).")
     host = parsed.hostname.lower().rstrip(".")
     if host == "localhost" or host.endswith(".localhost") or host.endswith(".local") or host.endswith(".internal"):
         raise UnsafeUrl("Ten adres wskazuje na sieć wewnętrzną.")
@@ -100,7 +103,7 @@ def all_ips_allowed(addresses: Iterable[str]) -> bool:
         found = True
         ip_allowed(address)
     if not found:
-        raise UnsafeUrl("Nie znaleziono tej strony (DNS).")
+        raise UnsafeUrl("Nie znaleziono tej strony - sprawdź, czy adres jest poprawny.")
     return True
 
 
