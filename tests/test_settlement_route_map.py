@@ -32,3 +32,14 @@ def test_locator_daje_srodki_miejscowosci_z_imiennikiem_po_wojewodztwie():
     home, dest = RM.locator(gaz(), "slaskie")("Lipnik", "Gliwice")
     assert abs(home[0] - 50.774) < 0.01 and abs(home[1] - 19.432) < 0.01
     assert abs(dest[0] - 50.294) < 0.01
+
+
+def test_wieloznaczna_hala_bez_punktu_i_dokladna_nazwa_bije_zblizona():
+    g = P.Gazetteer([
+        (P.Place("1", "Grodków", 50.698, 17.384, "opolskie", 8654), []),
+        (P.Place("2", "Gródków", 50.36, 19.11, "slaskie", 0), []),
+        (P.Place("3", "Dąbrowa", 52.75, 17.94, "kujawsko-pomorskie", 0), []),
+        (P.Place("4", "Dąbrowa", 50.68, 17.75, "opolskie", 0), []),
+    ])
+    assert RM.unique_point(g, "Grodków") == (50.698, 17.384)
+    assert RM.unique_point(g, "Dąbrowa") is None

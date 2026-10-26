@@ -19,6 +19,7 @@ def test_imiennik_google_wykryty():
     reasons = {i["reason"] for i in A.audit_row(row, gaz(), province="slaskie", table_km=94)}
     assert "imiennik_google" in reasons
     assert "google_vs_tabela" in reasons
+    assert "km_ponad_linia" in reasons
 
 
 def test_czysty_wiersz():
@@ -26,12 +27,40 @@ def test_czysty_wiersz():
     assert A.audit_row(row, gaz(), province="slaskie", table_km=94) == []
 
 
-def test_skok_km_tej_samej_pary():
+def test_skok_km_tej_samej_pary_i_zrodla():
     rows = [
-        {"distance_km": 94, "home_city": "Lipnik", "city": "Gliwice"},
-        {"distance_km": 271.5, "home_city": "Lipnik", "city": "Gliwice"},
+        {"distance_km": 94, "home_city": "Lipnik", "city": "Gliwice", "distance_source": "google"},
+        {"distance_km": 271.5, "home_city": "Lipnik", "city": "Gliwice", "distance_source": "google"},
     ]
     assert len(A.pair_jumps(rows)) == 2
+
+
+def test_tabela_okregu_vs_zprp_to_regula_nie_skok():
+    rows = [
+        {"distance_km": 94, "home_city": "Lipnik", "city": "Gliwice", "distance_source": "table"},
+        {"distance_km": 120, "home_city": "Lipnik", "city": "Gliwice", "distance_source": "zprp-table"},
+    ]
+    assert A.pair_jumps(rows) == []
+
+
+def test_imiennik_kandydat_nie_robi_falszywego_alarmu():
+    g = P.Gazetteer([
+        (P.Place("1", "Mikołów", 50.171, 18.904, "slaskie", 38000), []),
+        (P.Place("2", "Kalisz", 51.761, 18.091, "wielkopolskie", 108000), []),
+        (P.Place("3", "Kalisz", 50.258, 20.135, "malopolskie", 0), []),
+    ])
+    row = {"distance_km": 218, "home_city": "Mikołów", "city": "Kalisz", "distance_source": "zprp-table"}
+    assert A.audit_row(row, g, province="slaskie", national_km=218) == []
+
+
+def test_jaworzno_google_poprawne_km_bez_alarmu():
+    g = P.Gazetteer([
+        (P.Place("1", "Jaworzno", 50.205, 19.275, "slaskie", 96000), []),
+        (P.Place("2", "Jaworzno", 51.026, 18.647, "opolskie", 0), []),
+        (P.Place("3", "Gliwice", 50.294, 18.666, "slaskie", 180000), []),
+    ])
+    row = {"distance_km": 60, "home_city": "Jaworzno", "city": "Gliwice", "distance_source": "google"}
+    assert A.audit_row(row, g, province="slaskie", table_km=58) == []
 
 
 def test_google_najkrotsza_trasa_z_regionem_sedziego():

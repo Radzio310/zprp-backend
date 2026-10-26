@@ -1255,6 +1255,9 @@ async def refresh_province(
                     pretty_city(scraped) if looks_like_city(scraped) else ""
                 )
                 row["hall"] = _s(venue.get("hall")) or _s(row.get("hall"))
+                row["venue_address"] = " ".join(
+                    part for part in (_s(venue.get("street")), _s(venue.get("number"))) if part
+                )
 
             # --- miasta sedziow, ktorym lista okregu go nie podala ---
             # Obsada meczu w API podaje tez miasto sedziego. Bez niego nie ma jak
@@ -1305,7 +1308,7 @@ async def refresh_province(
                 if picked is not None:
                     hits[position] = picked
                 else:
-                    google_rows.append((position, home, city))
+                    google_rows.append((position, home, _google_destination(city, row.get("venue_address"))))
 
             if google_rows:
                 region_slug = province_slug(province)
@@ -1401,6 +1404,22 @@ async def refresh_province(
 #: wersji (np. starej trasy domyślnej, source „google") są ignorowane i liczone
 #: od nowa - podbić przy każdej zmianie sposobu pomiaru (jak
 #: `GOOGLE_DISTANCE_REVISION` w aplikacji).
+def _google_destination(city: str, address: Any) -> str:
+    """
+    Cel dla Google. Miejscowość wieloznaczna („Dąbrowa" ma ich 96) + adres hali
+    z API => „ulica numer miejscowość", żeby Google trafił w prawdziwą halę,
+    a nie w imiennika sprzed setek kilometrów (IIM1/8: 454 km zamiast kilkudziesięciu).
+    Nazwa jednoznaczna zostaje sama. Napis jest też kluczem pamięci pomiarów.
+    """
+    from app import national_place_rules as NP
+    from app import settlement_route_map_rules as RM
+
+    street = _s(address)
+    if street and RM.unique_point(NP.default_gazetteer(), city) is None:
+        return f"{street} {city}"
+    return city
+
+
 def _route_locator(province: str):
     from app import national_place_rules as NP
     from app import settlement_route_map_rules as RM
@@ -1408,7 +1427,7 @@ def _route_locator(province: str):
     return RM.locator(NP.default_gazetteer(), province)
 
 
-GOOGLE_MEMORY_SOURCE = "google-shortest-r2"
+GOOGLE_MEMORY_SOURCE = "google-shortest-r3"
 
 
 async def _google_memory(region_slug: str) -> dict:

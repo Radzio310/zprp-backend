@@ -36,6 +36,16 @@ def _km(value: Any) -> Optional[float]:
         return None
 
 
+def _strict(candidates: list, name: Any) -> list:
+    """Dokładna nazwa z diakrytykami (skorowidz składa „Gródków" z „Grodków")."""
+
+    def plain(value: Any) -> str:
+        return " ".join(str(value or "").lower().replace("-", " ").replace(".", " ").split())
+
+    exact = [p for p in candidates if plain(p.name) == plain(name)]
+    return exact or candidates
+
+
 def audit_row(
     row: Mapping[str, Any],
     gaz: Gazetteer,
@@ -53,12 +63,10 @@ def audit_row(
     source = str(row.get("distance_source") or "")
     out: list[dict] = []
 
-    homes = gaz.candidates(home)
+    homes = _strict(gaz.candidates(home), home)
     own_homes = [p for p in homes if p.province == slug]
     other_homes = [p for p in homes if p.province != slug]
 
-    if source == "google" and own_homes and other_homes:
-        out.append({"reason": "imiennik_google", "expected": table_km or national_km})
     if homes and not own_homes:
         out.append({"reason": "dom_poza_okregiem", "expected": table_km})
 
@@ -67,28 +75,51 @@ def audit_row(
         if delta >= TABLE_MIN_DELTA_KM and delta > table_km * TABLE_TOLERANCE:
             out.append({"reason": "google_vs_tabela", "expected": table_km})
 
+    # Linia prosta: z KAŻDĄ parą kandydatów (imienniki) bierzemy parę, do której
+    # km pasują najlepiej. Podejrzane dopiero, gdy nie pasują do ŻADNEJ - inaczej
+    # imiennik blisko (Kalisz małopolski) udawał „oczekiwane 114 km".
     ends_a = own_homes or homes
-    ends_b = gaz.candidates(city)
+    ends_b = _strict(gaz.candidates(city), city)
     if ends_a and ends_b and not (table_km is not None and abs(km - table_km) < 1):
-        straight = min(haversine_km(a.point, b.point) for a in ends_a for b in ends_b)
-        if straight > 0:
-            limit = straight * ROAD_FACTOR * OVER_FACTOR + 10
-            if km > limit:
-                out.append({"reason": "km_ponad_linia", "expected": round(straight * ROAD_FACTOR, 1)})
+        best = None
+        for a in ends_a:
+            for b in ends_b:
+                straight = haversine_km(a.point, b.point)
+                score = abs(km - straight * ROAD_FACTOR)
+                if best is None or score < best[0]:
+                    best = (score, straight)
+        if best and best[1] > 0:
+            straight = best[1]
+            road = round(straight * ROAD_FACTOR, 1)
+            if km > straight * ROAD_FACTOR * OVER_FACTOR + 10:
+                out.append({"reason": "km_ponad_linia", "expected": road})
             elif km < straight * 0.9 - 3:
-                out.append({"reason": "km_ponizej_linii", "expected": round(straight * ROAD_FACTOR, 1)})
+                out.append({"reason": "km_ponizej_linii", "expected": road})
+
+    # Imiennik miejscowości sędziego przy Google ma sens tylko razem z innym
+    # objawem; samo istnienie imiennika (Jaworzno, Mysłowice) to fałszywy alarm.
+    if source == "google" and own_homes and other_homes and out:
+        out.append({"reason": "imiennik_google", "expected": table_km or national_km})
     return out
 
 
 def pair_jumps(rows: Iterable[Mapping[str, Any]]) -> list[dict]:
-    """Ta sama para (dom, miasto) z różnymi km w różnych meczach."""
-    groups: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    """
+    Ta sama para (dom, miasto) z różnymi km w różnych meczach - TYM SAMYM
+    źródłem. Tabela okręgu vs tabela ZPRP to reguła (mecz okręgowy vs
+    centralny), nie błąd, więc źródeł nie mieszamy.
+    """
+    groups: dict[tuple[str, str, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
         km = _km(row.get("distance_km"))
         if km is None or km == 0:
             continue
-        key = (str(row.get("home_city") or "").strip().lower(), str(row.get("city") or "").strip().lower())
-        if all(key):
+        key = (
+            str(row.get("home_city") or "").strip().lower(),
+            str(row.get("city") or "").strip().lower(),
+            str(row.get("distance_source") or ""),
+        )
+        if key[0] and key[1]:
             groups[key].append(row)
     out: list[dict] = []
     for items in groups.values():

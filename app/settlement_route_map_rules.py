@@ -12,6 +12,33 @@ from typing import Any, Iterable, Mapping, Optional
 from app.national_place_rules import Gazetteer, haversine_km, province_slug
 
 
+def _plain(value: Any) -> str:
+    """Nazwa do porównania Z polskimi znakami (skorowidz składa „Gródków" z „Grodków")."""
+    return " ".join(str(value or "").lower().replace("-", " ").replace(".", " ").split())
+
+
+def _strict(candidates: list, name: Any) -> list:
+    """Kandydaci o DOKŁADNEJ nazwie (z diakrytykami); gdy żaden - wszyscy."""
+    exact = [p for p in candidates if _plain(p.name) == _plain(name)]
+    return exact or candidates
+
+
+def unique_point(gaz: Gazetteer, name: Any, province: Any = None) -> Optional[tuple[float, float]]:
+    """
+    Środek miejscowości TYLKO gdy nazwa wskazuje jedno miejsce (w województwie
+    sędziego, gdy je podano). Imiennik = None: wołający pyta Google tekstem
+    z adresem/województwem, zamiast zgadywać punkt.
+    """
+    candidates = _strict(gaz.candidates(name) if name else [], name)
+    slug = province_slug(province)
+    pool = [p for p in candidates if slug and p.province == slug] or candidates
+    places = {(round(p.lat, 1), round(p.lon, 1)) for p in pool}
+    if len(places) != 1:
+        return None
+    best = pool[0]
+    return (best.lat, best.lon)
+
+
 def place_point(
     gaz: Gazetteer,
     name: Any,
@@ -24,7 +51,7 @@ def place_point(
     Imienników rozstrzyga: województwo okręgu (dom sędziego), potem
     najbliżej `near` (hala względem domu), potem największa liczba mieszkańców.
     """
-    candidates = gaz.candidates(name) if name else []
+    candidates = _strict(gaz.candidates(name) if name else [], name)
     if not candidates:
         return None
     slug = province_slug(province)
@@ -61,19 +88,13 @@ def build_route_map(rows: Iterable[Mapping[str, Any]], gaz: Gazetteer, province:
 
 def locator(gaz: Gazetteer, province: Any):
     """
-    (dom, hala) -> (punkt domu, punkt hali) jako (lat, lon) albo None.
+    (dom, hala) -> (punkt domu, punkt hali) jako (lat, lon); None przy imienniku.
 
-    Dom rozstrzyga województwo okręgu, halę - najbliższy imiennik względem domu
-    (te same zasady co mapa przejazdu w panelu).
+    Punkt tylko dla nazw jednoznacznych (`unique_point`) - skorowidz bywa
+    nieostry, więc przy wątpliwości Google dostaje tekst, nie zgadnięty punkt.
     """
 
     def locate(origin: Any, destination: Any):
-        home = place_point(gaz, origin, province)
-        near = (home["lat"], home["lon"]) if home else None
-        dest = place_point(gaz, destination, None, near)
-        return (
-            (home["lat"], home["lon"]) if home else None,
-            (dest["lat"], dest["lon"]) if dest else None,
-        )
+        return unique_point(gaz, origin, province), unique_point(gaz, destination)
 
     return locate
