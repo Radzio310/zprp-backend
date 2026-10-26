@@ -55,6 +55,10 @@ class ExportBody(BaseModel):
     people: Optional[Dict[str, Any]] = None
     #: {rules: [int], difficulty: all|hard|medium|easy, weakest: int|null, voided: include|exclude|only}
     questions: Optional[Dict[str, Any]] = None
+    #: "exam" (raport komisji) | "judge" (karta jednego sędziego, studio 26.10.2026)
+    kind: str = "exam"
+    #: {judge_id, attempt_id, layout: diploma|player|analysis|sheet, blocks: [...]}
+    judge: Optional[Dict[str, Any]] = None
 
 
 @router.get("/exams/{exam_id}/report", summary="Wyniki egzaminu dla komisji: agregaty, ranking ex aequo, okręgi")
@@ -99,7 +103,63 @@ async def void_preview(exam_id: str, qid: str, who: S.Who = Depends(_who)) -> Di
     return await _run(RS.void_preview(_store(), who, exam_id, qid))
 
 
+async def _photo_uri(url: Optional[str]) -> str:
+    """Zdjęcie sędziego z listy okręgu jako data URI (4 s, do 3 MB). Błąd = pusty napis -> monogram."""
+    if not url:
+        return ""
+    try:
+        import base64
+
+        import httpx
+
+        async with httpx.AsyncClient(timeout=4.0, follow_redirects=True) as client:
+            res = await client.get(url)
+        kind = res.headers.get("content-type", "").split(";")[0].strip()
+        if res.status_code != 200 or not kind.startswith("image/") or len(res.content) > 3_000_000:
+            return ""
+        return f"data:{kind};base64," + base64.b64encode(res.content).decode("ascii")
+    except Exception:  # noqa: BLE001 - zdjęcie jest ozdobą, nie warunkiem pliku
+        logger.info("eksport karty: zdjęcie niedostępne", exc_info=True)
+        return ""
+
+
+def _compose_judge(st: S.Store, who: S.Who, exam_id: str, options: Dict[str, Any]):
+    async def compose(progress):
+        from app import exam_judge_html as J
+        from app import exam_report_html as H
+        from app import exam_report_service as RS
+
+        judge = options["judge"]
+        report = await RS.build_report(st, who, exam_id)
+        review = await S.committee_review(st, who, exam_id, judge["attempt_id"])
+        if str((review.get("attempt") or {}).get("judge_id")) != judge["judge_id"]:
+            raise ExamError("ATTEMPT_NOT_FOUND", "To podejście nie należy do tego sędziego.", 404)
+        record = None
+        if "form" in judge["blocks"]:
+            try:
+                from app import exam_record as RC
+                from app.exam_stats import _stats_store
+
+                prov = (report["exam"].get("cut_province") or None)
+                record = await RC.judge_record(_stats_store(), who, judge["judge_id"], prov)
+            except Exception:  # noqa: BLE001 - forma jest dodatkiem; bez kartoteki karta i tak wychodzi
+                logger.info("eksport karty: kartoteka niedostępna", exc_info=True)
+        progress("collect", 1, 1, None)
+        photo = await _photo_uri((report.get("photos") or {}).get(judge["judge_id"])) if any(
+            b == "photo" for b in judge["blocks"]) else ""
+        exam = report["exam"]
+        crest = "" if exam.get("scope") == "national" and not exam.get("cut_province") else H.crest_data_uri(exam.get("province") or exam.get("cut_province"))
+        html = await asyncio.to_thread(J.render_judge, report, review, record, options, photo=photo, crest=crest, progress=progress)
+        name = (review.get("attempt") or {}).get("judge_name") or judge["judge_id"]
+        return html, J.judge_filename(name, exam.get("name") or "egzamin", options["format"], S.utcnow()).rsplit(".", 1)[0]
+
+    return compose
+
+
 def _compose(st: S.Store, who: S.Who, exam_id: str, options: Dict[str, Any]):
+    if options.get("kind") == "judge":
+        return _compose_judge(st, who, exam_id, options)
+
     async def compose(progress):
         from app import exam_report_html as H
         from app import exam_report_service as RS

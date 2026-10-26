@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from app import exam_report_rules as R
 from app.exam_report_rules import SECTION_LABELS
+from app.exam_print_theme import brand_logo_uri, theme_for
 
 Progress = Callable[[str, int, int, Optional[str]], None]
 
@@ -364,7 +365,8 @@ def _cover(report: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], options
     national = exam.get("scope") == "national"
     crest = "" if national else crest_data_uri(exam.get("province"))
     emblem = (f'<img class="crest" src="{crest}" alt="Herb okręgu"/>' if crest
-              else seal_svg(150, th["seal"] if options["theme"] != "zprp" else "#FFFFFF", "KOMISJA", when.strftime("%d.%m.%Y")))
+              else seal_svg(150, th["cover_ink"] if th["cover"] in (th.get("band"), "#B8322A") else th["seal"], "KOMISJA", when.strftime("%d.%m.%Y")))
+    logo = brand_logo_uri()
     scope = (f"Egzamin ogólnopolski · wyniki okręgu {exam.get('cut_province')}" if exam.get("cut_province")
              else "Egzamin ogólnopolski" if national else f"Egzamin okręgowy · {exam.get('province') or ''}")
     sections = "".join(f"<li>{_e(SECTION_LABELS[k])}</li>" for k in options["sections"])
@@ -374,8 +376,8 @@ def _cover(report: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], options
     ]
     fact_html = "".join(f'<div class="fact"><b>{_e(v)}</b><span>{_e(k)}</span></div>' for k, v in facts)
     anon = '<p class="anon">Dane zanonimizowane - zamiast nazwisk kody „Zdający 001".</p>' if options.get("anonymize") else ""
-    return f"""<section class="cover">
-<div class="emblem">{emblem}</div>
+    return f"""<section class="cover"><div class="cstripes"></div>
+<div class="emblem">{emblem}{f'<img class="clogo" src="{logo}" alt="BAZA"/>' if logo else ""}</div>
 <div class="ckick">Wyniki egzaminu z przepisów</div>
 <h1>{_e(exam.get('name'))}</h1>
 <div class="csub">{_e(scope)} · okno {_when(exam.get('window_start'))} - {_when(exam.get('window_end'))}</div>
@@ -399,8 +401,9 @@ def _css(th: Mapping[str, Any], options: Mapping[str, Any]) -> str:
     gap = 9 if compact else 14
     pad = "2px 5px" if compact else "4px 6px"
     glow = f"svg rect, svg path {{ filter: drop-shadow(0 0 3px {th['pass']}); }}" if th["glow"] else ""
-    cover_ink = "#FFFFFF" if options.get("theme") == "zprp" else th["ink"]
-    cover_soft = "rgba(255,255,255,0.82)" if options.get("theme") == "zprp" else th["soft"]
+    cover_ink = th["cover_ink"]
+    cover_soft = th["cover_soft"]
+    title_font = '"DejaVu Serif", Georgia, serif' if th.get("serif") else '"DejaVu Sans", "Noto Sans", Arial, sans-serif'
     return f"""
 @page {{ size: A4 {"landscape" if landscape else "portrait"}; margin: {"11mm 12mm 13mm" if compact else "14mm 13mm 16mm"}; background: {th['bg']};
   @bottom-center {{ content: "Strona " counter(page) " z " counter(pages); font-size: 8.5pt; color: {th['soft']}; }} }}
@@ -408,8 +411,11 @@ def _css(th: Mapping[str, Any], options: Mapping[str, Any]) -> str:
 * {{ box-sizing: border-box; }}
 body {{ margin: 0; background: {th['bg']}; color: {th['ink']}; font-family: "DejaVu Sans", "Noto Sans", Arial, sans-serif; font-size: {base}pt; line-height: {1.3 if compact else 1.4}; }}
 .page {{ max-width: {1180 if landscape else 860}px; margin: 0 auto; padding: 18px; }}
+.band {{ height: 5px; border-radius: 3px; background: linear-gradient(90deg, {th['band']} 0, {th['band']} 62%, {th['band2']} 62%, {th['band2']} 100%); margin-bottom: 10px; }}
 .head {{ display: flex; align-items: center; gap: 18px; border-bottom: 2px solid {th['line']}; padding-bottom: 12px; margin-bottom: 10px; }}
-.head h1 {{ margin: 0; font-size: {16 if compact else 19}pt; letter-spacing: -0.2px; }}
+.head .hlogo {{ height: 13mm; width: auto; }}
+.head .hcrest {{ height: 14mm; width: auto; }}
+.head h1 {{ margin: 0; font-family: {title_font}; font-size: {16 if compact else 19}pt; letter-spacing: -0.2px; }}
 .head .kick, .ckick {{ font-size: 8pt; font-weight: 900; letter-spacing: 1.6px; color: {th['accent']}; text-transform: uppercase; }}
 .head .sub {{ color: {th['soft']}; font-size: 9pt; margin-top: 3px; }}
 .head .seal {{ margin-left: auto; transform: rotate(-9deg); }}
@@ -466,6 +472,12 @@ ul.br {{ margin: 6px 0 0; padding-left: 16px; font-size: 8.4pt; color: {th['soft
 .cover .ckick {{ color: {cover_soft}; margin-top: 14px; }}
 .cover h1 {{ font-size: {26 if landscape else 30}pt; line-height: 1.1; margin: 6px 0 8px; letter-spacing: -0.5px; }}
 .cover .csub {{ color: {cover_soft}; font-size: 10.5pt; }}
+.cover {{ position: relative; overflow: hidden; }}
+.cover .cstripes {{ position: absolute; right: -40mm; top: -30mm; width: 150mm; height: 150mm; transform: rotate(28deg);
+  background: repeating-linear-gradient(90deg, {th['band2']} 0, {th['band2']} 8mm, transparent 8mm, transparent 16mm); opacity: 0.22; }}
+.cover .emblem {{ position: relative; display: flex; align-items: center; justify-content: space-between; }}
+.cover .emblem img.clogo {{ height: {16 if landscape else 20}mm; width: auto; }}
+.cover h1 {{ font-family: {title_font}; }}
 .cover .emblem img.crest {{ width: {34 if landscape else 44}mm; height: auto; }}
 .cover .facts {{ display: flex; gap: 10mm; margin: 12mm 0 8mm; }}
 .cover .fact b {{ display: block; font-size: 20pt; }}
@@ -484,8 +496,9 @@ def render_report(report: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], 
     """HTML całego raportu. `rows` = wiersze listy wyników po zakresie, filtrze zdających i anonimizacji;
     `report["missing"]` - nieobecni już po filtrze okręgów i anonimizacji."""
     progress = progress or (lambda *_: None)
-    th = THEMES[options["theme"]]
     exam = report["exam"]
+    province = None if exam.get("scope") == "national" and not exam.get("cut_province") else (exam.get("cut_province") or exam.get("province"))
+    th = theme_for(options["theme"], province, THEMES)
     when = generated_at or datetime.now(timezone.utc)
     parts: List[str] = []
     for no, key in enumerate(options["sections"], start=1):
@@ -512,11 +525,14 @@ def render_report(report: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], 
     seal = seal_svg(96, th["seal"], "KOMISJA", when.strftime("%d.%m.%Y")) if options.get("seal") else ""
     anon = " · dane zanonimizowane" if options.get("anonymize") else ""
     cover = _cover(report, rows, options, th, when) if (options.get("layout") or {}).get("cover") else ""
+    logo = brand_logo_uri()
+    crest = "" if province is None else crest_data_uri(province)
+    head_brand = (f'<img class="hlogo" src="{logo}" alt="BAZA"/>' if logo else "") + (f'<img class="hcrest" src="{crest}" alt=""/>' if crest else "")
     return f"""<!doctype html>
 <html lang="pl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_e(exam.get('name'))} - wyniki</title><style>{_css(th, options)}</style></head>
-<body>{cover}<div class="page">
-<div class="head"><div><div class="kick">Wyniki egzaminu z przepisów</div><h1>{_e(exam.get('name'))}</h1>
+<body>{cover}<div class="page"><div class="band"></div>
+<div class="head">{head_brand}<div style="flex:1"><div class="kick">Wyniki egzaminu z przepisów</div><h1>{_e(exam.get('name'))}</h1>
 <div class="sub">{_e(scope)} · okno {_when(exam.get('window_start'))} - {_when(exam.get('window_end'))} · próg {_pct(exam.get('pass_percent'))} · {_e(exam.get('question_count'))} pytań{anon}</div></div>{seal}</div>
 {''.join(parts)}
 <div class="foot">Wygenerowano w BAZIE {_when(when.isoformat())}. Ocena i czas liczone wyłącznie na serwerze. Wskaźnik rzetelności to sygnał dla komisji - decyzje podejmuje komisja.</div>

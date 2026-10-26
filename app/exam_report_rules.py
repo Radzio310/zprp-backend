@@ -33,7 +33,7 @@ FINISHED = ("submitted", "expired")
 
 EXPORT_FORMATS = ("html", "pdf")
 EXPORT_RANGES = ("best", "all", "passed", "failed")
-EXPORT_THEMES = ("paper", "night", "ink", "zprp")
+EXPORT_THEMES = ("paper", "night", "ink", "zprp", "province", "elegant", "premium")
 EXPORT_ORIENTATIONS = ("portrait", "landscape")
 EXPORT_DENSITIES = ("comfortable", "compact")
 PEOPLE_FLAGS = ("any", "only", "none")
@@ -51,7 +51,8 @@ RANGE_LABELS = {
     "passed": "tylko zaliczone",
     "failed": "tylko niezaliczone",
 }
-THEME_LABELS = {"paper": "papier", "night": "noc", "ink": "tusz (do druku)", "zprp": "związkowy"}
+THEME_LABELS = {"paper": "papier", "night": "noc", "ink": "tusz (do druku)", "zprp": "związkowy",
+                "province": "barwy okręgu", "elegant": "jasny elegancki", "premium": "ciemny premium"}
 SORT_LABELS = {
     "place": "miejsce",
     "name": "nazwisko",
@@ -429,7 +430,22 @@ def clean_export_options(raw: Mapping[str, Any], *, national: bool) -> Dict[str,
         raise ExamError("BAD_EXPORT", "Zakres: najlepsze podejście, wszystkie, tylko zaliczone albo tylko niezaliczone.")
     theme = str(raw.get("theme") or "paper")
     if theme not in EXPORT_THEMES:
-        raise ExamError("BAD_EXPORT", "Motyw pliku: papier, noc, tusz (do druku) albo związkowy.")
+        raise ExamError("BAD_EXPORT", "Motyw pliku: barwy okręgu, jasny elegancki albo ciemny premium.")
+    kind = str(raw.get("kind") or "exam")
+    if kind not in ("exam", "judge"):
+        raise ExamError("BAD_EXPORT", "Rodzaj pliku: raport egzaminu albo karta sędziego.")
+    if kind == "judge":
+        from app.exam_judge_html import clean_judge
+
+        try:
+            judge = clean_judge(raw.get("judge"))
+        except ValueError as error:
+            raise ExamError("BAD_EXPORT", str(error))
+        return {"kind": "judge", "format": fmt, "range": "best", "theme": theme, "anonymize": False, "seal": True,
+                "sections": ["cards"], "judge": judge, "layout": {"orientation": "portrait", "density": "comfortable", "cover": False},
+                "people": {"flags": "any", "min_percent": 0.0, "max_percent": 100.0, "provinces": [], "sort": "place",
+                           "judge_ids": [judge["judge_id"]]},
+                "questions": {"rules": [], "difficulty": "all", "weakest": None, "voided": "include"}}
     sections_raw = raw.get("sections")
     sections = list(DEFAULT_SECTIONS) if sections_raw is None else [str(s) for s in sections_raw]
     unknown = [s for s in sections if s not in EXPORT_SECTIONS]
@@ -496,7 +512,7 @@ def clean_export_options(raw: Mapping[str, Any], *, national: bool) -> Dict[str,
         "weakest": weakest,
         "voided": _choice(q_raw, "voided", QUESTION_VOIDED, "include", "Unieważnione: pokaż, pomiń albo tylko unieważnione."),
     }
-    return {"format": fmt, "range": rng, "theme": theme, "anonymize": anonymize,
+    return {"kind": "exam", "format": fmt, "range": rng, "theme": theme, "anonymize": anonymize,
             "seal": raw.get("seal") is not False, "sections": ordered,
             "layout": layout, "people": people, "questions": questions}
 
