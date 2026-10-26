@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>Bastion connector - test techniczny</title>
+<style>
+body{font:14px/1.4 system-ui,sans-serif;margin:16px;background:#111;color:#eee}
+input,select,button{font:inherit;padding:6px 8px;margin:2px;background:#222;color:#eee;border:1px solid #555;border-radius:4px}
+button{cursor:pointer}canvas{border:1px solid #666;max-width:100%;background:#000;outline:none;display:block;margin-top:8px}
+pre{background:#000;padding:8px;white-space:pre-wrap;word-break:break-all}.warn{color:#fc6}
+</style></head><body>
+<h3>Bastion connector - strona testowa (techniczna, nie docelowy UI)</h3>
+<p class="warn">Logowanie wykonujesz Ty, na prawdziwej stronie Discorda widocznej ponizej. Token trzymany tylko w pamieci tej karty.</p>
+<div>
+ <input id="tok" type="password" placeholder="BASTION_CONNECTOR_TOKEN" size="34" autocomplete="off">
+ <select id="scope"><option>default</option><option>personal</option></select>
+ <input id="judge" placeholder="judge_id (np. admin1)" value="tester1">
+ <input id="item" placeholder="bunny_item_id" value="5632" size="8">
+</div>
+<div>
+ <button id="start">1. Rozpocznij logowanie</button>
+ <button id="cancel">Anuluj probe</button>
+ <button id="check">2. Sprawdz playback (game-context)</button>
+ <button id="drop">Rozlacz (usun stan)</button>
+</div>
+<div id="st">status: -</div>
+<canvas id="cv" width="1100" height="700" tabindex="0"></canvas>
+<pre id="out"></pre>
+<script>
+const $=id=>document.getElementById(id);let ws=null,attempt=null,poll=null;
+const H=()=>({Authorization:'Bearer '+$('tok').value,'Content-Type':'application/json'});
+const log=t=>{$('out').textContent=t};
+const mask=o=>JSON.stringify(o,(k,v)=>k==='embed_url'&&v?(()=>{try{const u=new URL(v);return u.origin+u.pathname+' [query ukryte, '+v.length+' znakow]'}catch{return '[adres ukryty]'}})():v,2);
+$('start').onclick=async()=>{
+ const r=await fetch('/attempts',{method:'POST',headers:H(),body:JSON.stringify({scope:$('scope').value,judge_id:$('judge').value,probe_bunny_item_id:+$('item').value||null})});
+ const j=await r.json();if(!r.ok){log(mask(j));return}
+ attempt=j;connect(j.ws_path,j.ticket);
+ clearInterval(poll);poll=setInterval(async()=>{const s=await (await fetch('/attempts/'+attempt.id,{headers:H()})).json();$('st').textContent='status: '+s.status+(s.error?' ('+s.error+')':'');if(s.status!=='waiting_for_user'&&s.status!=='creating'&&s.status!=='verifying'){clearInterval(poll);log('Proba zakonczona: '+s.status)}},1500);
+};
+function connect(path,ticket){
+ ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+path);ws.binaryType='blob';
+ ws.onopen=()=>ws.send(JSON.stringify({type:'auth',ticket}));
+ const ctx=$('cv').getContext('2d');
+ ws.onmessage=async e=>{if(typeof e.data==='string'){const m=JSON.parse(e.data);if(m.type==='status')$('st').textContent='status: '+m.status;return}
+  const bmp=await createImageBitmap(e.data);ctx.drawImage(bmp,0,0,1100,700)};
+ ws.onclose=e=>{$('st').textContent+=' | WS zamkniety '+e.code};
+ $('cv').focus();
+}
+const send=o=>ws&&ws.readyState===1&&ws.send(JSON.stringify(o));
+const pos=e=>{const r=$('cv').getBoundingClientRect();return{x:Math.round((e.clientX-r.left)*1100/r.width),y:Math.round((e.clientY-r.top)*700/r.height)}};
+const mod=e=>(e.altKey?1:0)|(e.ctrlKey?2:0)|(e.metaKey?4:0)|(e.shiftKey?8:0);
+const b=e=>['left','middle','right'][e.button]||'left';
+$('cv').onmousemove=e=>send({t:'mouse',a:'move',...pos(e)});
+$('cv').onmousedown=e=>{$('cv').focus();send({t:'mouse',a:'down',b:b(e),mod:mod(e),...pos(e)})};
+$('cv').onmouseup=e=>send({t:'mouse',a:'up',b:b(e),mod:mod(e),...pos(e)});
+$('cv').onwheel=e=>{e.preventDefault();send({t:'mouse',a:'wheel',dx:Math.round(e.deltaX),dy:Math.round(e.deltaY),...pos(e)})};
+$('cv').oncontextmenu=e=>e.preventDefault();
+$('cv').onkeydown=e=>{if((e.ctrlKey||e.metaKey)&&e.key==='v')return;e.preventDefault();send({t:'key',a:'down',key:e.key,code:e.code,kc:e.keyCode,mod:mod(e)})};
+$('cv').onkeyup=e=>{e.preventDefault();send({t:'key',a:'up',key:e.key,code:e.code,kc:e.keyCode,mod:mod(e)})};
+$('cv').onpaste=e=>{e.preventDefault();send({t:'paste',text:e.clipboardData.getData('text')})};
+$('cancel').onclick=async()=>{if(attempt)log(mask(await (await fetch('/attempts/'+attempt.id+'/cancel',{method:'POST',headers:H()})).json()))};
+$('check').onclick=async()=>{const q=new URLSearchParams({scope:$('scope').value,judge_id:$('judge').value,bunny_item_id:$('item').value,include_embed:'false'});
+ const r=await fetch('/playback?'+q,{headers:H()});log('HTTP '+r.status+'\n'+mask(await r.json()))};
+$('drop').onclick=async()=>{const q=new URLSearchParams({scope:$('scope').value,judge_id:$('judge').value});log(mask(await (await fetch('/connections?'+q,{method:'DELETE',headers:H()})).json()))};
+</script></body></html>
