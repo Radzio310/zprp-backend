@@ -133,7 +133,7 @@ from app.match_market_rules import (
     state_dict,
     with_slot_holder,
 )
-from app.match_market_bench import bench_fields, bench_metrics, km_value, nearest_km
+from app.match_market_bench import bench_fields, bench_metrics, claim_metrics, km_value, merge_metrics, nearest_km
 from app.proel_auth import is_admin
 from app.push.push import send_push_to_judges_report
 from app.settlement_province import spellings
@@ -3216,6 +3216,13 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
     # oddajacy. Sedzia z okregu, ktory tylko oglada oferte, dostaje sam licznik.
     # Kolizje to rozpiska czyjegos weekendu, a nie element oferty.
     if approver or mine:
+        # Te same liczby, co przy ofertach obsadowego: tydzień, odstęp, kolizje,
+        # niedyspozycja (pola nowe i opcjonalne - starsza aplikacja ich nie zna).
+        metrics = await claim_metrics(
+            province,
+            offer,
+            [_s(c["judge_id"]) for c in claims if _s(c["status"]) == "pending"],
+        )
         payload["claims"] = [
             {
                 "id": c["id"],
@@ -3224,7 +3231,7 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
                 "createdAt": _iso(c.get("created_at")),
                 "person": _person(_s(c["judge_id"]), cards.get(_s(c["judge_id"]))),
                 "conflicts": fresh.get(_s(c["judge_id"]), []),
-                **bench_fields(bench.get(_s(c["judge_id"]))),
+                **merge_metrics(bench_fields(bench.get(_s(c["judge_id"]))), metrics.get(_s(c["judge_id"]))),
             }
             for c in claims
         ]

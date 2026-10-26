@@ -72,6 +72,58 @@ def bench_fields(entry: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def merge_metrics(fields: Mapping[str, Any], metric: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """
+    Dokłada do wiersza ławki liczby z ofert obsadowego (`match_market_crew._metrics`):
+    tydzień, najbliższy mecz, odstęp, kolizje, niedyspozycja. Pola są NOWE i
+    opcjonalne - stara aplikacja ich nie czyta. Kilometry i sezon z ławki
+    zostają; luki (None) wypełniamy z metryk, nigdy odwrotnie.
+    """
+    out: Dict[str, Any] = dict(fields)
+    if not metric:
+        return out
+    km = metric.get("km") or {}
+    if out.get("km") is None and isinstance(km, Mapping) and km.get("km") is not None:
+        value = km_value({"km": km.get("km")})
+        if value is not None:
+            out["km"] = value
+            out["kmSource"] = _s(km.get("source")) or out.get("kmSource") or "unknown"
+            out["fromCity"] = out.get("fromCity") or (_s(km.get("from")) or None)
+    if out.get("season") is None and isinstance(metric.get("season"), Mapping):
+        season = metric["season"]
+        field_n, table_n = int(season.get("field", 0) or 0), int(season.get("table", 0) or 0)
+        out["season"] = {"field": field_n, "table": table_n, "total": field_n + table_n}
+    out["weekMatches"] = metric.get("week_matches")
+    out["nearest"] = metric.get("nearest")
+    out["gap"] = metric.get("gap")
+    out["collisions"] = list(metric.get("collisions") or [])
+    out["unavailable"] = metric.get("unavailable")
+    return out
+
+
+async def claim_metrics(province: str, offer: Mapping[str, Any], judge_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Metryki obsadowego dla chętnych zwykłej oferty; błąd = brak liczb, nie błąd odpowiedzi."""
+    if not judge_ids:
+        return {}
+    try:
+        import asyncio
+
+        from app.match_market_crew import _metrics
+        from app.match_market_rules import state_dict
+
+        pseudo = {
+            "province": province,
+            "match_snapshot": state_dict(offer.get("match_snapshot")),
+            "match_at": offer.get("match_at"),
+            "match_id": offer.get("match_id"),
+            "match_code": _s(offer.get("match_code")),
+        }
+        return await asyncio.wait_for(_metrics(pseudo, [{"judge_id": j} for j in judge_ids]), timeout=5.0)
+    except Exception:  # noqa: BLE001 - liczby to dodatek
+        logger.warning("giełda: ławka bez metryk obsadowego (%s)", province, exc_info=True)
+        return {}
+
+
 # ───────────────────────────── baza i sieć ─────────────────────────────
 
 

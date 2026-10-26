@@ -62,3 +62,30 @@ def test_get_offer_asks_for_missing_km_and_season_only_for_deciders():
     code = _code("get_offer")
     assert "ask_google=True" in code
     assert "with_season=approver or mine" in code
+
+
+def test_lawka_dostaje_metryki_obsadowego_bez_nadpisywania():
+    from app.match_market_bench import bench_fields, merge_metrics
+
+    base = bench_fields({"km": None, "source": "unknown", "from": "Gliwice", "season": None})
+    metric = {
+        "km": {"km": 42, "source": "district_table", "from": "Gliwice", "to": "Zabrze"},
+        "season": {"field": 2, "table": 4, "total": 6},
+        "week_matches": 1,
+        "nearest": None,
+        "gap": {"level": "yellow", "shortfall_minutes": 0, "overlap": False},
+        "collisions": [{"code": "S/JmM/3", "level": "yellow"}],
+        "unavailable": None,
+    }
+    out = merge_metrics(base, metric)
+    # Luki z ławki wypełniają metryki, nowe pola są obecne.
+    assert out["km"] == 42.0 and out["kmSource"] == "district_table"
+    assert out["season"] == {"field": 2, "table": 4, "total": 6}
+    assert out["weekMatches"] == 1 and out["gap"]["level"] == "yellow" and len(out["collisions"]) == 1
+    # Znane kilometry i sezon z ławki NIE są nadpisywane.
+    known = bench_fields({"km": 10, "source": "same_city", "from": "Zabrze", "season": {"field": 1, "table": 0}})
+    out2 = merge_metrics(known, metric)
+    assert out2["km"] == 10.0 and out2["kmSource"] == "same_city"
+    assert out2["season"]["total"] == 1
+    # Bez metryk - wiersz bez zmian (zgodność wstecz).
+    assert merge_metrics(known, None) == known
