@@ -158,7 +158,10 @@ def theme_for(name: str, province: Optional[str], legacy: Dict[str, Dict[str, An
 @lru_cache(maxsize=4)
 def brand_logo_uri(px: int = 220) -> str:
     """Logo BAZY (`nowe_logo.png`) jako data URI, zmniejszone do `px` - plik 1:1 jest za ciężki do PDF."""
-    path = BRAND_DIR / "nowe_logo.png"
+    # Do druku wystarcza kopia 600 px (~100 KB) - oryginał 1,9 MB nie jest wczytywany przy każdym zimnym starcie.
+    path = BRAND_DIR / "nowe_logo_print.png"
+    if not path.exists():
+        path = BRAND_DIR / "nowe_logo.png"
     if not path.exists():
         return ""
     try:
