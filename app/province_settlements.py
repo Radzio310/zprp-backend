@@ -772,6 +772,7 @@ def _match_json(match: E.SettledMatch) -> dict:
         "teams": match.teams,
         "distance_km": match.distance_km,
         "distance_source": match.distance_source,
+        "home_city": match.home_city,
         "km_rate": match.km_rate,
         "gross": match.gross,
         "travel": match.travel,
@@ -1153,11 +1154,13 @@ async def _judge_payload(
             and R.triple_table_allowed(row["code"], R.ROLE_TABLE, key)
         )
 
+    route_map = await _route_map(key, payload.get("rows") or [])
     return {
         "province": key,
         "period": data["period"],
         "include_future": include_future,
         "include_zprp": include_zprp,
+        "route_map": route_map,
         "entry": payload,
         "travel": [_travel_json(r) for r in E.travel_rows([entry])],
         "outside_district": {
@@ -1675,6 +1678,57 @@ async def _forecast_assignments(
             )
         )
     return out
+
+
+
+_ROUTE_TABLE_MEMORY: dict = {}
+
+
+async def _route_map(key: str, rows: list[dict]) -> dict:
+    """
+    Współrzędne końców tras do mapy przejazdu w panelu (z pamięci, bez Google)
+    i wersja tabeli okręgu - skąd wzięły się kilometry. Błąd = mapa bez
+    współrzędnych, nigdy błąd szczegółów sędziego.
+    """
+    import json
+    import time
+
+    from app import national_place_rules as NP
+    from app import settlement_route_map_rules as RM
+    from app.db import okreg_distances
+    from app.settlement_distances import pick_distance_table
+
+    try:
+        result = RM.build_route_map(rows, NP.default_gazetteer(), key)
+    except Exception:
+        result = {"home_city": "", "home": None, "points": {}}
+    result["table_version"] = None
+    result["table_versions"] = {}
+    try:
+        content = None
+        stamp = time.monotonic()
+        cached = _ROUTE_TABLE_MEMORY.get(key)
+        if cached and stamp - cached[0] < 120:
+            content = cached[1]
+        else:
+            got = await database.fetch_one(
+                select(okreg_distances.c.content).where(okreg_distances.c.province.in_(spellings(key)))
+            )
+            content = got["content"] if got else None
+            if isinstance(content, str):
+                content = json.loads(content)
+            _ROUTE_TABLE_MEMORY[key] = (stamp, content)
+        if isinstance(content, dict):
+            result["table_version"] = str(content.get("validFrom") or "") or None
+            for row in rows:
+                if row.get("distance_source") == "table" and row.get("day"):
+                    picked = pick_distance_table(content, row["day"])
+                    version = str((picked or {}).get("validFrom") or "") if isinstance(picked, dict) else ""
+                    if version:
+                        result["table_versions"][row["match_key"]] = version
+    except Exception:
+        pass
+    return result
 
 
 async def _forecast_guard(payload: "ForecastRequest") -> str:
