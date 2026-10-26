@@ -34,7 +34,8 @@ def make_store(path) -> V.LiveStore:
     db = Database(f"sqlite+aiosqlite:///{path}")
 
     async def judges(province):
-        return []
+        # Sędzia 101 ma zdjęcie na liście okręgu; reszta jedzie na inicjałach.
+        return [{"judge_id": "101", "photo_url": "https://zdjecia.example/101.jpg"}]
 
     async def push(ids, title, body, data):
         return None

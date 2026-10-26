@@ -223,3 +223,16 @@ def test_websocket_odmowy_i_polling_awaryjny(client):
     assert refused("/exam-live/ws/nieistnieje?role=projector")[0] == "LIVE_NOT_FOUND"
     # gniazdo nie odstawia GET-a: bez WebSocketu stan jest dostępny tak samo (polling)
     assert client.get(f"/exam-live/{sid}/state", headers=h("host")).json()["session"]["joined"] == 1
+
+
+def test_zdjecia_na_zetonach_dla_prowadzacego_i_uczestnika(client):
+    view = create(client)
+    sid, pin = view["session"]["id"], view["session"]["pin"]
+    client.post("/exam-live/join", json={"pin": pin}, headers=h("p1"))
+    client.post("/exam-live/join", json={"pin": pin}, headers=h("p2"))
+    with client.websocket_connect(f"/exam-live/ws/{sid}?role=host&token=tok-2") as host,             client.websocket_connect(f"/exam-live/ws/{sid}?role=player&token=tok-101") as player:
+        host_view, player_view = recv(host)["snapshot"], recv(player)["snapshot"]
+        photos = {r["name"]: r.get("photo") for r in host_view["participants"]}
+        assert photos["Sędzia 1"] == "https://zdjecia.example/101.jpg"
+        assert [v for k, v in photos.items() if k != "Sędzia 1"] == [None]
+        assert player_view["role"] == "player"

@@ -223,13 +223,15 @@ def build_router(deps: LiveDeps) -> APIRouter:
                     except Exception:  # noqa: BLE001 - gniazdo mogło już zniknąć
                         pass
                     continue
-                view = L.view_for("player", state, viewer, now)
+                view = await with_photos(L.view_for("player", state, viewer, now), state)
             elif conn.role == "projector":
                 if "projector" not in shared:
                     shared["projector"] = await projector_view(state, now)
                 view = shared["projector"]
             else:
-                view = shared.get(conn.role) or shared.setdefault(conn.role, L.view_for(conn.role, state, None, now))
+                if conn.role not in shared:
+                    shared[conn.role] = await with_photos(L.view_for(conn.role, state, None, now), state)
+                view = shared[conn.role]
             await hub.send(sid, conn, {"type": "snapshot", "rev": view["rev"], "snapshot": view})
 
     photo_cache: Dict[str, tuple] = {}
@@ -265,25 +267,40 @@ def build_router(deps: LiveDeps) -> APIRouter:
         photo_cache[s["id"]] = (now_m, ids, out)
         return out
 
+    def attach_photos(view: Dict[str, Any], state: Mapping[str, Any], photos: Mapping[str, str]) -> Dict[str, Any]:
+        """Dokłada `photo` do wierszy z osobami: lista uczestników, ranking, podium i tabela końcowa
+        (każda rola dostaje to samo zdjęcie, co rzutnik). Bez zdjęcia wiersz zostaje bez pola."""
+        if not photos:
+            return view
+        judge_of = {L.public_key(p["id"]): str(p.get("judge_id") or "").strip() for p in state["participants"]}
+        board = view.get("leaderboard") or {}
+        final = view.get("final") or {}
+        rows = (list(view.get("participants") or []) + list(board.get("top") or []) + list(board.get("full") or [])
+                + list(final.get("board") or []) + list(final.get("ranking") or []))
+        for row in rows:
+            key = row.get("key") or (L.public_key(row["participant_id"]) if row.get("participant_id") else "")
+            url = photos.get(judge_of.get(key, ""))
+            if url:
+                row["photo"] = url
+        return view
+
+    def cached_photos(state: Mapping[str, Any]) -> Dict[str, str]:
+        """Tylko z pamięci (ścieżki synchroniczne): pusto, dopóki nikt nie pobrał listy okręgu."""
+        hit = photo_cache.get(state["session"]["id"])
+        return hit[2] if hit else {}
+
+    async def with_photos(view: Dict[str, Any], state: Mapping[str, Any]) -> Dict[str, Any]:
+        has_rows = view.get("participants") or view.get("leaderboard") or view.get("final")
+        return attach_photos(view, state, await photos_of(state)) if has_rows else view
+
     async def projector_view(state: Dict[str, Any], now: datetime) -> Dict[str, Any]:
-        """Widok rzutnika + oprawa (herb, barwy, krótki adres) + zdjęcia na koszulkach.
-        Zdjęcia na żetonach: lobby, pas „kto oddał” w pytaniu i ranking."""
+        """Widok rzutnika + oprawa (herb, barwy, krótki adres) + zdjęcia na koszulkach."""
         view = L.view_for("projector", state, None, now)
         s = state["session"]
         brand = brand_of(s)
         view["brand"] = {"palette": brand["palette"], "crest_url": brand["crest_url"], "province_label": brand["province_label"],
                          "join_url": L.web_join_url(s.get("pin")), "short": L.WEB_SHORT}
-        rows = (list(view.get("participants") or []) + list((view.get("leaderboard") or {}).get("top") or [])
-                + list((view.get("final") or {}).get("board") or []))
-        if rows:
-            photos = await photos_of(state)
-            if photos:
-                judge_of = {L.public_key(p["id"]): str(p.get("judge_id") or "").strip() for p in state["participants"]}
-                for row in rows:
-                    url = photos.get(judge_of.get(row.get("key") or "", ""))
-                    if url:
-                        row["photo"] = url
-        return view
+        return await with_photos(view, state)
 
     def changed(sid: str, *, immediate: bool) -> None:
         hub.schedule(sid, render, immediate=immediate)
@@ -293,7 +310,7 @@ def build_router(deps: LiveDeps) -> APIRouter:
         now = deps.now()
         if since_rev is not None and since_rev == state["session"]["rev"] and state["session"]["phase"] != "question":
             return {"unchanged": True, "rev": since_rev, "server_now": now.isoformat()}
-        return L.view_for(role, state, viewer_of(state, pid), now)
+        return attach_photos(L.view_for(role, state, viewer_of(state, pid), now), state, cached_photos(state))
 
     # -- prowadzący -------------------------------------------------------
 
@@ -746,7 +763,7 @@ def build_router(deps: LiveDeps) -> APIRouter:
     async def send_snapshot(sid: str, conn: Conn) -> None:
         state = await fresh_state(sid)
         now = deps.now()
-        view = L.view_for(conn.role, state, viewer_of(state, conn.participant_id), now)
+        view = await with_photos(L.view_for(conn.role, state, viewer_of(state, conn.participant_id), now), state)
         await hub.send(sid, conn, {"type": "snapshot", "rev": view["rev"], "snapshot": view})
 
     async def handle_frame(sid: str, conn: Conn, data: Dict[str, Any]) -> None:
