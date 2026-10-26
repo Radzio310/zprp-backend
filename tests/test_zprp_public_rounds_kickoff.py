@@ -334,3 +334,21 @@ def test_przeglad_kolejki_niesie_etykiete_i_daty(env):
     assert out["round"]["label"] == "Kolejka 8" and out["round"]["name"] == "Seria 8"
     assert (out["round"]["date_from"], out["round"]["date_to"]) == ("2026-10-24", "2026-10-25")
     assert {r["match_id"]: r["score_source"] for r in out["results"]}["g1"] == "proel"
+
+
+def test_przeglad_kolejki_ruchy_licza_wynik_z_protokolu(env):
+    """Ruchy w tabeli: wynik z ProEla (g1, ZPRP jeszcze go nie ma) liczy się do tabeli kolejki."""
+    async def go(portal, db, T):
+        extras = importlib.import_module("app.zprp_public.extras")
+        return await extras.round_review("K1", "8")
+
+    out = run(env, go)
+    moves = {m["team_name"]: m for m in out["table_moves"]}
+    ind, kghm = moves["Industria Kielce"], moves["KGHM Chrobry Głogów"]
+    assert ind["points_gained"] == 3 and ind["round_results"][0]["code"] == "W"
+    assert kghm["round_results"][0]["code"] == "L" and kghm["points_gained"] == 0
+    # Pole klienta `previous` = `previous_position` (dawniej tylko to drugie - portal pokazywał same kreski).
+    assert all(m["previous"] == m["previous_position"] for m in out["table_moves"])
+    assert any(m["status"] in ("up", "down") for m in out["table_moves"])
+    assert out["moves_source"] == "results" and out["win_points"] == 3
+    assert out["stats"]["matches"] == 2 and out["stats"]["goals"] == 120

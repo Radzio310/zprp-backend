@@ -129,9 +129,13 @@ def _head_to_head(team_ids: list[str], matches: list[dict], win_pts: int) -> dic
     return {t: (v[0], v[1], v[2]) for t, v in table.items()}
 
 
-def rank(rows: list[dict], matches: list[dict]) -> list[dict]:
-    """Układa wiersze i nadaje `position` z remisami ex aequo (wspólne miejsce, następne przeskakuje)."""
-    wp = win_points(rows)
+def rank(rows: list[dict], matches: list[dict], win_pts: Optional[int] = None) -> list[dict]:
+    """Układa wiersze i nadaje `position` z remisami ex aequo (wspólne miejsce, następne przeskakuje).
+
+    `win_pts` podaje wołający, gdy wiersze nie mają oficjalnych `wins`/`draws`
+    (tabela wyliczona z wyników, np. przegląd kolejki); inaczej wnioskujemy z tabeli.
+    """
+    wp = win_pts or win_points(rows)
     buckets: dict[int, list[dict]] = {}
     for r in rows:
         buckets.setdefault(_i(r.get("points")), []).append(r)

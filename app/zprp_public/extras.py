@@ -42,6 +42,10 @@ from app.standings_refresh import apply_provisional
 from app.zprp_public import corrections, match_rules as MR, portal_rules as R, referee_stats as RS
 from app.zprp_public import referee_placeholder as RP
 from app.zprp_public import round_rules as ROUNDS
+from app.zprp_public import round_review_rules as RV
+from app.zprp_public import proel_card_rules as PR, proel_live_rules as LR
+from app.zprp_public.proel_cards import _rows as proel_rows
+from app import standings_provisional as SP
 from app.zprp_public.api import _dict
 from app.zprp_public import geocode
 from app.zprp_public.enrich import seasons_info
@@ -785,58 +789,130 @@ async def head_to_head(club_a: str = Query(..., min_length=1), club_b: str = Que
 
 @router.get("/competitions/{competition_id}/rounds/{round}/review")
 async def round_review(competition_id: str, round: str) -> dict[str, Any]:  # noqa: A002 - nazwa z kontraktu
-    """`round` = matchday_id albo numer kolejki (przy kilku rundach: pierwsza po kolei)."""
-    D, RN = zprp_public_matchdays, zprp_public_rounds
+    """`round` = matchday_id albo numer kolejki (przy kilku rundach: pierwsza po kolei).
+
+    Ruchy w tabeli: miejsce po tej kolejce kontra po poprzedniej, obie tabele z wyników
+    (z zapasem ProEla) tą samą regułą (`round_review_rules`). Do tego statystyki kolejki.
+    """
+    return await _cached(f"round-review:{competition_id}:{round}", 30.0, lambda: _round_review(competition_id, round))
+
+
+async def _round_review(competition_id: str, round: str) -> dict[str, Any]:  # noqa: A002
+    D, RN, ST = zprp_public_matchdays, zprp_public_rounds, zprp_public_standings
     days = [_dict(r) for r in await database.fetch_all(
-        select(D.c.matchday_id, D.c.number, D.c.sequence, D.c.name, D.c.starts_on, D.c.ends_on, RN.c.name.label("round_name"))
+        select(D.c.matchday_id, D.c.round_id, D.c.number, D.c.sequence, D.c.name, D.c.starts_on, D.c.ends_on,
+               RN.c.name.label("round_name"))
         .join(RN, RN.c.round_id == D.c.round_id).where(RN.c.competition_id == competition_id).order_by(D.c.sequence)
     )]
+    order = RV.day_order(days)
+    by_order = sorted(days, key=lambda d: order[str(d["matchday_id"])])
     target = next((d for d in days if d["matchday_id"] == round), None) or next(
-        (d for d in days if str(d["number"]) == round), None)
+        (d for d in by_order if str(d["number"]) == round), None) or next(
+        (d for d in by_order if str(ROUNDS.matchday_number(d["number"], d["name"]) or "") == round), None)
     if not target:
         raise HTTPException(404, "Nie znaleziono kolejki")
-    seq = {d["matchday_id"]: (d["sequence"] if d["sequence"] is not None else 10**6) for d in days}
-    all_rows = [_dict(r) for r in await database.fetch_all(
-        select(*[M.c[c] for c in _TEAM_COLS]).where(M.c.competition_id == competition_id))]
-    current = [m for m in all_rows if m["matchday_id"] == target["matchday_id"]]
-    played_upto = [m for m in all_rows if seq.get(m["matchday_id"], 10**6) <= seq[target["matchday_id"]]]
-    before = [m for m in played_upto if m["matchday_id"] != target["matchday_id"]]
-    after_table, before_table = MR.simulate_table(played_upto), MR.simulate_table(before)
-    pos_before = {r["team_id"]: r["position"] for r in before_table}
-    moves = [{
-        "team_id": r["team_id"], "team_name": r["team_name"], "club_id": r["club_id"], "position": r["position"],
-        "previous_position": pos_before.get(r["team_id"]),
-        "delta": (pos_before[r["team_id"]] - r["position"]) if r["team_id"] in pos_before else None,
-        "points": r["points"], "matches": r["matches"],
-    } for r in after_table]
-    results = await _cards(await database.fetch_all(
-        select(*_card_cols()).where(and_(M.c.competition_id == competition_id, M.c.matchday_id == target["matchday_id"]))
-        .order_by(M.c.scheduled_at)))
-    potr = None
-    ids = [m["match_id"] for m in current]
-    if ids:
-        best = await database.fetch_one(
-            select(MP.c.player_id, MP.c.team_id, MP.c.side, MP.c.goals, MP.c.penalty_goals, MP.c.penalty_attempts, MP.c.match_id,
-                   zprp_public_players.c.first_name, zprp_public_players.c.last_name,
-                   M.c.home_team_name, M.c.away_team_name, M.c.home_club_id, M.c.away_club_id)
-            .select_from(MP.join(M, M.c.match_id == MP.c.match_id).join(zprp_public_players, zprp_public_players.c.player_id == MP.c.player_id))
-            .where(and_(MP.c.match_id.in_(ids), MP.c.goals > 0))
-            .order_by(MP.c.goals.desc(), MP.c.penalty_attempts.asc(), MP.c.two_minutes.asc()).limit(1)
-        )
-        if best:
-            d = _dict(best)
-            club_id = d["home_club_id"] if d["side"] == "home" else d["away_club_id"]
-            lookup = await _club_lookup({club_id})
-            potr = {"player_id": d["player_id"], "name": f'{d["first_name"]} {d["last_name"]}'.strip(),
-                    "team_name": d["home_team_name"] if d["side"] == "home" else d["away_team_name"],
-                    "club_id": club_id, "club_logo_url": (lookup.get(club_id) or {}).get("logo_url"),
-                    "match_id": d["match_id"], "goals": d["goals"], "penalty_goals": d["penalty_goals"],
-                    "rule": "najwięcej bramek w kolejce"}
-    day = ROUNDS.decorate_matchday({k: target[k] for k in ("matchday_id", "number", "name", "round_name", "starts_on", "ends_on")}, results)
+    target_id = str(target["matchday_id"])
+
+    # Wszystkie mecze rozgrywek jako karty: ten sam wynik co na ekranie (korekty, zapas z ProEla).
+    cards = await _cards(await database.fetch_all(
+        select(*_card_cols(), M.c.matchday_id).where(M.c.competition_id == competition_id)))
+    cards = RV.assign_days(cards, days)
+    current = sorted((c for c in cards if c.get("matchday_id") == target_id),
+                     key=lambda c: TP.kickoff_sort_key(c.get("scheduled_at")))
+    official = [_dict(r) for r in await database.fetch_all(
+        select(ST.c.table_id, ST.c.group_id, ST.c.team_id, ST.c.wins, ST.c.draws, ST.c.points)
+        .where(ST.c.competition_id == competition_id))]
+    win_pts = SP.win_points(official) if official else 3
+    round_teams = {str(c.get(k)) for c in current for k in ("home_team_id", "away_team_id") if c.get(k)}
+    group_of = RV.team_groups(official, round_teams)
+    teams: dict[str, dict] = {}
+    for c in cards:
+        for side in ("home", "away"):
+            tid = c.get(f"{side}_team_id")
+            if tid and tid not in teams:
+                teams[tid] = {"team_id": tid, "team_name": c.get(f"{side}_team_name"), "club_id": c.get(f"{side}_club_id")}
+    moves = RV.table_moves(cards, order, target_id, win_pts, teams.values(), group_of)
+    logos = {c.get(f"{s}_club_id"): c.get(f"{s}_logo_url") for c in cards for s in ("home", "away") if c.get(f"{s}_club_id")}
+    for m in moves:
+        m["logo_url"] = logos.get(m.get("club_id"))
+
+    players = await _round_players([c for c in current if RV.counts(c)])
+    potr = _player_of_round(players)
+    season_cards = await _season_two_minutes(competition_id)
+    timelines = await _round_timelines([c for c in current if RV.counts(c)])
+    stats = RV.round_stats(current, [c for c in cards if RV.counts(c)], players, season_cards, timelines)
+
+    day = ROUNDS.decorate_matchday({k: target[k] for k in ("matchday_id", "number", "name", "round_name", "starts_on", "ends_on")}, current)
     return {"competition_id": competition_id,
             "round": {k: day.get(k) for k in ("matchday_id", "number", "name", "round_name", "label", "date_from", "date_to",
                                                "matches_played", "matches_total")},
-            "results": results, "table_moves": moves, "player_of_round": potr}
+            "results": current, "table_moves": moves, "moves_source": "results", "win_points": win_pts,
+            "player_of_round": potr, "stats": stats}
+
+
+async def _round_players(played: list[dict]) -> list[dict]:
+    """Zawodnicy z protokołów meczów kolejki (bramki, kary) z nazwą drużyny i herbem."""
+    if not played:
+        return []
+    by_id = {str(c["match_id"]): c for c in played}
+    P = zprp_public_players
+    rows = [_dict(r) for r in await database.fetch_all(
+        select(MP.c.match_id, MP.c.player_id, MP.c.team_id, MP.c.side, MP.c.goals, MP.c.two_minutes,
+               MP.c.penalty_goals, MP.c.penalty_attempts, P.c.first_name, P.c.last_name, P.c.photo_url)
+        .select_from(MP.join(P, P.c.player_id == MP.c.player_id))
+        .where(MP.c.match_id.in_(list(by_id))))]
+    out = []
+    for r in rows:
+        card = by_id.get(str(r["match_id"])) or {}
+        side = "home" if r.get("side") == "home" else "away"
+        out.append({**r, "name": f'{r.get("first_name") or ""} {r.get("last_name") or ""}'.strip(),
+                    "team_id": r.get("team_id") or card.get(f"{side}_team_id"),
+                    "team_name": card.get(f"{side}_team_name"), "club_id": card.get(f"{side}_club_id"),
+                    "club_logo_url": card.get(f"{side}_logo_url")})
+    return out
+
+
+def _player_of_round(players: list[dict]) -> Optional[dict]:
+    """Najwięcej bramek w jednym meczu kolejki (mniej karnych, mniej kar wyżej)."""
+    scored = [p for p in players if (p.get("goals") or 0) > 0]
+    if not scored:
+        return None
+    d = min(scored, key=lambda p: (-(p.get("goals") or 0), p.get("penalty_attempts") or 0, p.get("two_minutes") or 0,
+                                   str(p.get("player_id"))))
+    pens = f'{d.get("penalty_goals") or 0}/{d["penalty_attempts"]}' if d.get("penalty_attempts") else None
+    return {"player_id": d["player_id"], "name": d["name"], "team_name": d.get("team_name"), "team": d.get("team_name"),
+            "club_id": d.get("club_id"), "club_logo_url": d.get("club_logo_url"), "photo_url": d.get("photo_url"),
+            "match_id": d["match_id"], "goals": d["goals"], "penalty_goals": d.get("penalty_goals"), "penalties": pens,
+            "rule": "najwięcej bramek w kolejce"}
+
+
+async def _season_two_minutes(competition_id: str) -> dict:
+    """Kary 2 min w meczach rozgrywek z protokołem (średnia sezonu do porównania)."""
+    row = await database.fetch_one(
+        select(func.count(func.distinct(MP.c.match_id)).label("matches"), func.sum(MP.c.two_minutes).label("two_minutes"))
+        .select_from(MP.join(M, M.c.match_id == MP.c.match_id))
+        .where(and_(M.c.competition_id == competition_id, M.c.score_home.is_not(None))))
+    return _dict(row) if row else {}
+
+
+async def _round_timelines(played: list[dict]) -> dict[str, dict]:
+    """Przebieg meczów kolejki z zakończonych protokołów ProEl. Dodatek: błąd = brak dodatków."""
+    if not played:
+        return {}
+    try:
+        rows = await proel_rows([str(c["match_id"]) for c in played],
+                                sorted({str(c.get("match_code") or "").strip() for c in played} - {""}))
+        out: dict[str, dict] = {}
+        for c in played:
+            row = PR.pick_row(rows, c)
+            if not row or str(row.get("status") or "") not in PR.FINISHED:
+                continue
+            blob = row.get("blob") or {}
+            cfg = blob.get("matchConfig") if isinstance(blob.get("matchConfig"), dict) else {}
+            out[str(c["match_id"])] = LR.timeline(blob, LR.host_is_home(cfg, c.get("home_team_name"), c.get("away_team_name")))
+        return out
+    except Exception:  # noqa: BLE001 - ProEl jest dodatkiem
+        return {}
 
 
 # ---------------------------------------------------------------------------
