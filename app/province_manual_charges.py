@@ -290,13 +290,19 @@ def _google_key() -> str:
 from app.national_place_rules import province_label, province_slug  # noqa: E402
 
 
-async def _google_km(client: Any, origin: str, destination: str, region: str = "") -> Optional[float]:
+async def _google_km(
+    client: Any, origin: str, destination: str, region: str = "", region_key: str = ""
+) -> Optional[float]:
     """Najkrótsza trasa Google jak w aplikacji (`settlement_distances.google_distance`)."""
     from app import settlement_distances as SD
 
     if not SD.GOOGLE_MAPS_API_KEY:
         SD.GOOGLE_MAPS_API_KEY = _google_key()
-    return await SD.google_distance(client, origin, destination, region)
+    from app import national_place_rules as NP
+    from app import settlement_route_map_rules as RM
+
+    start, end = RM.locator(NP.default_gazetteer(), region_key)(origin, destination) if region_key else (None, None)
+    return await SD.google_distance(client, origin, destination, region, start, end)
 
 
 async def _resolve_km(
@@ -331,7 +337,7 @@ async def _resolve_km(
     client = None
     try:
         for item in todo:
-            table_km = index.lookup(item["home_city"], city)
+            table_km = None if central else index.lookup(item["home_city"], city)
             hit = NL.pick_distance(
                 central,
                 home=item["home_city"],
@@ -351,7 +357,7 @@ async def _resolve_km(
 
                 client = httpx.AsyncClient(timeout=8.0)
             google_left -= 1
-            value = await _google_km(client, item["home_city"], city, province_label(province_slug(province)))
+            value = await _google_km(client, item["home_city"], city, province_label(province_slug(province)), province_slug(province))
             item["km_one_way"] = value
             item["km_source"] = "google" if value is not None else "none"
     finally:

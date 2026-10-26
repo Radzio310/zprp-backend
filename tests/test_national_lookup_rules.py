@@ -44,15 +44,12 @@ def test_mecz_okregowy_tabela_okregu_wygrywa_z_tabela_zprp():
     assert NL.pick_distance(False, home="Gliwice", city="Opole", national=national) is None
 
 
-def test_mecz_centralny_tabela_okregu_dopiero_po_zprp():
+def test_mecz_centralny_pomija_tabele_okregu():
     national = NL.expand_pairs({("gliwice", "zabrze"): 20})
     assert NL.pick_distance(
         True, home="Gliwice", city="Zabrze", table_km=18, national=national
     ) == (20.0, "zprp-table")
-    assert NL.pick_distance(True, home="Gliwice", city="Kielce", table_km=150, national=national) == (
-        150.0,
-        "table",
-    )
+    assert NL.pick_distance(True, home="Gliwice", city="Kielce", table_km=150, national=national) is None
     assert NL.pick_distance(True, home="Lipnik", city="Gliwice", table_km=None, national=national) is None
 
 

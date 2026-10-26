@@ -1644,7 +1644,7 @@ async def _forecast_assignments(
         city_key = normalize_city(item["city"])[0] if item["city"] else ""
         if home and item["city"]:
             central = R.is_central_level_competition(item["code"])
-            table_km = book.lookup(home, item["city"], item["match_at"].date())
+            table_km = None if central else book.lookup(home, item["city"], item["match_at"].date())
             hit = NL.pick_distance(
                 central,
                 home=home,

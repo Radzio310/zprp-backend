@@ -26,3 +26,9 @@ def test_mapa_trasy_i_brak_wspolrzednych():
     assert out["home"]["province"] == "slaskie"
     assert out["points"]["Gliwice"]["lat"] > 50
     assert out["points"]["Nieznanowo"] is None
+
+
+def test_locator_daje_srodki_miejscowosci_z_imiennikiem_po_wojewodztwie():
+    home, dest = RM.locator(gaz(), "slaskie")("Lipnik", "Gliwice")
+    assert abs(home[0] - 50.774) < 0.01 and abs(home[1] - 19.432) < 0.01
+    assert abs(dest[0] - 50.294) < 0.01

@@ -54,3 +54,21 @@ def test_google_najkrotsza_trasa_z_regionem_sedziego():
     assert km == 31.1
     assert len(seen) == 4
     assert all(p["origin"] == "Tychy, śląskie, Polska" for p in seen)
+
+
+def test_google_na_wspolrzednych_srodka_miejscowosci():
+    seen = []
+
+    class R:
+        def json(self):
+            return {"routes": [{"legs": [{"distance": {"value": 31100}}]}]}
+
+    class C:
+        async def get(self, url, params):
+            seen.append(params)
+            return R()
+
+    SD.GOOGLE_MAPS_API_KEY = "x"
+    km = asyncio.run(SD.google_distance(C(), "Tychy", "Gliwice", "śląskie", (50.12, 18.99), (50.29, 18.67)))
+    assert km == 31.1
+    assert seen[0]["origin"] == "50.12,18.99" and seen[0]["destination"] == "50.29,18.67"

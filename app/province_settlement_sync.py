@@ -1293,7 +1293,7 @@ async def refresh_province(
                 if not (home and city):
                     continue
                 central = R.is_central_level_competition(row.get("match_code"))
-                table_km = book.for_day(row.get("match_at")).lookup(home, city)
+                table_km = None if central else book.for_day(row.get("match_at")).lookup(home, city)
                 picked = NL.pick_distance(
                     central,
                     home=home,
@@ -1317,6 +1317,7 @@ async def refresh_province(
                     client=public,
                     cache=memory,
                     origin_region=province_label(region_slug),
+                    locate=_route_locator(province),
                 )
                 await _google_memory_save(
                     region_slug,
@@ -1400,7 +1401,14 @@ async def refresh_province(
 #: wersji (np. starej trasy domyślnej, source „google") są ignorowane i liczone
 #: od nowa - podbić przy każdej zmianie sposobu pomiaru (jak
 #: `GOOGLE_DISTANCE_REVISION` w aplikacji).
-GOOGLE_MEMORY_SOURCE = "google-shortest-r1"
+def _route_locator(province: str):
+    from app import national_place_rules as NP
+    from app import settlement_route_map_rules as RM
+
+    return RM.locator(NP.default_gazetteer(), province)
+
+
+GOOGLE_MEMORY_SOURCE = "google-shortest-r2"
 
 
 async def _google_memory(region_slug: str) -> dict:

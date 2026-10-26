@@ -229,7 +229,7 @@ def pick_distance(
 
     None znaczy: tabele milczą, wołający pyta dalej (Google w synchronizacji
     i w ręcznych meczach, historia sędziego w prognozie). `table_km` to wynik
-    tabeli okręgu z dnia meczu - dla meczu centralnego służy dopiero po tabeli ZPRP.
+    tabeli okręgu z dnia meczu - dla meczu centralnego jest ignorowany.
     `province` - okręg wołającego, rozstrzyga miejscowości o tej samej nazwie.
     """
     if not str(home or "").strip() or not str(city or "").strip():
@@ -246,13 +246,6 @@ def pick_distance(
             hit = national_km(national or {}, home, city, province)
             if hit is not None:
                 return float(hit), SOURCE_NATIONAL
-    # Mecz centralny: tabele ZPRP milczą, a tabela okręgu zna parę - kilometry to
-    # fakt, więc lepsza ona niż Google, który przy imienniku miejscowości
-    # („Lipnik" w 6 województwach) mierzył do cudzej wsi (26.10.2026: 271,5 km
-    # zamiast 94 km Lipnik - Gliwice). Kolejność źródeł meczu centralnego bez zmian.
-    if is_central and table_km is not None:
-        value = float(table_km)
-        return value, SOURCE_SAME_CITY if value == 0 else SOURCE_TABLE
     return None
 
 

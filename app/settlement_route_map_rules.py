@@ -57,3 +57,23 @@ def build_route_map(rows: Iterable[Mapping[str, Any]], gaz: Gazetteer, province:
         if city and city not in points:
             points[city] = place_point(gaz, city, None, near)
     return {"home_city": home_city, "home": home, "points": points}
+
+
+def locator(gaz: Gazetteer, province: Any):
+    """
+    (dom, hala) -> (punkt domu, punkt hali) jako (lat, lon) albo None.
+
+    Dom rozstrzyga województwo okręgu, halę - najbliższy imiennik względem domu
+    (te same zasady co mapa przejazdu w panelu).
+    """
+
+    def locate(origin: Any, destination: Any):
+        home = place_point(gaz, origin, province)
+        near = (home["lat"], home["lon"]) if home else None
+        dest = place_point(gaz, destination, None, near)
+        return (
+            (home["lat"], home["lon"]) if home else None,
+            (dest["lat"], dest["lon"]) if dest else None,
+        )
+
+    return locate

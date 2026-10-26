@@ -281,7 +281,12 @@ async def _directions_km(
 
 
 async def google_distance(
-    client: Any, origin: str, destination: str, origin_region: str = ""
+    client: Any,
+    origin: str,
+    destination: str,
+    origin_region: str = "",
+    origin_point: Optional[tuple[float, float]] = None,
+    destination_point: Optional[tuple[float, float]] = None,
 ) -> Optional[float]:
     """
     NAJKRÓTSZA trasa Google bez dróg płatnych - tak samo jak aplikacja
@@ -297,8 +302,13 @@ async def google_distance(
     """
     if not GOOGLE_MAPS_API_KEY or not origin or not destination:
         return None
-    start = f"{origin}, {origin_region}, Polska" if origin_region else f"{origin}, Polska"
-    end = f"{destination}, Polska"
+    # Środek miejscowości jako współrzędne (jak `getCityCoords` w aplikacji), gdy
+    # je znamy; inaczej nazwa z województwem sędziego.
+    start = (
+        f"{origin_point[0]},{origin_point[1]}" if origin_point
+        else f"{origin}, {origin_region}, Polska" if origin_region else f"{origin}, Polska"
+    )
+    end = f"{destination_point[0]},{destination_point[1]}" if destination_point else f"{destination}, Polska"
     import asyncio
 
     answers = await asyncio.gather(
@@ -318,6 +328,7 @@ async def resolve_distances(
     client: Any = None,
     cache: Optional[dict[tuple[str, str], Optional[float]]] = None,
     origin_region: str = "",
+    locate: Optional[Any] = None,
 ) -> dict[tuple[str, str], tuple[Optional[float], str]]:
     """
     Para miast -> (kilometry, zrodlo).
@@ -343,7 +354,7 @@ async def resolve_distances(
             out[(origin, destination)] = (table_hit, "same-city" if table_hit == 0 else "table")
             continue
 
-        value = await google_distance(client, origin, destination, origin_region) if client is not None else None
+        value = await google_distance(client, origin, destination, origin_region, *(locate(origin, destination) if locate else (None, None))) if client is not None else None
         cache[key] = value
         out[(origin, destination)] = (value, "google" if value is not None else "none")
 
