@@ -705,6 +705,7 @@ def clip_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dict[s
         "author": person(names, row.get("author_id")), **acted_fields(names, row), "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"), "can_edit": may(ctx, "edit", owner=owner),
         "mp4_status": row.get("mp4_status") or "none",
+        "important": bool(row.get("important")), "to_discuss": bool(row.get("to_discuss")),
         "public_url": R.public_url("clip", row.get("public_token")),
         "thread": thread,
     }

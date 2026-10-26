@@ -198,6 +198,34 @@ def test_klipy_wlasnosc_i_walidacja(env):
     assert deleted == {"ok": True} and after["clips"] == []
 
 
+def test_klip_znaki_istotny_i_do_omowienia(env, monkeypatch):
+    sent = []
+
+    async def fake_notify(ctx, actor_id, title, body, **kw):
+        sent.append((title, kw.get("recipients"), kw.get("clip_id")))
+        return {}
+
+    import app.mentor_panel_notify as N
+    monkeypatch.setattr(N, "notify", fake_notify)
+
+    async def go():
+        L = env.library
+        pair, mentor = await env.actor(JUDGES[0]), await env.actor(MENTOR)
+        clip = await L.create_clip(PAIR, clip_body(env), pair)
+        stranger = await raises(L.update_clip(clip["id"], L.ClipPatch(important=True), mentor))
+        flagged = await L.update_clip(clip["id"], L.ClipPatch(important=True, to_discuss=True), pair)
+        again = await L.update_clip(clip["id"], L.ClipPatch(to_discuss=True), pair)
+        cleared = await L.update_clip(clip["id"], L.ClipPatch(important=False, to_discuss=False), pair)
+        return clip, stranger, flagged, again, cleared
+
+    clip, stranger, flagged, again, cleared = env.run(go)
+    assert clip["important"] is False and clip["to_discuss"] is False
+    assert stranger == (403, "NOT_OWNER")
+    assert flagged["important"] and flagged["to_discuss"] and again["to_discuss"]
+    assert cleared["important"] is False and cleared["to_discuss"] is False
+    assert len(sent) == 1 and sent[0][2] == clip["id"] and sent[0][1] == [MENTOR]
+
+
 def test_zestawienia_kolejnosc_i_wlasnosc(env):
     async def go():
         L = env.library

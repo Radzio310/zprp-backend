@@ -99,6 +99,9 @@ def define_tables(metadata):
         Column("mp4_size", BigInteger, nullable=True),
         Column("public_token", String, nullable=True, unique=True),
         Column("published_at", DateTime(timezone=True), nullable=True),
+        # Znaki klipu (26.10.2026), jak „Istotny” i „Do omówienia” na meczu; NULL = false.
+        Column("important", Boolean, nullable=True, server_default=text("false")),
+        Column("to_discuss", Boolean, nullable=True, server_default=text("false")),
     )
     Index("ix_mentor_clips_pair_match", clips.c.pair_id, clips.c.match_id)
     Index("ix_mentor_clips_pair_created", clips.c.pair_id, clips.c.created_at)
@@ -328,6 +331,8 @@ def define_tables(metadata):
 #: sędziów - lista meczów pary pyta hurtownię i archiwum po obu numerach.
 MIGRATIONS = (
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
+    "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS important BOOLEAN DEFAULT false",
+    "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS to_discuss BOOLEAN DEFAULT false",
     "ALTER TABLE mentor_compilations ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_threads ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_comments ADD COLUMN IF NOT EXISTS acted_by VARCHAR",

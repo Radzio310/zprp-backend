@@ -277,6 +277,8 @@ class ClipPatch(BaseModel):
     title: Optional[str] = Field(default=None, max_length=400)
     note: Optional[str] = Field(default=None, max_length=5000)
     category_ids: Optional[List[str]] = Field(default=None, max_length=20)
+    important: Optional[bool] = None
+    to_discuss: Optional[bool] = None
 
 
 async def _video_of(ctx: Dict[str, Any], match_id: str, video_id: str) -> Dict[str, Any]:
@@ -357,9 +359,33 @@ async def update_clip(clip_id: str, body: ClipPatch, actor: Actor = Depends(ment
         values["note"] = R.plain(patch["note"], R.MAX_CLIP_NOTE) or None
     if patch.get("category_ids") is not None:
         values["category_ids"] = C.dumps(R.clean_category_ids(patch["category_ids"], await _allowed_categories(ctx)))
+    newly_discuss = False
+    for flag in ("important", "to_discuss"):
+        if patch.get(flag) is not None:
+            values[flag] = bool(patch[flag])
+    if values.get("to_discuss") and not row.get("to_discuss"):
+        newly_discuss = True
     await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip_id).values(**values))
-    await C.touch(ctx, actor.judge_id, "clip_updated", "clips", row["match_id"], {"id": clip_id})
+    audit = {"id": clip_id, **{k: values[k] for k in ("important", "to_discuss") if k in values}}
+    await C.touch(ctx, actor.judge_id, "clip_updated", "clips", row["match_id"], audit)
+    if newly_discuss:
+        await _notify_clip_to_discuss(ctx, actor, row)
     return await clip_payload(ctx, clip_id)
+
+
+async def _notify_clip_to_discuss(ctx: Dict[str, Any], actor: Actor, row: Dict[str, Any]) -> None:
+    """Jak „Do omówienia” na meczu: push (a z nim kropka) do drugiej strony pary."""
+    from app.mentor_panel_notify import notify
+
+    from_pair = actor.judge_id in ctx["judge_ids"]
+    targets = ctx["mentor_ids"] if from_pair else ctx["judge_ids"]
+    card = await C.match_card(ctx, row["match_id"])
+    teams = " - ".join(x for x in ((card.get("home") or {}).get("name"), (card.get("away") or {}).get("name")) if x)
+    label = R.s(row.get("title")) or "klip"
+    await notify(ctx, actor.judge_id, "Klip do omówienia",
+                 f"{actor.display_name} zgłasza klip \"{label}\" z meczu {card.get('match_code') or ''} {teams}".strip(),
+                 recipients=[t for t in targets if t != actor.judge_id], match_id=row["match_id"], clip_id=row["id"],
+                 link=f"{C.WEB_BASE}/{ctx['pair_id']}/mecz/{row['match_id']}")
 
 
 @router.delete("/clips/{clip_id}")
