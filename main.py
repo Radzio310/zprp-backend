@@ -128,6 +128,7 @@ from app.exams import router as exams_router
 from app.exam_live import router as exam_live_router
 from app.exam_web import router as exam_web_router
 from app.exam_results import router as exam_results_router
+from app.exam_public import router as exam_public_router
 from app.exam_stats import router as exam_stats_router
 from app.event_links import router as event_links_router
 from app.province_travel import router as province_travel_router
@@ -426,6 +427,7 @@ app.include_router(exams_router)
 app.include_router(exam_live_router)
 app.include_router(exam_web_router)
 app.include_router(exam_results_router)
+app.include_router(exam_public_router)
 app.include_router(exam_stats_router)
 app.include_router(event_links_router)
 app.include_router(province_travel_router)

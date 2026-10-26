@@ -4681,6 +4681,11 @@ from app.exam_web_tables import define_tables as _define_exam_web_tables
     exam_web_sessions,
 ) = _define_exam_web_tables(metadata)
 
+# Strona publiczna wyników egzaminu (bazapodreka.app/wyniki/<kod>) - link, poziom jawności, licznik.
+from app.exam_public_tables import define_tables as _define_exam_public_tables
+
+(exam_public_links,) = _define_exam_public_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
