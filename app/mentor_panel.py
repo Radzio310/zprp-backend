@@ -259,7 +259,7 @@ async def matches(pair_id: str, season: str = Query("", max_length=20), starred:
                   submitted: Optional[str] = Query(None), q: str = Query("", max_length=80),
                   actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(pair_id, actor)
-    cards = await C.enrich_cards(ctx, await C.pair_match_cards(ctx["judge_ids"]))
+    cards = await C.enriched_pair_cards(ctx)
     return {
         "matches": R.filter_cards(cards, season=season, starred=_tristate(starred), submitted=_tristate(submitted), q=q),
         "seasons": R.seasons_of(cards),

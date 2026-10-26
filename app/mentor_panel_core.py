@@ -660,6 +660,29 @@ async def enrich_cards(ctx: Dict[str, Any], cards: List[Dict[str, Any]]) -> List
     return cards
 
 
+_enrich_inflight: Dict[Tuple[str, str, int], "asyncio.Task[List[Dict[str, Any]]]"] = {}
+
+
+async def enriched_pair_cards(ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Wszystkie mecze pary z nowościami i flagami; równoległe zapytania wspólnie liczą to raz.
+
+    Web pyta o każdy sezon osobno i naraz - bez tego każde z N żądań powtarzało te same
+    ~10 zapytań. Współdzielimy tylko trwające obliczenie (klucz z `rev` panelu i autorem
+    pytania), wynik nie jest nigdzie przechowywany, więc nic się nie starzeje.
+    """
+    key = (ctx["pair_id"], R.s(ctx["actor"].judge_id), int(ctx.get("rev") or 0))
+    task = _enrich_inflight.get(key)
+    if task is None:
+        async def build() -> List[Dict[str, Any]]:
+            return await enrich_cards(ctx, await pair_match_cards(ctx["judge_ids"]))
+
+        task = asyncio.ensure_future(build())
+        _enrich_inflight[key] = task
+        task.add_done_callback(lambda t, k=key: (_enrich_inflight.pop(k, None), t.exception() if not t.cancelled() else None))
+    found = await asyncio.shield(task)
+    return [dict(c, home=dict(c["home"]), away=dict(c["away"])) for c in found]
+
+
 async def match_card(ctx: Dict[str, Any], match_id: str, *, required: bool = True) -> Optional[Dict[str, Any]]:
     cards = [c for c in await pair_match_cards(ctx["judge_ids"]) if c["match_id"] == R.s(match_id)]
     if not cards:
