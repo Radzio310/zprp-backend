@@ -133,6 +133,7 @@ from app.match_market_rules import (
     state_dict,
     with_slot_holder,
 )
+from app.match_market_bench import bench_fields, bench_metrics, km_value, nearest_km
 from app.proel_auth import is_admin
 from app.push.push import send_push_to_judges_report
 from app.settlement_province import spellings
@@ -2070,7 +2071,12 @@ async def _offer_payload(
     *,
     viewer_id: str,
     my_crew_label: str = "",
+    bench: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    # Ławka rezerwowych (decyzje 26.10): dojazd z domu do hali tego meczu i
+    # sezon przy chętnych - `app/match_market_bench.py`. Pusto = brak liczb.
+    bench = bench or {}
+    pending_ids = [_s(c.get("judge_id")) for c in claims if _s(c.get("status")) == "pending"]
     return {
         "id": offer["id"],
         "province": _s(offer.get("province")),
@@ -2092,6 +2098,10 @@ async def _offer_payload(
         # i tak nie przyjmie serwer (`create_claim`).
         "myCrewLabel": _s(my_crew_label),
         "claimCount": len([c for c in claims if _s(c.get("status")) == "pending"]),
+        # Najkrótszy znany dojazd spośród chętnych i mój własny - liczby bez
+        # nazwisk, więc idą do KAŻDEGO, kto ofertę widzi (kafel na liście).
+        "nearestKm": nearest_km(bench, pending_ids),
+        "myKm": km_value(bench.get(_s(viewer_id))) if _s(offer.get("from_judge_id")) != _s(viewer_id) else None,
         # Chetni jako same twarze, dla KAZDEGO, kto ofertę widzi: lista ma od
         # razu pokazać „3 + 2" bez osobnego zapytania na wiersz (wizytówki
         # przyszły już w `cards`). Notatek i kolizji tu nie ma - te zostają w
@@ -2158,6 +2168,7 @@ async def _offer_payload(
                         _s(c.get("judge_id")), cards.get(_s(c.get("judge_id")))
                     ),
                     "conflicts": [],
+                    **bench_fields(bench.get(_s(c.get("judge_id")))),
                 }
                 for c in claims
                 if _s(c.get("status")) in ("pending", "chosen")
@@ -2281,15 +2292,48 @@ async def list_offers(
     # Które z tych meczów pytający już prowadzi - jedno zapytanie na całą listę.
     my_roles = await _viewer_roles(province, [_s(r["match_id"]) for r in rows], actor)
 
+    # Ławka: dojazdy chętnych (i mój) z tablic i pamięci - bez sieci na liście.
+    bench = await bench_metrics(
+        province,
+        [
+            {
+                "offer_id": int(r["id"]),
+                "match_at": r.get("match_at"),
+                "state": r.get("match_snapshot"),
+                "judge_ids": [
+                    _s(c.get("judge_id"))
+                    for c in claims.get(int(r["id"]), [])
+                    if _s(c.get("status")) in ("pending", "chosen")
+                ]
+                + ([actor.judge_id] if _s(r["from_judge_id"]) != actor.judge_id else []),
+            }
+            for r in rows
+            if _s(r.get("status")) in ("open", "approval_pending", "applying")
+        ],
+    )
+
+    def _with_decision(payload: Dict[str, Any], r: Dict[str, Any]) -> Dict[str, Any]:
+        # „Rozstrzygnij" ma stać od pierwszej klatki arkusza - ta sama reguła,
+        # co w `get_offer`, liczona już na liście (bez czekania na szczegóły).
+        payload["canApprove"] = approver and (
+            _s(r["status"]) == "open"
+            or (_s(r["status"]) == "applying" and _apply_is_stale(r.get("updated_at"), _now()))
+        )
+        return payload
+
     return {
         "scope": scope,
         "offers": [
-            await _offer_payload(
+            _with_decision(
+                await _offer_payload(
+                    r,
+                    cards,
+                    claims.get(int(r["id"]), []),
+                    viewer_id=actor.judge_id,
+                    my_crew_label=my_roles.get(_s(r["match_id"]), ""),
+                    bench=bench.get(int(r["id"])),
+                ),
                 r,
-                cards,
-                claims.get(int(r["id"]), []),
-                viewer_id=actor.judge_id,
-                my_crew_label=my_roles.get(_s(r["match_id"]), ""),
             )
             for r in rows
         ],
@@ -3122,10 +3166,30 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
         province, who, offer.get("match_at"), _s(offer["match_id"])
     )
 
+    # Ławka w szczegółach: brakujące kilometry dopytujemy (budżet 3 s), a sezon
+    # chętnych liczymy tylko dla tych, którzy widzą komplet chętnych.
+    bench = (
+        await bench_metrics(
+            province,
+            [
+                {
+                    "offer_id": int(offer["id"]),
+                    "match_at": offer.get("match_at"),
+                    "state": offer.get("match_snapshot"),
+                    "judge_ids": [_s(c["judge_id"]) for c in claims]
+                    + ([actor.judge_id] if not mine else []),
+                }
+            ],
+            ask_google=True,
+            with_season=approver or mine,
+        )
+    ).get(int(offer["id"]), {})
+
     payload = await _offer_payload(
         offer,
         cards,
         claims,
+        bench=bench,
         viewer_id=actor.judge_id,
         my_crew_label=(await _viewer_roles(province, [_s(offer["match_id"])], actor)).get(
             _s(offer["match_id"]), ""
@@ -3160,6 +3224,7 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
                 "createdAt": _iso(c.get("created_at")),
                 "person": _person(_s(c["judge_id"]), cards.get(_s(c["judge_id"]))),
                 "conflicts": fresh.get(_s(c["judge_id"]), []),
+                **bench_fields(bench.get(_s(c["judge_id"]))),
             }
             for c in claims
         ]
