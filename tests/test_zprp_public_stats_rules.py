@@ -144,7 +144,23 @@ def test_sezon_bilans_bez_remisow_i_walkower_bez_bramek():
     assert s["halftime"]["matches"] == 2  # m2 z karnymi też: prowadzący (gosp.) przegrał po karnych
     streak = s["win_streaks"][0]
     assert streak["team"]["team_id"] == "t1" and streak["length"] == 4 and streak["current"] is False
+    # Łańcuch wyników wokół serii: W W WK W (seria) L (walkower) W.
+    assert streak["form"] == ["W", "W", "WK", "W", "L", "W"] and streak["form_streak"] == [0, 3]
+    scatter = {x["team_id"]: x for x in s["teams_scatter"]}
+    assert s["teams_scatter"][0]["team_id"] == "t1" and scatter["t1"]["name"] == "Pogoń Szczecin"
+    assert all(x["matches"] >= R.MIN_TEAM_MATCHES for x in s["teams_scatter"])
     assert t["referees"] == 2 and t["players"] == 2
+
+
+def test_okno_serii_dlugiej_i_starej():
+    at = datetime(2026, 9, 1)
+    res = [(at + timedelta(days=i), str(i), c) for i, c in enumerate(["L", "W", "W", "W", "L", "L", "W"])]
+    form, span = R.streak_form(res, limit=5)
+    assert form == ["L", "W", "W", "W", "L"] and span == [1, 3]
+    long = [(at + timedelta(days=i), str(i), "W") for i in range(20)]
+    form, span = R.streak_form(long, limit=12)
+    assert len(form) == 12 and span == [0, 11]
+    assert R.streak_form([(at, "1", "L")]) == (["L"], None)
 
 
 def test_sezon_zakres_kategorii_i_wojewodztwa():
@@ -303,6 +319,17 @@ def test_agregat_proel_pierwsza_bramka_i_pokrycie():
     assert recs["fastest_goal"]["detail"] == "01:00" and recs["latest_winner"]["minute"] == 51
     juniors = P.aggregate(f, R.Scope.parse(category="J"))
     assert juniors["matches"] == 0 and juniors["coverage"]["pct"] == 0.0
+    assert agg["comebacks"]["top"] == []
+
+
+def test_agregat_proel_powroty_top():
+    # Gość prowadzi 3:0, gospodarz wygrywa 4:3 (m1: wynik ZPRP 30:25 dla gospodarza).
+    evs = [_ev("goal", "guest", 60_000 + i * 10_000) for i in range(3)] + [_ev("goal", "host", 900_000 + i * 60_000) for i in range(4)]
+    s = P.protocol_summary(_blob(evs), {"status": "finished", "match_number": "X", "zprp_match_id": "m1"})
+    agg = P.aggregate(frame([s]), R.Scope())
+    top = agg["comebacks"]["top"]
+    assert agg["comebacks"]["matches"] == 1 and len(top) == 1
+    assert top[0]["match"]["match_id"] == "m1" and top[0]["side"] == "home" and top[0]["deficit"] == 3
 
 
 def test_faza_jak_live():
@@ -355,6 +382,9 @@ def test_dzis_jedno_zrodlo_bramek_na_mecz():
     assert out["ticker"][0]["match"]["match_id"] == "c" and out["ticker"][0]["live"] is True
     assert [l["match_id"] for l in out["live"]] == ["c"] and out["live"][0]["minute"] == 41
     assert sum(r["matches"] for r in out["by_province"]) == 5
+    by_hour = {h["hour"]: h for h in out["goals_by_hour"]}
+    assert by_hour[12]["matches"] == 3 and by_hour[12]["played"] == 2 and by_hour[12]["live"] == 1
+    assert by_hour[18]["played"] == 0 and by_hour[18]["live"] == 0 and 0 not in by_hour
     maz = TD.compute_today(items, R.Scope.parse(province="mazowieckie"), f, now)
     assert maz["counts"]["total"] == 1 and maz["goals"]["total"] == 0
     assert out["comparison"]["yesterday"]["date"] == "2026-10-25"

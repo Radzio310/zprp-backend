@@ -27,6 +27,7 @@ GOAL_KINDS = ("goal", "seven_goal")
 SUSPENSION_KINDS = ("two_min", "red", "blue", "extra")
 FINISHED = ("finished", "approved")
 COMEBACK_MIN = 3
+COMEBACKS_TOP = 3
 RUN_MIN = 3
 LIVE_FRESH = timedelta(minutes=20)
 JUST_FINISHED = timedelta(minutes=90)
@@ -282,6 +283,7 @@ def aggregate(frame: "R.Frame", scope: "R.Scope") -> Dict[str, Any]:
     lead = ties = 0
     first_n = first_w = ht_n = ht_w = comebacks = 0
     biggest = None
+    backs: List[Tuple[int, str, "R.Match"]] = []
     runs, best5 = [], []
     for s, m in items:
         for i, v in enumerate(s["minutes"]):
@@ -312,6 +314,7 @@ def aggregate(frame: "R.Frame", scope: "R.Scope") -> Dict[str, Any]:
             d = s["deficit"][win]
             if d >= COMEBACK_MIN:
                 comebacks += 1
+                backs.append((d, win, m))
                 if biggest is None or d > biggest[0]:
                     biggest = (d, win, m)
         if s.get("run"):
@@ -343,7 +346,9 @@ def aggregate(frame: "R.Frame", scope: "R.Scope") -> Dict[str, Any]:
         "timeouts": {"count": to_n, "per_match": R.avg(to_n, n), "before_diff": R.avg(to_b, to_n), "after_diff": R.avg(to_a, to_n),
                      "avg_swing": R.avg(to_a - to_b, to_n), "positive_pct": R.pct(to_pos, to_n)},
         "comebacks": {"matches": comebacks, "pct": R.pct(comebacks, n),
-                      "biggest": {"match": _ref(biggest[2], frame), "side": biggest[1], "deficit": biggest[0]} if biggest else None},
+                      "biggest": {"match": _ref(biggest[2], frame), "side": biggest[1], "deficit": biggest[0]} if biggest else None,
+                      "top": [{"match": _ref(m, frame), "side": w, "deficit": d}
+                              for d, w, m in sorted(backs, key=lambda x: (-x[0], x[2].match_id))[:COMEBACKS_TOP]]},
         "lead_changes_avg": R.avg(lead, n), "ties_avg": R.avg(ties, n),
         "first_goal_winner_pct": R.pct(first_w, first_n),
         "halftime_leader_win_pct": R.pct(ht_w, ht_n),

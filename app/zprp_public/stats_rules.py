@@ -57,6 +57,8 @@ PROVINCES: Tuple[str, ...] = tuple(VOIVODESHIPS)
 
 MIN_MATCHES_AVG = 5
 MIN_TEAM_MATCHES = 3
+FORM_MAX = 12
+SCATTER_MAX = 300
 TOP_N = 10
 MILESTONES_BASE = (1_000, 5_000, 10_000, 25_000, 50_000, 100_000)
 PROJECTION_DAYS = 28
@@ -667,6 +669,36 @@ def longest_win_streak(results: Sequence[Tuple[datetime, str, str]]) -> Optional
             "to": ordered[b][0].date().isoformat() if ordered[b][0] != datetime.min else None}
 
 
+def streak_form(results: Sequence[Tuple[datetime, str, str]], limit: int = FORM_MAX) -> Tuple[List[str], Optional[List[int]]]:
+    """Okno wyników drużyny (chronologicznie, max `limit`) wokół najdłuższej serii zwycięstw.
+
+    Zwraca kody (`W`/`WK`/`LK`/`L`) i położenie serii w oknie `[od, do]` (włącznie) albo None.
+    Okno: dwa mecze przed serią, seria, potem kolejne mecze do limitu; długa seria - jej koniec.
+    """
+    codes = [c for _, _, c in sorted(results)]
+    best: Optional[Tuple[int, int]] = None
+    start: Optional[int] = None
+    for i, code in enumerate(codes):
+        if code in ("W", "WK"):
+            start = i if start is None else start
+            if best is None or i - start > best[1] - best[0]:
+                best = (start, i)
+        else:
+            start = None
+    if best is None:
+        return codes[-limit:], None
+    a, b = best
+    lo = max(0, a - 2)
+    hi = min(len(codes), max(b + 3, lo + limit))
+    while hi - lo > limit:
+        # Za długo: najpierw kontekst z tej strony, gdzie go więcej; potem początek serii.
+        if hi - b - 1 > max(0, a - lo):
+            hi -= 1
+        else:
+            lo += 1
+    return codes[lo:hi], [max(a, lo) - lo, b - lo]
+
+
 def _player_totals(players: Iterable[PlayerAgg]) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     for p in players:
@@ -714,6 +746,10 @@ def season_stats(frame: Frame, scope: Scope) -> Dict[str, Any]:
                 "gf_pm": avg(line.gf, line.matches), "ga_pm": avg(line.ga, line.matches)}
 
     eligible = [l for l in lines.values() if l.matches >= MIN_TEAM_MATCHES]
+    # Mapa ataku i obrony: drużyny z największą liczbą meczów (zwarte wiersze, bez herbów).
+    scatter = [{"team_id": l.team_id, "name": team_ref(frame, l.team_id)["team_name"], "matches": l.matches,
+                "gf_pm": avg(l.gf, l.matches), "ga_pm": avg(l.ga, l.matches)}
+               for l in sorted(eligible, key=lambda l: (-l.matches, l.team_id))[:SCATTER_MAX]]
     attack = sorted(eligible, key=lambda l: (-l.gf / l.matches, l.team_id))[:TOP_N]
     defense = sorted(eligible, key=lambda l: (l.ga / l.matches, l.team_id))[:TOP_N]
 
@@ -721,7 +757,8 @@ def season_stats(frame: Frame, scope: Scope) -> Dict[str, Any]:
     for line in lines.values():
         s = longest_win_streak(line.results)
         if s and s["length"] >= 2:
-            streaks.append({"team": team_ref(frame, line.team_id), **s})
+            form, span = streak_form(line.results)
+            streaks.append({"team": team_ref(frame, line.team_id), **s, "form": form, "form_streak": span})
     streaks.sort(key=lambda s: (-s["length"], not s["current"], str(s["team"]["team_id"])))
 
     team_disc: Dict[str, List[int]] = defaultdict(lambda: [0, 0])
@@ -768,6 +805,7 @@ def season_stats(frame: Frame, scope: Scope) -> Dict[str, Any]:
         "top_seven_m": [_scorer_line(frame, t) for t in by_seven[:TOP_N]],
         "teams_attack": [team_row(l) for l in attack],
         "teams_defense": [team_row(l) for l in defense],
+        "teams_scatter": scatter,
         "win_streaks": streaks[:TOP_N],
         "discipline": {
             "two_minutes": two_total,

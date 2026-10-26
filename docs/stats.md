@@ -129,7 +129,7 @@ Wartości z zerem nie wracają (poza województwami - zawsze 16).
  "top_scorers": [{"player": "PlayerRef|null", "number": 7, "team_name": "…", "goals": 14,
                   "penalty_goals": 3, "match": "MatchRef", "source": "zprp|proel"}],
  "discipline": {"two_minutes": 300, "red_cards": 6, "warnings": 210, "matches_counted": 130},
- "goals_by_hour": [{"hour": 10, "matches": 12, "goals": 540}],
+ "goals_by_hour": [{"hour": 10, "matches": 12, "goals": 540, "played": 9, "live": 2}],
  "comparison": {
    "weekday_avg": {"weekday": 0, "days": 7, "matches": 35.4, "goals": 1600.2, "avg_goals": 45.2},
    "yesterday": {"date": "2026-10-25", "matches": 260, "played": 255, "goals": 12000, "avg_goals": 47.06},
@@ -154,7 +154,8 @@ Reguły:
 * Strzelcy dnia i kary: skład ZPRP, gdy jego bramki zgadzają się z wynikiem; inaczej
   protokół ProEl (numery przypisane do publicznych zawodników ZPRP tą samą regułą co
   zapasowy skład meczu); bez dopasowania `player: null` + `number`.
-* `goals_by_hour` - godzina ROZPOCZĘCIA meczu (bramki meczu idą do jego godziny).
+* `goals_by_hour` - godzina ROZPOCZĘCIA meczu (bramki meczu idą do jego godziny);
+  `played` / `live` - ile meczów tej godziny ma wynik / trwa (reszta = przed nami albo po terminie).
 * `ticker` - ostatnie bramki z protokołów meczów w toku i zakończonych przed chwilą,
   najnowsze pierwsze (max 30). `at` to szacunek: chwila zapisu protokołu minus czas
   gry od bramki. `minute` = minuta gry (1-60+).
@@ -180,7 +181,9 @@ Reguły:
  "teams_attack": [{"team": "TeamRef", "competition_name": "…", "matches": 10,
                    "goals_for": 350, "goals_against": 250, "gf_pm": 35.0, "ga_pm": 25.0}],
  "teams_defense": ["… sort ga_pm rosnąco"],
- "win_streaks": [{"team": "TeamRef", "length": 9, "current": true, "from": "2026-09-05", "to": "2026-10-25"}],
+ "teams_scatter": [{"team_id": "…", "name": "…", "matches": 10, "gf_pm": 35.0, "ga_pm": 25.0}],
+ "win_streaks": [{"team": "TeamRef", "length": 9, "current": true, "from": "2026-09-05", "to": "2026-10-25",
+                  "form": ["L", "W", "WK", "W", "…"], "form_streak": [1, 9]}],
  "discipline": {"two_minutes": 30000, "red_cards": 400, "warnings": 20000, "two_min_per_match": 6.1,
                 "matches_with_lineups": 4900,
                 "teams_two_min": [{"team": "TeamRef", "two_minutes": 60, "matches": 10, "per_match": 6.0}],
@@ -195,7 +198,10 @@ liczy się do bilansu (`decided`), ale NIE do bramek, średnich, histogramów i 
 żaden mecz nie ma widzów. Ranking średniej: min. 5 meczów; ataku/obrony: min. 3 mecze.
 Strzelcy z publicznych składów meczów (suma po drużynach zawodnika w zakresie).
 Kary drużyn - suma kar zawodników ze składów (bez osób towarzyszących).
-`win_streaks`: zwycięstwa W i WK, mecze drużyny w zakresie chronologicznie.
+`win_streaks`: zwycięstwa W i WK, mecze drużyny w zakresie chronologicznie; `form` = okno wyników
+drużyny (max 12, chronologicznie: dwa mecze przed serią, seria, dalsze mecze), `form_streak` = położenie
+serii w oknie `[od, do]` włącznie. `teams_scatter` = mapa ataku i obrony: drużyny z min. 3 meczami
+(max 300, najwięcej meczów), bramki zdobyte / stracone na mecz.
 
 ## `GET /stats/geo?{zakres}`
 
@@ -262,7 +268,8 @@ powiązane z meczem ZPRP z zakresu. Zero danych osobowych - wyłącznie zdarzeni
                  "pp_goal_pct": 8.3, "pp_per_match": 3.9, "window_own": 0.71, "window_opp": 1.12},
  "timeouts": {"count": 2100, "per_match": 2.6, "before_diff": -0.9, "after_diff": 0.4,
               "avg_swing": 1.3, "positive_pct": 58.0},
- "comebacks": {"matches": 120, "pct": 15.0, "biggest": "{match: MatchRef, side, deficit}|null"},
+ "comebacks": {"matches": 120, "pct": 15.0, "biggest": "{match: MatchRef, side, deficit}|null",
+               "top": ["{match: MatchRef, side, deficit} - max 3, największa odrobiona strata"]},
  "lead_changes_avg": 2.4, "ties_avg": 3.1,
  "first_goal_winner_pct": 58.0, "halftime_leader_win_pct": 77.0,
  "longest_runs": [{"match": "MatchRef", "side": "home", "goals": 9, "from_minute": 12, "to_minute": 21}],

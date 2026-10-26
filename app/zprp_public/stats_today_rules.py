@@ -74,7 +74,7 @@ def compute_today(items: List[Dict[str, Any]], scope: "R.Scope", frame: "R.Frame
     goals = {"total": 0, "final": 0, "live": 0, "avg_per_match": None, "sources": {"zprp": 0, "proel": 0, "proel_live": 0}}
     final_matches = 0
     disc = {"two_minutes": 0, "red_cards": 0, "warnings": 0, "matches_counted": 0}
-    hours: Dict[int, List[int]] = defaultdict(lambda: [0, 0])
+    hours: Dict[int, List[int]] = defaultdict(lambda: [0, 0, 0, 0])
     by_cat: Dict[str, Dict[str, int]] = defaultdict(lambda: {"matches": 0, "played": 0, "live": 0, "goals": 0})
     by_prov: Dict[str, Dict[str, int]] = defaultdict(lambda: {"matches": 0, "played": 0, "live": 0, "goals": 0})
     scorers: List[Dict[str, Any]] = []
@@ -110,6 +110,8 @@ def compute_today(items: List[Dict[str, Any]], scope: "R.Scope", frame: "R.Frame
         if isinstance(at, datetime) and TP.has_kickoff_time(at):
             hours[at.hour][0] += 1
             hours[at.hour][1] += g or 0
+            hours[at.hour][2] += 1 if played else 0
+            hours[at.hour][3] += 1 if live else 0
         lineup = it.get("lineup") or {}
         if lineup.get("source") and (played or live):
             disc["matches_counted"] += 1
@@ -158,7 +160,8 @@ def compute_today(items: List[Dict[str, Any]], scope: "R.Scope", frame: "R.Frame
         "biggest_win": card_ref(win, margin=margin(win)) if win and margin(win) else None,
         "top_scorers": scorers[:TOP_SCORERS],
         "discipline": disc,
-        "goals_by_hour": [{"hour": h, "matches": hours[h][0], "goals": hours[h][1]} for h in sorted(hours)],
+        "goals_by_hour": [{"hour": h, "matches": hours[h][0], "goals": hours[h][1], "played": hours[h][2], "live": hours[h][3]}
+                          for h in sorted(hours)],
         "comparison": {"weekday_avg": weekday, "yesterday": yesterday, "delta_avg_goals": delta},
         "ticker": ticker[:TICKER_MAX],
         "live": sorted(live_list, key=lambda c: (c.get("scheduled_at") or "", str(c["match_id"]))),
