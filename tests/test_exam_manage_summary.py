@@ -28,18 +28,20 @@ async def test_miniatura_liczy_osoby_raz_i_nie_przystapionych(st):
     s = by_id[exam["id"]]["summary"]
     assert s == {"attempted": 3, "finished": 2, "passed": 1, "avg_percent": 50.0, "pass_rate": 0.5,
                  "not_started": 2, "invited": 5,
-                 "histogram_10pct": [1, 0, 0, 0, 0, 0, 0, 0, 0, 1]}
+                 "histogram_10pct": [1, 0, 0, 0, 0, 0, 0, 0, 0, 1], "top": s["top"]}
     assert by_id[exam["id"]]["attempt_counts"] == {"submitted": 2, "in_progress": 1}
+    # Podium w miniaturze: najlepszy pierwszy, piszący bez wyniku się nie liczy.
+    assert [(t["judge_id"], t["place"], t["percent"]) for t in s["top"]] == [(PLAIN.judge_id, 1, 100.0), (DELEGATE.judge_id, 2, 0.0)]
     e = by_id[empty["id"]]["summary"]
     assert e == {"attempted": 0, "finished": 0, "passed": 0, "avg_percent": None, "pass_rate": None,
-                 "not_started": 5, "invited": 5, "histogram_10pct": [0] * 10}
+                 "not_started": 5, "invited": 5, "histogram_10pct": [0] * 10, "top": []}
     assert by_id[empty["id"]]["attempt_counts"] == {}
 
 
 def test_summary_view_bez_danych():
     assert S.summary_view(None, []) == {"attempted": 0, "finished": 0, "passed": 0, "avg_percent": None,
                                         "pass_rate": None, "not_started": 0, "invited": 0,
-                                        "histogram_10pct": [0] * 10}
+                                        "histogram_10pct": [0] * 10, "top": []}
 
 
 def test_druki_25_30_15():
@@ -59,3 +61,11 @@ async def test_druk_25_omija_delegatow(st):
     exam, _ = await make(st, target=X.template_config("exam25")["target"])
     out = await S.list_manage(st, COMMISSION, "ŚLĄSKIE", now=OPEN)
     assert out["exams"][0]["summary"]["invited"] == 4  # Ola Delegat poza adresatami
+
+
+def test_podium_miniatury_miejsca_gesto():
+    people = [{"judge_id": "a", "name": "Nowak", "percent": 90.0}, {"judge_id": "b", "name": "Adamski", "percent": 90.0},
+              {"judge_id": "c", "name": "Zieliński", "percent": 80.0}, {"judge_id": "d", "name": "Kowal", "percent": 70.0}]
+    top = S.summary_top(people, {"c": "http://x/c.jpg"})
+    assert [(t["judge_id"], t["place"]) for t in top] == [("b", 1), ("a", 1), ("c", 2)]
+    assert top[2]["photo"] == "http://x/c.jpg" and top[0]["photo"] is None

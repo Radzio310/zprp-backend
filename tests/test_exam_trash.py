@@ -84,7 +84,7 @@ def test_miniatura_bez_parametrow_w_case():
 
     md = MetaData()
     attempts = Table("exam_attempts", md, Column("exam_id", String), Column("judge_id", String), Column("status", String),
-                     Column("percent", Float), Column("passed", Boolean), Column("province", String), Column("deleted_at", String))
+                     Column("percent", Float), Column("passed", Boolean), Column("province", String), Column("judge_name", String), Column("deleted_at", String))
     captured = {}
 
     class DB:

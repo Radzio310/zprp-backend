@@ -631,6 +631,9 @@ async def _people_summary(st: Store, exam_ids: List[str], province: Optional[str
             # odgaduje jako text, a asyncpg odmawia wysłania liczby do parametru tekstowego
             # („expected str, got int”) - to był 500 każdej teczki z egzaminami (24.10.2026).
             func.max(case((and_(done, a.c.passed.is_(True)), literal_column("1")), else_=literal_column("0"))).label("ok"),
+            # Nazwisko i okręg do twarzy podium na bilecie (26.10.2026) - stałe w obrębie osoby.
+            func.max(a.c.judge_name).label("name"),
+            func.max(a.c.province).label("province"),
         )
         .where(cond)
         .group_by(a.c.exam_id, a.c.judge_id)
@@ -638,15 +641,30 @@ async def _people_summary(st: Store, exam_ids: List[str], province: Optional[str
     out: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         m = _row(r)
-        agg = out.setdefault(m["exam_id"], {"judges": set(), "best": [], "passed": 0})
+        agg = out.setdefault(m["exam_id"], {"judges": set(), "best": [], "passed": 0, "people": []})
         agg["judges"].add(_s(m["judge_id"]))
         if m["best"] is not None:
             agg["best"].append(float(m["best"]))
             agg["passed"] += int(m["ok"] or 0)
+            agg["people"].append({"judge_id": _s(m["judge_id"]), "name": _s(m.get("name")) or None,
+                                  "province": _s(m.get("province")) or None, "percent": float(m["best"])})
     return out
 
 
-def summary_view(people: Optional[Mapping[str, Any]], invited_ids: Sequence[str]) -> Dict[str, Any]:
+def summary_top(people: Sequence[Mapping[str, Any]], photos: Optional[Mapping[str, str]] = None, n: int = 3) -> List[Dict[str, Any]]:
+    """Podium w miniaturze biletu: do `n` najlepszych osób, miejsca GĘSTE (1, 2, 2, 3)
+    jak w raporcie komisji; remis rozstrzyga nazwisko tylko dla kolejności na liście."""
+    ranked = sorted(people, key=lambda r: (-float(r["percent"]), (r.get("name") or "").lower(), r["judge_id"]))[:n]
+    levels = sorted({float(r["percent"]) for r in people}, reverse=True)
+    out = []
+    for r in ranked:
+        out.append({"judge_id": r["judge_id"], "name": r.get("name") or r["judge_id"], "province": r.get("province"),
+                    "percent": round(float(r["percent"]), 2), "place": levels.index(float(r["percent"])) + 1,
+                    "photo": (photos or {}).get(r["judge_id"]) or None})
+    return out
+
+
+def summary_view(people: Optional[Mapping[str, Any]], invited_ids: Sequence[str], photos: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """Liczby miniatury na karcie teczki (te same definicje co raport komisji).
 
     `attempted` = osoby z jakimkolwiek podejściem, `finished` = z zakończonym,
@@ -669,6 +687,8 @@ def summary_view(people: Optional[Mapping[str, Any]], invited_ids: Sequence[str]
         "invited": len(judges) + not_started,
         # Mini histogram biletu w teczce: najlepsze wyniki osób w dziesiątkach procent.
         "histogram_10pct": histogram_10(best),
+        # Twarze najlepszych na bilecie (26.10.2026); stary klient pole pomija.
+        "top": summary_top(p.get("people") or [], photos),
     }
 
 
@@ -714,6 +734,8 @@ async def list_manage(st: Store, who: Who, province: Optional[str], now: Optiona
     counts = {**c_own, **c_nat}
     people = {**p_own, **p_nat}
     roster: Dict[str, List[Dict[str, Any]]] = dict(zip(provinces, lists))
+    # Zdjęcia z listy okręgu (`province_judges.photo_url`) - te same co podium wyników.
+    photos = {_s(j.get("judge_id")): _s(j.get("photo_url")) for js in lists for j in (js or []) if _s(j.get("photo_url"))}
     items = []
     for exam in exams:
         view = exam_view(exam, now, full=True)
@@ -722,7 +744,7 @@ async def list_manage(st: Store, who: Who, province: Optional[str], now: Optiona
         read_only = exam["id"] in nat_ids
         for p in ([prov] if read_only else _exam_provinces(exam)):
             invited += await _invited_ids(st, exam, p, roster.get(p) or [])
-        view["summary"] = summary_view(people.get(exam["id"]), invited)
+        view["summary"] = summary_view(people.get(exam["id"]), invited, photos)
         if read_only:
             view.update(can_manage=False, read_only=True, cut_province=prov)
         items.append(view)
