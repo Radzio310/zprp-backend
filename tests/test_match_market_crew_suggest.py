@@ -150,7 +150,7 @@ def stub_common(monkeypatch, claims, offer_extra=None, invites=None):
     async def roster(_k):
         return None
 
-    async def metrics(_o, rows):
+    async def metrics(_o, rows, **_kw):
         out = {}
         for row in rows:
             j = row["judge_id"]
