@@ -248,41 +248,67 @@ class VersionedDistanceIndex:
         return self.for_day(None).pairs
 
 
-async def google_distance(client: Any, origin: str, destination: str) -> Optional[float]:
-    """
-    Jedna para przez Google Distance Matrix.
-
-    `client` to gotowy `httpx.AsyncClient` - dzieki temu wolajacy panuje nad
-    limitem czasu i liczba polaczen, a modul nie otwiera wlasnych.
-    """
-    if not GOOGLE_MAPS_API_KEY:
-        return None
-    if not origin or not destination:
-        return None
+async def _directions_km(
+    client: Any, origin: str, destination: str, *, avoid_highways: bool, traffic: bool
+) -> list[float]:
+    """Kilometry wszystkich tras jednego zapytania Directions (bez dróg płatnych)."""
+    params = {
+        "origin": origin,
+        "destination": destination,
+        "mode": "driving",
+        "avoid": "tolls|highways" if avoid_highways else "tolls",
+        "alternatives": "true",
+        "language": "pl",
+        "region": "PL",
+        "key": GOOGLE_MAPS_API_KEY,
+    }
+    if traffic:
+        params["departure_time"] = "now"
     try:
-        response = await client.get(
-            "https://maps.googleapis.com/maps/api/distancematrix/json",
-            params={
-                "origins": f"{origin}, Polska",
-                "destinations": f"{destination}, Polska",
-                "mode": "driving",
-                "avoid": "tolls",
-                "language": "pl",
-                "region": "PL",
-                "key": GOOGLE_MAPS_API_KEY,
-            },
-        )
+        response = await client.get("https://maps.googleapis.com/maps/api/directions/json", params=params)
         data = response.json()
-        if data.get("status") != "OK":
-            return None
-        element = ((data.get("rows") or [{}])[0].get("elements") or [{}])[0]
-        if element.get("status") != "OK":
-            return None
-        meters = (element.get("distance") or {}).get("value")
-        return round(float(meters) / 1000.0, 1) if isinstance(meters, (int, float)) else None
+        out: list[float] = []
+        for route in data.get("routes") or []:
+            meters = sum(
+                (leg.get("distance") or {}).get("value") or 0 for leg in (route.get("legs") or [])
+            )
+            if meters:
+                out.append(float(meters) / 1000.0)
+        return out
     except Exception as exc:
-        logger.debug("[settlement] google distance %s->%s: %s", origin, destination, exc)
+        logger.debug("[settlement] directions %s->%s: %s", origin, destination, exc)
+        return []
+
+
+async def google_distance(
+    client: Any, origin: str, destination: str, origin_region: str = ""
+) -> Optional[float]:
+    """
+    NAJKRÓTSZA trasa Google bez dróg płatnych - tak samo jak aplikacja
+    (`BAZA/utils/obliczRoutes.ts`: cztery zapytania Directions, minimum ze
+    wszystkich wariantów). Ta sama para ma dawać te same km na serwerze i w
+    kalkulatorze (26.10.2026: serwer liczył domyślną trasę Distance Matrix,
+    Tychy - Gliwice 45,5 km zamiast 31,1 km).
+
+    `client` to gotowy `httpx.AsyncClient` - wołający panuje nad limitem czasu.
+    `origin_region` (np. „śląskie") rozstrzyga imienników miejscowości sędziego:
+    goły „Lipnik, Polska" Google bierze z innego województwa (271,5 km zamiast
+    94 km Lipnik - Gliwice).
+    """
+    if not GOOGLE_MAPS_API_KEY or not origin or not destination:
         return None
+    start = f"{origin}, {origin_region}, Polska" if origin_region else f"{origin}, Polska"
+    end = f"{destination}, Polska"
+    import asyncio
+
+    answers = await asyncio.gather(
+        _directions_km(client, start, end, avoid_highways=False, traffic=False),
+        _directions_km(client, start, end, avoid_highways=True, traffic=False),
+        _directions_km(client, start, end, avoid_highways=False, traffic=True),
+        _directions_km(client, start, end, avoid_highways=True, traffic=True),
+    )
+    values = [v for group in answers for v in group]
+    return round(min(values), 1) if values else None
 
 
 async def resolve_distances(
@@ -291,6 +317,7 @@ async def resolve_distances(
     *,
     client: Any = None,
     cache: Optional[dict[tuple[str, str], Optional[float]]] = None,
+    origin_region: str = "",
 ) -> dict[tuple[str, str], tuple[Optional[float], str]]:
     """
     Para miast -> (kilometry, zrodlo).
@@ -316,7 +343,7 @@ async def resolve_distances(
             out[(origin, destination)] = (table_hit, "same-city" if table_hit == 0 else "table")
             continue
 
-        value = await google_distance(client, origin, destination) if client is not None else None
+        value = await google_distance(client, origin, destination, origin_region) if client is not None else None
         cache[key] = value
         out[(origin, destination)] = (value, "google" if value is not None else "none")
 

@@ -287,32 +287,16 @@ def _google_key() -> str:
         return ""
 
 
-async def _google_km(client: Any, origin: str, destination: str) -> Optional[float]:
-    key = _google_key()
-    if not key or not origin or not destination:
-        return None
-    try:
-        response = await client.get(
-            "https://maps.googleapis.com/maps/api/distancematrix/json",
-            params={
-                "origins": f"{origin}, Polska",
-                "destinations": f"{destination}, Polska",
-                "mode": "driving",
-                "avoid": "tolls",
-                "language": "pl",
-                "region": "PL",
-                "key": key,
-            },
-        )
-        data = response.json()
-        element = ((data.get("rows") or [{}])[0].get("elements") or [{}])[0]
-        if data.get("status") != "OK" or element.get("status") != "OK":
-            return None
-        meters = (element.get("distance") or {}).get("value")
-        return round(float(meters) / 1000.0, 1) if isinstance(meters, (int, float)) else None
-    except Exception as exc:
-        logger.info("[manual_charges] google %s -> %s: %s", origin, destination, exc)
-        return None
+from app.national_place_rules import province_label, province_slug  # noqa: E402
+
+
+async def _google_km(client: Any, origin: str, destination: str, region: str = "") -> Optional[float]:
+    """Najkrótsza trasa Google jak w aplikacji (`settlement_distances.google_distance`)."""
+    from app import settlement_distances as SD
+
+    if not SD.GOOGLE_MAPS_API_KEY:
+        SD.GOOGLE_MAPS_API_KEY = _google_key()
+    return await SD.google_distance(client, origin, destination, region)
 
 
 async def _resolve_km(
@@ -347,7 +331,7 @@ async def _resolve_km(
     client = None
     try:
         for item in todo:
-            table_km = None if central else index.lookup(item["home_city"], city)
+            table_km = index.lookup(item["home_city"], city)
             hit = NL.pick_distance(
                 central,
                 home=item["home_city"],
@@ -367,7 +351,7 @@ async def _resolve_km(
 
                 client = httpx.AsyncClient(timeout=8.0)
             google_left -= 1
-            value = await _google_km(client, item["home_city"], city)
+            value = await _google_km(client, item["home_city"], city, province_label(province_slug(province)))
             item["km_one_way"] = value
             item["km_source"] = "google" if value is not None else "none"
     finally:

@@ -57,6 +57,7 @@ from app.settlement_seasons import (
 )
 from app.deps import get_settings
 from app import national_lookup_rules as NL
+from app.national_place_rules import province_label, province_slug
 from app.national_distances import load_national_pairs
 from app.settlement_distances import (
     DistanceIndex,
@@ -1292,7 +1293,7 @@ async def refresh_province(
                 if not (home and city):
                     continue
                 central = R.is_central_level_competition(row.get("match_code"))
-                table_km = None if central else book.for_day(row.get("match_at")).lookup(home, city)
+                table_km = book.for_day(row.get("match_at")).lookup(home, city)
                 picked = NL.pick_distance(
                     central,
                     home=home,
@@ -1307,11 +1308,19 @@ async def refresh_province(
                     google_rows.append((position, home, city))
 
             if google_rows:
+                region_slug = province_slug(province)
+                memory = await _google_memory(region_slug)
+                before = set(memory)
                 resolved = await resolve_distances(
                     [(home, city) for _, home, city in google_rows],
                     DistanceIndex(None),
                     client=public,
-                    cache={},
+                    cache=memory,
+                    origin_region=province_label(region_slug),
+                )
+                await _google_memory_save(
+                    region_slug,
+                    {k: v for k, v in memory.items() if k not in before and v is not None},
                 )
                 for position, home, city in google_rows:
                     hit = resolved.get((home, city))
@@ -1384,6 +1393,49 @@ async def refresh_province(
         return await finish(False, error=str(exc)[:500])
     finally:
         pulse_task.cancel()
+
+
+
+#: Wersja pomiaru Google zapisanego w `city_distances.source`. Wartości z innej
+#: wersji (np. starej trasy domyślnej, source „google") są ignorowane i liczone
+#: od nowa - podbić przy każdej zmianie sposobu pomiaru (jak
+#: `GOOGLE_DISTANCE_REVISION` w aplikacji).
+GOOGLE_MEMORY_SOURCE = "google-shortest-r1"
+
+
+async def _google_memory(region_slug: str) -> dict:
+    """Zapamiętane najkrótsze trasy Google okręgu: {(dom, hala): km}."""
+    from app.db import city_distances
+
+    rows = await database.fetch_all(
+        select(city_distances.c.from_key, city_distances.c.to_key, city_distances.c.km).where(
+            city_distances.c.source == GOOGLE_MEMORY_SOURCE
+        )
+    )
+    suffix = f"|{region_slug}"
+    return {
+        (r["from_key"][: -len(suffix)], r["to_key"]): float(r["km"])
+        for r in rows
+        if r["from_key"].endswith(suffix)
+    }
+
+
+async def _google_memory_save(region_slug: str, fresh: dict) -> None:
+    from app.db import city_distances
+
+    for (origin, destination), km in fresh.items():
+        try:
+            statement = pg_insert(city_distances).values(
+                from_key=f"{origin}|{region_slug}", to_key=destination, km=km, source=GOOGLE_MEMORY_SOURCE
+            )
+            await database.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[city_distances.c.from_key, city_distances.c.to_key],
+                    set_={"km": km, "source": GOOGLE_MEMORY_SOURCE},
+                )
+            )
+        except Exception as exc:
+            logger.debug("[settlement] pamięć Google: %s", exc)
 
 
 async def last_run(province: str) -> Optional[dict]:
