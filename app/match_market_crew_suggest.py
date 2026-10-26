@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import insert, select, update
 
@@ -112,7 +112,12 @@ def _invite_view(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.get("/{offer_id}/suggestions", summary="Sugestie przy braku chętnych (stały partner, para mentorska)")
-async def suggestions(offer_id: int, actor: Actor = Depends(M.manager_actor)) -> Dict[str, Any]:
+async def suggestions(
+    offer_id: int,
+    actor: Actor = Depends(M.manager_actor),
+    fast: int = Query(0, description="1 = bez dopytywania Google (metricsPending mówi, czy pobrać drugi raz)"),
+) -> Dict[str, Any]:
+    quick = bool(fast)
     offer = await M._load_offer(offer_id)
     key = offer["province"]
     await M._require_manager(actor, key)
@@ -177,7 +182,7 @@ async def suggestions(offer_id: int, actor: Actor = Depends(M.manager_actor)) ->
     metrics: Dict[str, Dict[str, Any]] = {}
     if chosen:
         try:
-            metrics = await M._metrics(offer, [{"judge_id": j} for j in chosen])
+            metrics = await M._metrics(offer, [{"judge_id": j} for j in chosen], ask_google=not quick)
         except Exception:  # noqa: BLE001 - bez liczb nadal pokazujemy, kogo podpowiadamy
             logger.warning("sugestie giełdy: liczby sędziów niedostępne", exc_info=True)
 
@@ -240,7 +245,7 @@ async def suggestions(offer_id: int, actor: Actor = Depends(M.manager_actor)) ->
         )
     if not any(s["suggestions"] for s in out_slots):
         base["reason"] = "Nikt z kręgu przydzielonych (stali partnerzy, pary mentorskie) nie spełnia warunków tej oferty."
-    return {**base, "slots": out_slots}
+    return {**base, "slots": out_slots, "metricsPending": R.crew_metrics_pending(quick, metrics)}
 
 
 class InviteRequest(BaseModel):

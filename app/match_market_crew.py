@@ -693,7 +693,7 @@ async def list_offers(
     return {"offers": out, "canManage": can_manage}
 
 
-async def _detail(offer_id: int, actor: Actor) -> Dict[str, Any]:
+async def _detail(offer_id: int, actor: Actor, quick: bool = False) -> Dict[str, Any]:
     offer = await _load_offer(offer_id)
     key = offer["province"]
     await _sweep(key)
@@ -710,22 +710,30 @@ async def _detail(offer_id: int, actor: Actor) -> Dict[str, Any]:
     cards = await _judge_cards([offer["created_by"]] + [c["judge_id"] for c in claims] + [c.get("partner_id") for c in claims])
     view = _offer_view(offer, claims, cards, viewer_id=actor.judge_id, can_manage=can_manage, my_roles=my_roles, now=_now())
     if can_manage:
-        view["claims"] = await _claims_view(offer, claims, cards)
+        claims_view = await _claims_view(offer, claims, cards, quick=quick)
+        view["metricsPending"] = bool(claims_view.pop("_pending", False))
+        view["claims"] = claims_view
     return view
 
 
 @router.get("/{offer_id}", summary="Oferta w całości (dla obsadowego także lista zgłoszeń wg roli)")
-async def get_offer(offer_id: int, actor: Actor = Depends(manager_actor)) -> Dict[str, Any]:
-    return await _detail(offer_id, actor)
+async def get_offer(
+    offer_id: int,
+    actor: Actor = Depends(manager_actor),
+    fast: int = Query(0, description="1 = bez dopytywania Google (metricsPending mówi, czy pobrać drugi raz)"),
+) -> Dict[str, Any]:
+    return await _detail(offer_id, actor, quick=bool(fast))
 
 
 # ───────────────────────────── lista zgłoszeń z liczbami ─────────────────────────────
 
 
-async def _claims_view(offer: Dict[str, Any], claims: List[Dict[str, Any]], cards: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+async def _claims_view(
+    offer: Dict[str, Any], claims: List[Dict[str, Any]], cards: Dict[str, Dict[str, Any]], *, quick: bool = False
+) -> Dict[str, Any]:
     """Zgłoszenia pogrupowane wg roli: km (ze źródłem), mecze, odstępy, kolizje."""
     live = [c for c in claims if _s(c["status"]) != R.CLAIM_WITHDRAWN]
-    metrics = await _metrics(offer, live)
+    metrics = await _metrics(offer, live, ask_google=not quick)
     pk = R.packages(live)
     in_pack = {j: p for p in pk for j in p["judge_ids"]}
     by_role: Dict[str, list] = {R.ROLE_TABLE: [], R.ROLE_FIELD: []}
@@ -757,6 +765,7 @@ async def _claims_view(offer: Dict[str, Any], claims: List[Dict[str, Any]], card
             }
         )
     return {
+        "_pending": R.crew_metrics_pending(quick, metrics),
         "table": by_role[R.ROLE_TABLE],
         "field": by_role[R.ROLE_FIELD],
         "packages": [

@@ -275,6 +275,21 @@ def claim_refusal(
     return None
 
 
+def crew_metrics_pending(quick: bool, metrics: Mapping[str, Mapping[str, Any]]) -> bool:
+    """
+    Szybki odczyt (bez Google): czy ktoś ma nieznane km, które Google może
+    jeszcze dać (znane miasto skąd i dokąd). Pełny odczyt nigdy nie każe
+    pobierać drugi raz.
+    """
+    if not quick:
+        return False
+    for m in metrics.values():
+        km = m.get("km") or {}
+        if isinstance(km, Mapping) and km.get("source") == "unknown" and _s(km.get("from")) and _s(km.get("to")):
+            return True
+    return False
+
+
 def claim_province_refusal(
     *,
     known: bool,

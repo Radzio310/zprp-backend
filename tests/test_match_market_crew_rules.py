@@ -208,3 +208,13 @@ def test_teksty_push_sa_pelne():
     assert "sędzia 1" in R.text_assigned(offer, "pierwszy")[1]
     assert R.text_filled(offer)[0] == "Mecz obsadzony"
     assert ".." not in R.text_withdrawn({})[1]
+
+
+def test_szybki_odczyt_obsadowego_mowi_czy_dociagac_km():
+    unknown = {"km": {"km": None, "source": "unknown", "from": "Gliwice", "to": "Zabrze"}}
+    known = {"km": {"km": 20, "source": "district_table", "from": "Gliwice", "to": "Zabrze"}}
+    no_city = {"km": {"km": None, "source": "unknown", "from": "", "to": "Zabrze"}}
+    assert R.crew_metrics_pending(True, {"1": unknown, "2": known}) is True
+    assert R.crew_metrics_pending(False, {"1": unknown}) is False
+    # Bez miasta Google i tak nic nie da - nie każemy pobierać drugi raz.
+    assert R.crew_metrics_pending(True, {"1": no_city, "2": known}) is False
