@@ -33,6 +33,8 @@ from app import province_clubs_bulk as B
 from app import province_clubs_scope as S
 from app import province_club_budgets as CB
 from app import province_club_budgets_rules as BR
+from app import province_club_splits as SPL
+from app import province_club_splits_rules as SR
 from app import settlement_cache as SC
 from app.invoice_payment_rules import pending_sum
 from app import settlement_engine as E
@@ -155,11 +157,20 @@ async def _teams(province: str, season: str) -> tuple[dict[str, C.TeamRef], dict
     by_id: dict[str, C.TeamRef] = {}
     by_key: dict[str, C.TeamRef] = {}
     meta: dict[str, dict] = {}
+    # Rozbicie klubu (26.10.2026): klub drużyny to część, do której ją przypisano.
+    # Nakładka leży poza `province_club_teams`, więc synchronizacja jej nie cofa.
+    split_rows, split_groups = await SPL.overlay(province)
+    split_maps = SR.effective_maps(split_rows, season) if split_groups else None
     for row in rows:
         team_id = _s(row["team_id"])
+        club_id = _s(row["club_id"])
+        if split_maps is not None:
+            club_id = SR.resolve_club(
+                club_id, team_id, _s(row["name_key"]) or team_key(_s(row["team_name"])), split_maps
+            )
         ref = C.TeamRef(
             team_id=team_id,
-            club_id=_s(row["club_id"]),
+            club_id=club_id,
             name=_s(row["team_name"]),
             category=_s(row["category"]),
             gender=_s(row["gender"]),
@@ -172,6 +183,7 @@ async def _teams(province: str, season: str) -> tuple[dict[str, C.TeamRef], dict
             {
                 "team_id": team_id,
                 "name": ref.name,
+                "name_key": key,
                 "club_id": ref.club_id,
                 "category": ref.category,
                 "gender": ref.gender,
@@ -347,6 +359,15 @@ async def _load_clubs(province: str, season: str, *, include_future: bool = Fals
     by_id, by_key, meta = await _teams(province, season)
     settings = await _club_settings(province)
     table_rules = await _table_rules(province)
+    # Rozbicie klubu: opis podziału w sezonie, ustawienia części dziedziczone
+    # od macierzystego, stolikowy też.
+    split_groups = await SPL.group_rows(province)
+    splits = SR.split_info(split_groups, {item["club_id"] for item in meta.values()}) if split_groups else {}
+    if splits:
+        settings = SR.overlay_settings(settings, splits)
+        for club_id, item in splits.items():
+            if item["role"] == "part" and club_id not in table_rules and item["parent_club_id"] in table_rules:
+                table_rules[club_id] = table_rules[item["parent_club_id"]]
     clubs_setting = {
         club_id: C.ClubSetting(
             settles=bool((settings.get(club_id) or {}).get("settles_via_district", True)),
@@ -386,6 +407,7 @@ async def _load_clubs(province: str, season: str, *, include_future: bool = Fals
         "teams_meta": meta,
         "settings": settings,
         "table_rules": table_rules,
+        "splits": splits,
         "charges": charges,
         "entries": await _entries(province, season),
     }
@@ -393,7 +415,8 @@ async def _load_clubs(province: str, season: str, *, include_future: bool = Fals
 
 def _club_name(settings: dict, meta: dict, club_id: str, province: str = "") -> str:
     row = settings.get(club_id) or {}
-    name = _s(row.get("display_name"))
+    # Rozbity klub macierzysty: „Nazwa (I)" tylko w sezonach, w których podział działa.
+    name = _s(row.get("split_name")) or _s(row.get("display_name"))
     if name:
         return name
     if DP.is_district_payer(club_id):
@@ -573,6 +596,7 @@ async def _season_clubs_uncached(key: str, season: str, *, include_future: bool 
             "settles_since": row["settles_since"].isoformat() if row.get("settles_since") else None,
             **_table_json(data["table_rules"].get(club_id)),
             "note": _s(row.get("note")),
+            "split": data["splits"].get(club_id),
             "teams": sorted(teams_of.get(club_id, []), key=lambda item: item["name"]),
             "paid_in": money(paid["in"]),
             "paid_out": money(paid["out"]),
@@ -960,6 +984,7 @@ def _detail_payload(
             "settles_since": settings["settles_since"].isoformat() if settings.get("settles_since") else None,
             **_table_json(data["table_rules"].get(primary)),
             "note": _s(settings.get("note")),
+            "split": (data.get("splits") or {}).get(primary),
             "paid_in": money(paid_in),
             "paid_out": money(paid_out),
             "settled": money(settled),

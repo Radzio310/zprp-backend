@@ -96,15 +96,33 @@ async def club_scope(province: str, season: str, matches: Iterable[Any]) -> dict
     return await club_scope_many(province, {season: list(matches)})
 
 
+async def _with_splits(province: str, rows) -> list:
+    """Rozbicie klubu (26.10.2026): klub drużyny to część, do której ją przypisano."""
+    from app import province_club_splits as SPL
+    from app import province_club_splits_rules as SR
+
+    split_rows, split_groups = await SPL.overlay(province)
+    if not split_groups:
+        return rows
+    maps: dict[str, Any] = {}
+    out = []
+    for row in rows:
+        item = dict(row)
+        season = _s(item["season"])
+        maps.setdefault(season, SR.effective_maps(split_rows, season))
+        item["club_id"] = SR.resolve_club(
+            item["club_id"], item["team_id"], _s(item["name_key"]) or team_key(_s(item["team_name"])), maps[season]
+        )
+        out.append(item)
+    return out
+
+
 async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
     """
     To samo, co `club_scope`, ale dla KILKU sezonow naraz i jednym odczytem bazy.
 
-    Siatka miesiecy (`/province/settlements/months`) siega kilka sezonow wstecz,
-    a pytanie o kazdy sezon osobno byloby kilkudziesiecioma zapytaniami na jedno
-    wejscie na ekran. Dopasowanie druzyn liczymy mimo to SEZON PO SEZONIE: ten
-    sam numer druzyny bywa w innym sezonie w innym klubie, a nazwy druzyn
-    zmieniaja sie miedzy sezonami.
+    Siatka miesiecy siega kilka sezonow wstecz - jeden odczyt zamiast zapytania na
+    sezon. Druzyny dopasowujemy SEZON PO SEZONIE (numer druzyny bywa inny).
     """
     seasons = [season for season in by_season if season]
     if not seasons:
@@ -118,6 +136,7 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
             )
         )
     )
+    rows = await _with_splits(province, rows)
     #: sezon -> (druzyny po numerze, druzyny po kluczu nazwy)
     teams: dict[str, tuple[dict[str, C.TeamRef], dict[str, C.TeamRef]]] = {
         season: ({}, {}) for season in seasons

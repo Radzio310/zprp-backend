@@ -92,6 +92,9 @@ WATCHED_TABLES = frozenset(
         "province_module_config",
         "province_tournament_hosts",
         "province_club_merge_rejections",
+        # 26.10.2026: rozbicie klubu zmienia, do którego klubu idzie drużyna.
+        "province_club_splits",
+        "province_club_split_teams",
     }
 )
 

@@ -111,6 +111,7 @@ from app.province_assignment_board import router as province_assignment_board_ro
 from app.zprp_archive import router as province_archive_router, run_archive_scheduler
 from app.assignment_insights import router as province_insights_router, run_insights_scheduler
 from app.province_club_budgets import router as province_club_budgets_router, seed_default_budgets
+from app.province_club_splits import router as province_club_splits_router
 from app.province_clubs import router as province_clubs_router
 from app.club_report import router as club_report_router
 from app.province_tournament_hosts import router as province_tournament_hosts_router
@@ -406,6 +407,7 @@ app.include_router(province_settlement_pdf_router)
 # Wspólne budżety klubów: /province/clubs/budgets - PRZED routerem klubów,
 # bo tam GET /{club_id} połknąłby „budgets".
 app.include_router(province_club_budgets_router)
+app.include_router(province_club_splits_router)
 # Przed `/province/clubs` - tam `{club_id}` połknąłby `/tournaments`.
 app.include_router(province_tournament_hosts_router)
 app.include_router(province_clubs_router)

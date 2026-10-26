@@ -1526,6 +1526,52 @@ province_club_merge_rejections = Table(
     Column("created_at", DateTime(timezone=True), server_default=func.now()),
 )
 
+# Rozbicie klubu na kilka klubów (26.10.2026, reguła w `province_club_splits_rules`).
+# To NAKŁADKA na dane z ZPRP - `province_club_teams` zostaje bez zmian, więc
+# synchronizacja niczego nie cofa. Wiersz grupy: część 1 = klub macierzysty
+# (club_id == parent_club_id), części 2+ mają numer `split:<macierzysty>:<n>`.
+province_club_splits = Table(
+    "province_club_splits",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("club_id", String, primary_key=True),
+    Column("parent_club_id", String, nullable=False, index=True),
+    Column("part_no", Integer, nullable=False, server_default=text("1")),
+    Column("name", String, nullable=False, server_default=""),
+    Column("expected_in", Float, nullable=False, server_default=text("0")),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Przypisanie drużyny do części OD sezonu (kolejne sezony dziedziczą).
+province_club_split_teams = Table(
+    "province_club_split_teams",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("parent_club_id", String, nullable=False, index=True),
+    Column("season", String, nullable=False),
+    Column("team_id", String, nullable=False),
+    Column("name_key", String, nullable=False, server_default=""),
+    Column("club_id", String, nullable=False),
+    Column("updated_by", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Historia zmian rozbicia: kto, kiedy, co.
+province_club_split_log = Table(
+    "province_club_split_log",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("parent_club_id", String, nullable=False, index=True),
+    Column("season", String, nullable=True),
+    Column("action", String, nullable=False),     # split | move-team | merge | move-entries
+    Column("detail", Text, nullable=True),        # JSON jako napis
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
 # 18.1i) Nazwiska sędziów z listy okręgu, zapamiętane przy pobieraniu rozliczeń
 #
 # `province_judges` prowadzi człowiek w panelu i potrafi nie mieć kogoś, kto ma
