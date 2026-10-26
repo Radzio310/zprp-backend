@@ -4669,6 +4669,10 @@ zprp_public_geocode_cache = _define_zprp_public_geocode_tables(metadata)
 from app.zprp_public_geocode_tables import define_venue_table as _define_zprp_public_venue_geocode_table
 
 zprp_public_venue_geocode_cache = _define_zprp_public_venue_geocode_table(metadata)
+# Ekran „Statystyki" portalu: trwałe streszczenia protokołów ProEl (`app/zprp_public/stats.py`).
+from app.zprp_public_stats_tables import define_tables as _define_zprp_public_stats_tables
+
+zprp_public_stats_snapshots = _define_zprp_public_stats_tables(metadata)
 
 # Funkcje produktowe BAZA pod RĘKĄ: raporty, sesje klubowe i Talenty.
 from app.pod_reka_tables import define_tables as _define_pod_reka_tables
@@ -4891,6 +4895,8 @@ with engine.connect() as _conn:
     for _shootout_sql in (
         "ALTER TABLE zprp_public_matches ADD COLUMN IF NOT EXISTS shootout_home integer",
         "ALTER TABLE zprp_public_matches ADD COLUMN IF NOT EXISTS shootout_away integer",
+        # Ekran „Statystyki": migawka sezonu czyta mecze sezonu po dacie.
+        "CREATE INDEX IF NOT EXISTS ix_zprp_public_matches_season_sched ON zprp_public_matches (season_id, scheduled_at)",
     ):
         _conn.execute(text(_shootout_sql))
     _conn.commit()

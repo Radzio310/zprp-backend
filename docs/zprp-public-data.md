@@ -121,6 +121,8 @@ Najważniejsze endpointy:
 - transmisje meczów (`/matches/{id}/streams`, `/streams/now`, `/competitions/{id}/streams`,
   `/clubs/{id}/streams`) — osobny kontrakt: `docs/streams.md`
 - `GET /api/v1/handball/portal/overview` — lekki agregat Centrum dnia
+- `GET /api/v1/handball/stats/{filters,today,season,geo,trends,proel}` — ekran
+  „Statystyki" (ogólnopolskie, jeden pasek filtrów) — osobny kontrakt: `docs/stats.md`
 - `GET /api/v1/handball/seasons?include_historical=false`
 - `GET /api/v1/handball/associations`
 - `GET /api/v1/handball/clubs` i `GET /clubs/{club_id}`

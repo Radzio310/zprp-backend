@@ -153,6 +153,7 @@ from app.zprp_public.portal import router as handball_portal_router
 from app.zprp_public.live import router as handball_live_router
 from app.zprp_public.extras import router as handball_round3_router
 from app.zprp_public.crest import router as handball_crest_router
+from app.zprp_public.stats import router as handball_stats_router, run_stats_scheduler
 from app.zprp_public.sync import run_zprp_public_scheduler
 from app.zprp_public.history import run_history_scheduler
 from app.streams.routes import admin_router as handball_streams_admin_router, router as handball_streams_router
@@ -458,6 +459,7 @@ app.include_router(handball_portal_router)
 app.include_router(handball_live_router)
 app.include_router(handball_round3_router)
 app.include_router(handball_crest_router)
+app.include_router(handball_stats_router)
 app.include_router(handball_streams_router)
 app.include_router(handball_streams_admin_router)
 app.include_router(handball_sync_admin_router)
@@ -1601,6 +1603,8 @@ async def startup():
     logger.info("✅ Śląskie league tables Joomla publisher started (24 h)")
     _zprp_public_sync_task = asyncio.create_task(run_zprp_public_scheduler())
     _zprp_history_task = asyncio.create_task(run_history_scheduler())
+    # Ekran „Statystyki": migawka sezonu i streszczenia ProEl co 15 min (`docs/stats.md`).
+    asyncio.create_task(run_stats_scheduler())
     # Geokoder miast portalu (Nominatim, 1 zapytanie/s, wyłącznik GEOCODE_DISABLED=1).
     from app.zprp_public.geocode import run_geocode_scheduler
     asyncio.create_task(run_geocode_scheduler())
