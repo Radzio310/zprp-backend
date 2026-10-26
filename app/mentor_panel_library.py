@@ -638,6 +638,9 @@ class ThreadBody(BaseModel):
     body: str = Field(min_length=1, max_length=8000)
     video_id: Optional[str] = Field(default=None, max_length=80)
     video_s: Optional[float] = None
+    #: Wątek klipu: sekunda liczona od początku klipu (aplikacja, plik MP4). Serwer
+    #: zapisuje ją w czasie oryginału (`video_s`), żeby kotwica przetrwała przycięcie.
+    clip_s: Optional[float] = None
     drawing: Optional[Any] = None
     mentions: List[str] = Field(default_factory=list, max_length=20)
 
@@ -646,6 +649,7 @@ class CommentBody(BaseModel):
     body: str = Field(min_length=1, max_length=8000)
     video_id: Optional[str] = Field(default=None, max_length=80)
     video_s: Optional[float] = None
+    clip_s: Optional[float] = None
     drawing: Optional[Any] = None
     mentions: List[str] = Field(default_factory=list, max_length=20)
 
@@ -653,6 +657,7 @@ class CommentBody(BaseModel):
 class CommentPatch(BaseModel):
     body: Optional[str] = Field(default=None, max_length=8000)
     video_s: Optional[float] = None
+    clip_s: Optional[float] = None
     drawing: Optional[Any] = None
     mentions: Optional[List[str]] = Field(default=None, max_length=20)
 
@@ -683,8 +688,10 @@ async def _thread_target(ctx: Dict[str, Any], kind: str, target_id: str) -> Opti
     raise C.err(422, "THREAD_TARGET", "Wątek dotyczy meczu, klipu, zestawienia albo pary.")
 
 
-def _comment_values(ctx: Dict[str, Any], body: Any, *, partial: bool = False) -> Dict[str, Any]:
+def _comment_values(ctx: Dict[str, Any], body: Any, *, partial: bool = False,
+                    clip: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     data = body.model_dump(exclude_unset=partial)
+    clip_s = data.pop("clip_s", None)
     values: Dict[str, Any] = {}
     if "body" in data and data["body"] is not None:
         text = R.plain(data["body"], R.MAX_BODY)
@@ -695,6 +702,13 @@ def _comment_values(ctx: Dict[str, Any], body: Any, *, partial: bool = False) ->
         values["video_id"] = R.s(data.get("video_id")) or None
     if "video_s" in data:
         values["video_s"] = R.clean_video_anchor(data.get("video_s"))
+    if clip is not None and (clip_s is not None or values.get("video_s") is not None):
+        # Wątek klipu: kotwica zawsze w nagraniu klipu, w czasie oryginału (zob. mentor_panel_rules).
+        try:
+            values["video_s"] = R.clip_anchor_video_s(clip, clip_s=clip_s, video_s=data.get("video_s"))
+        except R.RuleError as exc:
+            raise C.rule_error(exc) from exc
+        values["video_id"] = clip.get("video_id")
     if "drawing" in data:
         drawing = R.clean_drawing(data.get("drawing"))
         values["drawing_json"] = C.dumps(drawing) if drawing else None
@@ -740,9 +754,21 @@ async def _notify_comment(ctx: Dict[str, Any], actor: Actor, thread: Dict[str, A
 
     me = actor.judge_id
     target = thread.get("target_id") if thread.get("target_kind") == "clip" else None
-    link = f"{C.WEB_BASE}/{ctx['pair_id']}" + (f"/mecz/{thread['match_id']}" if thread.get("match_id") else "")
     comments = await C.rows(select(mentor_comments).where(mentor_comments.c.thread_id == thread["id"])
                             .where(mentor_comments.c.deleted_at.is_(None)).order_by(mentor_comments.c.created_at.asc()))
+    extra: Dict[str, str] = {}
+    if target:
+        # Klip: web otwiera kino Biblioteki z wątkiem, aplikacja - klip w sekundzie kotwicy.
+        link = f"{C.WEB_BASE}/{ctx['pair_id']}/klipy?klip={target}&watek={thread['id']}"
+        clip = await C.one(select(mentor_clips).where(mentor_clips.c.id == target))
+        anchor = next((c for c in reversed(comments) if c["id"] == message_id and c.get("video_s") is not None), None) \
+            or R.first_anchor(comments)
+        local = R.clip_local_s(clip, anchor.get("video_id"), anchor.get("video_s")) if anchor and clip else None
+        if local is not None:
+            extra["clipS"] = f"{max(0.0, local):.2f}"
+            extra["videoS"] = f"{float(anchor['video_s']):.2f}"
+    else:
+        link = f"{C.WEB_BASE}/{ctx['pair_id']}" + (f"/mecz/{thread['match_id']}" if thread.get("match_id") else "")
     mentioned = {m for m in mentions if m != me}
     recipients = recipients_for(ctx, me) if new else [r for r in await _engaged(ctx, thread, comments, mentions) if r != me]
     if not recipients:
@@ -762,7 +788,7 @@ async def _notify_comment(ctx: Dict[str, Any], actor: Actor, thread: Dict[str, A
             title = thread.get("title") or "Odpowiedź w wątku"
         await notify(ctx, me, title[:120], text, recipients=[judge_id], match_id=thread.get("match_id"), clip_id=target,
                      thread_id=thread["id"], message_id=message_id, target="message" if message_id and not new else "thread",
-                     tag=f"mentor-thread-{thread['id']}", link=link)
+                     tag=f"mentor-thread-{thread['id']}", link=link, **({"extra": extra} if extra else {}))
 
 
 async def mark_thread_read(thread_id: str, judge_id: str) -> None:
@@ -829,11 +855,17 @@ async def create_thread(pair_id: str, body: ThreadBody, actor: Actor = Depends(m
     if body.kind not in R.THREAD_KINDS:
         raise C.err(422, "THREAD_KIND", "Rodzaj wątku: pytanie, notatka albo zadanie.")
     match_id = await _thread_target(ctx, body.target_kind, body.target_id)
-    comment = _comment_values(ctx, CommentBody(body=body.body, video_id=body.video_id, video_s=body.video_s,
-                                               drawing=body.drawing, mentions=body.mentions))
+    clip = await _clip_of_target(body.target_kind, body.target_id)
+    comment = _comment_values(ctx, CommentBody(body=body.body, video_id=body.video_id, video_s=body.video_s, clip_s=body.clip_s,
+                                               drawing=body.drawing, mentions=body.mentions), clip=clip)
+    title = R.plain(body.title, 120) or None
+    if clip is not None and not title:
+        existing = await C.rows(select(mentor_threads.c.id).where(mentor_threads.c.pair_id == ctx["pair_id"])
+                                .where(mentor_threads.c.target_kind == "clip").where(mentor_threads.c.target_id == body.target_id))
+        title = R.auto_thread_title(body.body, len(existing))
     stamp = C.now()
     thread = {"id": R.new_id(), "pair_id": ctx["pair_id"], "target_kind": body.target_kind, "target_id": body.target_id,
-              "match_id": match_id, "title": R.plain(body.title, 120) or None, "kind": body.kind, "status": "open",
+              "match_id": match_id, "title": title, "kind": body.kind, "status": "open",
               "created_by": actor.judge_id, "acted_by": actor.acted_by, "created_at": stamp, "updated_at": stamp,
               "last_comment_at": stamp}
     await database.execute(mentor_threads.insert().values(**thread))
@@ -863,10 +895,17 @@ async def update_thread(thread_id: str, body: ThreadPatch, actor: Actor = Depend
     return await thread_payload(ctx, thread_id)
 
 
+async def _clip_of_target(kind: Any, target_id: Any) -> Optional[Dict[str, Any]]:
+    if kind != "clip":
+        return None
+    return await C.one(select(mentor_clips).where(mentor_clips.c.id == R.s(target_id)))
+
+
 @router.post("/threads/{thread_id}/comments")
 async def add_comment(thread_id: str, body: CommentBody, actor: Actor = Depends(mentor_actor)):
     ctx, thread = await _ctx_for(mentor_threads, thread_id, actor, action="create", missing="Nie ma takiego wątku.")
-    values = _comment_values(ctx, body)
+    clip = await _clip_of_target(thread.get("target_kind"), thread.get("target_id"))
+    values = _comment_values(ctx, body, clip=clip)
     stamp = C.now()
     comment_id = R.new_id()
     await database.execute(mentor_comments.insert().values(id=comment_id, thread_id=thread_id, author_id=actor.judge_id,
@@ -878,7 +917,7 @@ async def add_comment(thread_id: str, body: CommentBody, actor: Actor = Depends(
                           new=False, message_id=comment_id)
     await mark_thread_read(thread_id, actor.judge_id)
     row = await C.one(select(mentor_comments).where(mentor_comments.c.id == comment_id))
-    return C.comment_shape(ctx, row, await C.people([actor.judge_id, actor.acted_by]))
+    return C.comment_shape(ctx, row, await C.people([actor.judge_id, actor.acted_by]), clip)
 
 
 async def _comment_ctx(comment_id: str, actor: Actor) -> tuple:
@@ -894,12 +933,13 @@ async def _comment_ctx(comment_id: str, actor: Actor) -> tuple:
 @router.patch("/comments/{comment_id}")
 async def update_comment(comment_id: str, body: CommentPatch, actor: Actor = Depends(mentor_actor)):
     ctx, row, thread = await _comment_ctx(comment_id, actor)
-    values = _comment_values(ctx, body, partial=True)
+    clip = await _clip_of_target(thread.get("target_kind"), thread.get("target_id"))
+    values = _comment_values(ctx, body, partial=True, clip=clip)
     values["edited_at"] = C.now()
     await database.execute(update(mentor_comments).where(mentor_comments.c.id == comment_id).values(**values))
     await C.touch(ctx, actor.judge_id, "comment_updated", "threads", thread.get("match_id"), {"id": comment_id})
     fresh = await C.one(select(mentor_comments).where(mentor_comments.c.id == comment_id))
-    return C.comment_shape(ctx, fresh, await C.people([fresh.get("author_id"), fresh.get("acted_by")]))
+    return C.comment_shape(ctx, fresh, await C.people([fresh.get("author_id"), fresh.get("acted_by")]), clip)
 
 
 @router.delete("/comments/{comment_id}")

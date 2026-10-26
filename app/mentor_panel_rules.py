@@ -549,6 +549,117 @@ MAX_BODY = 4000
 MAX_SHAPES = 20
 SHAPE_KINDS = ("arrow", "circle", "line", "rect", "free")
 
+# ─── Wątki przy klipie (26.10.2026) ─────────────────────────────────────────
+# Kotwica komentarza w wątku klipu jest ZAWSZE zapisana w czasie oryginalnego
+# nagrania meczu (`video_id` + `video_s`), tak jak w wątkach meczu. Dzięki temu
+# przetrwa przycięcie klipu i plik MP4 (Bastion), a ta sama kotwica staje na osi
+# meczu. Czas lokalny klipu (`clip_s`, 0 = początek zakresu) liczy się przy odczycie.
+
+#: Kino pozwala poszerzyć zakres o 5 s z każdej strony - kotwica może tam stanąć.
+CLIP_ANCHOR_PAD_S = 5.0
+#: Nazwa dawnego, jedynego wątku klipu (migracja zgodna wstecz).
+LEGACY_CLIP_THREAD_TITLE = "Rozmowa"
+MAX_CLIP_PINS = 40
+
+
+def clip_local_s(clip: Optional[Mapping[str, Any]], video_id: Any, video_s: Any) -> Optional[float]:
+    """Sekunda oryginału → czas lokalny klipu; inne nagranie albo brak kotwicy = None."""
+    if not clip or video_s is None:
+        return None
+    if s(video_id) and s(clip.get("video_id")) and s(video_id) != s(clip.get("video_id")):
+        return None
+    try:
+        return round(float(video_s) - float(clip.get("start_s") or 0), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def clip_anchor_inside(clip: Optional[Mapping[str, Any]], video_s: Any) -> bool:
+    """Kotwica w bieżącym zakresie klipu (po przycięciu może z niego wypaść)."""
+    if not clip or video_s is None:
+        return False
+    try:
+        value = float(video_s)
+        return float(clip["start_s"]) - 0.05 <= value <= float(clip["end_s"]) + 0.05
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def clip_anchor_video_s(clip: Mapping[str, Any], *, clip_s: Any = None, video_s: Any = None) -> Optional[float]:
+    """Kotwica do zapisu w czasie oryginału: z `clip_s` (aplikacja, MP4) albo wprost z `video_s` (web).
+
+    Poza zakresem klipu z poszerzeniem 5 s = błąd, nie cicha zmiana miejsca.
+    """
+    if clip_s in (None, "") and video_s in (None, ""):
+        return None
+    try:
+        start, end = float(clip["start_s"]), float(clip["end_s"])
+        value = start + float(clip_s) if clip_s not in (None, "") else float(video_s)
+    except (KeyError, TypeError, ValueError):
+        raise RuleError(422, "ANCHOR_RANGE", "Kotwica komentarza musi być liczbą sekund.")
+    if value != value or value < start - CLIP_ANCHOR_PAD_S - 0.05 or value > end + CLIP_ANCHOR_PAD_S + 0.05:
+        raise RuleError(422, "ANCHOR_RANGE", "Kotwica wypada poza klip - przesuń głowicę w zakres klipu.")
+    return clean_video_anchor(max(0.0, value))
+
+
+def initials(full_name: Any) -> str:
+    parts = [p for p in s(full_name).replace("-", " ").split() if p]
+    return "".join(p[0].upper() for p in parts[:2]) or "?"
+
+
+def first_anchor(comments: Sequence[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+    """Kotwica wątku = pierwszy komentarz z sekundą (komentarze w kolejności dodania)."""
+    for c in comments:
+        if c.get("video_s") is not None:
+            return c
+    return None
+
+
+def clip_threads_summary(clip: Mapping[str, Any], threads: Sequence[Mapping[str, Any]],
+                         comments: Mapping[str, Sequence[Mapping[str, Any]]], unread_ids: Iterable[str],
+                         names: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
+    """Liczniki i szpilki wątków klipu dla ściany i taśmy („Dymki na taśmie”).
+
+    Szpilka = wątek z kotwicą: inicjał autora wątku, sekunda oryginału i klipu,
+    rozwiązany (szara), nieprzeczytany (kropka). Wątki bez kotwicy liczą się, ale szpilki nie mają.
+    """
+    unread = set(unread_ids)
+    pins: List[Dict[str, Any]] = []
+    total_comments = 0
+    last_at = None
+    for t in threads:
+        items = comments.get(t["id"], [])
+        total_comments += len(items)
+        stamp = t.get("last_comment_at") or t.get("created_at")
+        if stamp is not None and (last_at is None or (aware(stamp) or stamp) > (aware(last_at) or last_at)):
+            last_at = stamp
+        anchor = first_anchor(items)
+        if anchor is None or len(pins) >= MAX_CLIP_PINS:
+            continue
+        author = s(t.get("created_by"))
+        pins.append({
+            "thread_id": t["id"], "title": t.get("title"), "status": t.get("status") or "open",
+            "video_id": anchor.get("video_id") or clip.get("video_id"), "video_s": anchor.get("video_s"),
+            "clip_s": clip_local_s(clip, anchor.get("video_id"), anchor.get("video_s")),
+            "in_range": clip_anchor_inside(clip, anchor.get("video_s")),
+            "author": {"judge_id": author, "initials": initials((names.get(author) or {}).get("full_name"))},
+            "unread": t["id"] in unread,
+        })
+    pins.sort(key=lambda p: (p["video_s"] if p["video_s"] is not None else 0))
+    return {
+        "total": len(threads), "open": sum(1 for t in threads if (t.get("status") or "open") == "open"),
+        "comments": total_comments, "unread": sum(1 for t in threads if t["id"] in unread),
+        "last_at": last_at, "pins": pins,
+    }
+
+
+def auto_thread_title(body: Any, existing: int) -> str:
+    """Wątek klipu bez tytułu: pierwszy = „Rozmowa”, kolejne = początek treści."""
+    if existing <= 0:
+        return LEGACY_CLIP_THREAD_TITLE
+    line = plain(s(body).splitlines()[0] if s(body) else "", 200)
+    return line if len(line) <= 60 else line[:57].rstrip() + "..."
+
 
 def clean_drawing(raw: Any) -> Optional[List[Dict[str, Any]]]:
     """Strzałki i kółka na stopklatce: do 20 kształtów, współrzędne 0..1."""

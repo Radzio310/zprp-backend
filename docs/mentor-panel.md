@@ -181,6 +181,12 @@ Każdy zapis podbija `mentor_panels.rev` i zwraca świeży obiekt (klient podmie
 - Powiadomienia: nowy wątek/komentarz/wzmianka → push (`kind=mentor_panel`, `{pairId, matchId?, clipId?, threadId}`) do pozostałych osób pary i mentorów (preferencja `mentorPanel`), e-mail zbiorczy (Brevo) najwyżej co 30 min na osobę.
 - `Thread = {id, target_kind, target_id, match_id, title, kind, status, created_by:{judge_id,name}, created_at, last_comment_at, comments: Comment[]}`;
   `Comment = {id, author:{judge_id,name,role}, body, video_id, video_s, drawing, mentions, created_at, edited_at, can_edit}`.
+- Wątki przy klipie (26.10.2026, `target_kind=clip`), wiele na klip, te same funkcje co wątki meczu (follow/mute, wzmianki, `unread`, jeden push na wątek):
+  - kotwica ZAWSZE w czasie oryginału (`video_id` klipu + `video_s`). Wejście: `video_s` (web) albo `clip_s` (sekunda od początku klipu, aplikacja/MP4), serwer liczy `video_s = start_s + clip_s`; poza zakresem ±5 s → 422 `ANCHOR_RANGE`;
+  - `Thread` klipu ma dodatkowo `clip: {id, match_id, video_id, start_s, end_s, title, source, match_ms, half, category_ids, deleted}` i `anchor: {comment_id, video_id, video_s, clip_s, in_range} | null` (pierwszy komentarz z sekundą); `Comment` w wątku klipu ma `clip_s` i `in_range` (po przycięciu klipu kotwica może wypaść poza zakres);
+  - wątek klipu bez tytułu: pierwszy = „Rozmowa”, kolejne = początek treści; stary płaski wątek dostał „Rozmowa” migracją;
+  - `Clip.threads = {total, open, comments, unread, last_at, pins:[{thread_id, title, status, video_id, video_s, clip_s, in_range, author:{judge_id, initials}, unread}]}`; `Clip.thread` (pierwszy wątek) zostaje dla starszych buildów;
+  - push wątku klipu: `clipId`, `threadId`, `clipS`, `videoS` (sekunda kotwicy: komentarza, a bez niej wątku), link web `/mentor/{pair}/klipy?klip={id}&watek={threadId}`.
 
 ### 4.9 Arkusze
 - `GET /pairs/{pairId}/sheets?season=` → `{delegate: DelegateSheet[], mentor: MentorSheet[], trends: {sections:[{key, label, points:[{date, value, source}]}], priorities:[{text, count, last}], delegate_vs_mentor:[{match_id, delegate, mentor}]}}`.

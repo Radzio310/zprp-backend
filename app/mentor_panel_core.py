@@ -718,7 +718,7 @@ def category_shape(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def clip_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dict[str, Any]],
-               thread: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+               thread: Optional[Dict[str, Any]] = None, threads: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     owner = R.s(row.get("author_id")) == ctx["actor"].judge_id
     return {
         "id": row["id"], "match_id": row.get("match_id"), "video_id": row.get("video_id"),
@@ -730,45 +730,89 @@ def clip_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dict[s
         "mp4_status": row.get("mp4_status") or "none",
         "important": bool(row.get("important")), "to_discuss": bool(row.get("to_discuss")),
         "public_url": R.public_url("clip", row.get("public_token")),
+        # `thread` = najstarszy wątek (kształt sprzed 26.10 dla starszych buildów aplikacji),
+        # `threads` = liczniki, nowości i szpilki wszystkich wątków klipu.
         "thread": thread,
+        "threads": threads or {"total": 0, "open": 0, "comments": 0, "unread": 0, "last_at": None, "pins": []},
     }
 
 
-async def clip_threads(pair_id: str, clip_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+async def clip_threads(pair_id: str, clips: List[Dict[str, Any]], judge_id: str = "") -> Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """Wątki klipów zbiorczo: `{clip_id: (stary skrót pierwszego wątku, podsumowanie wszystkich)}`."""
+    clip_ids = [c["id"] for c in clips]
     if not clip_ids:
         return {}
     found = await rows(select(mentor_threads).where(mentor_threads.c.pair_id == pair_id)
                        .where(mentor_threads.c.target_kind == "clip").where(mentor_threads.c.target_id.in_(clip_ids))
                        .order_by(mentor_threads.c.created_at.asc()))
-    counts: Dict[str, int] = {}
-    if found:
-        for c in await rows(select(mentor_comments.c.thread_id, func.count().label("n"))
-                            .where(mentor_comments.c.thread_id.in_([t["id"] for t in found]))
-                            .where(mentor_comments.c.deleted_at.is_(None)).group_by(mentor_comments.c.thread_id)):
-            counts[c["thread_id"]] = int(c["n"] or 0)
-    out: Dict[str, Dict[str, Any]] = {}
+    if not found:
+        return {}
+    comments: Dict[str, List[Dict[str, Any]]] = {}
+    for c in await rows(select(mentor_comments.c.id, mentor_comments.c.thread_id, mentor_comments.c.video_id,
+                               mentor_comments.c.video_s, mentor_comments.c.created_at)
+                        .where(mentor_comments.c.thread_id.in_([t["id"] for t in found]))
+                        .where(mentor_comments.c.deleted_at.is_(None)).order_by(mentor_comments.c.created_at.asc())):
+        comments.setdefault(c["thread_id"], []).append(c)
+    unread = set(await unread_threads(pair_id, judge_id)) if judge_id else set()
+    names = await people({t.get("created_by") for t in found})
+    by_clip: Dict[str, List[Dict[str, Any]]] = {}
     for t in found:
-        out.setdefault(R.s(t["target_id"]), {"id": t["id"], "open": t.get("status") == "open", "comments": counts.get(t["id"], 0)})
+        by_clip.setdefault(R.s(t["target_id"]), []).append(t)
+    rows_by_id = {c["id"]: c for c in clips}
+    out: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
+    for clip_id, threads in by_clip.items():
+        first = threads[0]
+        legacy = {"id": first["id"], "open": any(t.get("status") == "open" for t in threads),
+                  "comments": sum(len(comments.get(t["id"], [])) for t in threads)}
+        out[clip_id] = (legacy, R.clip_threads_summary(rows_by_id.get(clip_id) or {}, threads, comments, unread, names))
     return out
 
 
 async def clips_payload(ctx: Dict[str, Any], clip_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     names = await people({r.get("author_id") for r in clip_rows} | {r.get("acted_by") for r in clip_rows})
-    threads = await clip_threads(ctx["pair_id"], [r["id"] for r in clip_rows])
-    return [clip_shape(ctx, r, names, threads.get(r["id"])) for r in clip_rows]
+    threads = await clip_threads(ctx["pair_id"], clip_rows, ctx["actor"].judge_id)
+    out = []
+    for r in clip_rows:
+        legacy, summary = threads.get(r["id"], (None, None))
+        out.append(clip_shape(ctx, r, names, legacy, summary))
+    return out
 
 
-def comment_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+def comment_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dict[str, Any]],
+                  clip: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     author = person(names, row.get("author_id"))
     owner = author["judge_id"] == ctx["actor"].judge_id
     drawing = R.json_value(row.get("drawing_json"), [])
-    return {
+    shaped = {
         "id": row["id"], "author": {**author, "role": member_role(ctx, author["judge_id"])}, **acted_fields(names, row),
         "body": row.get("body"),
         "video_id": row.get("video_id"), "video_s": row.get("video_s"), "drawing": drawing or None,
         "mentions": R.json_value(row.get("mentions"), []), "created_at": row.get("created_at"),
         "edited_at": row.get("edited_at"), "can_edit": may(ctx, "edit", owner=owner),
     }
+    if clip is not None:
+        # Wątek klipu: ta sama kotwica w czasie lokalnym klipu (0 = początek zakresu).
+        shaped["clip_s"] = R.clip_local_s(clip, row.get("video_id"), row.get("video_s"))
+        shaped["in_range"] = R.clip_anchor_inside(clip, row.get("video_s"))
+    return shaped
+
+
+CLIP_SLIM_KEYS = ("id", "match_id", "video_id", "start_s", "end_s", "title", "source", "match_ms", "half")
+
+
+def clip_slim(clip: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Skrót klipu przy wątku (miniatura w pokoju meczu, lot do kotwicy w aplikacji)."""
+    if not clip:
+        return None
+    return {**{k: clip.get(k) for k in CLIP_SLIM_KEYS}, "category_ids": R.json_value(clip.get("category_ids"), []),
+            "deleted": clip.get("deleted_at") is not None}
+
+
+async def thread_clips(thread_rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    ids = sorted({R.s(t.get("target_id")) for t in thread_rows if t.get("target_kind") == "clip"})
+    if not ids:
+        return {}
+    return {r["id"]: r for r in await rows(select(mentor_clips).where(mentor_clips.c.id.in_(ids)))}
 
 
 async def threads_payload(ctx: Dict[str, Any], thread_rows: List[Dict[str, Any]], *, with_comments: bool = True) -> List[Dict[str, Any]]:
@@ -782,12 +826,14 @@ async def threads_payload(ctx: Dict[str, Any], thread_rows: List[Dict[str, Any]]
     my_prefs = {r["thread_id"]: r["mode"] for r in await rows(select(mentor_thread_prefs).where(mentor_thread_prefs.c.judge_id == me)
                                                                .where(mentor_thread_prefs.c.thread_id.in_(ids)))} if ids else {}
     unread_ids = set(await unread_threads(ctx["pair_id"], me)) if ids else set()
+    clips = await thread_clips(thread_rows)
     names = await people({t.get("created_by") for t in thread_rows} | {t.get("acted_by") for t in thread_rows}
                          | {c.get("author_id") for cs in comments.values() for c in cs}
                          | {c.get("acted_by") for cs in comments.values() for c in cs})
     out = []
     for t in thread_rows:
         items = comments.get(t["id"], [])
+        clip = clips.get(R.s(t.get("target_id"))) if t.get("target_kind") == "clip" else None
         shaped = {
             "id": t["id"], "target_kind": t.get("target_kind"), "target_id": t.get("target_id"), "match_id": t.get("match_id"),
             "title": t.get("title"), "kind": t.get("kind"), "status": t.get("status"),
@@ -796,8 +842,16 @@ async def threads_payload(ctx: Dict[str, Any], thread_rows: List[Dict[str, Any]]
             "my_follow": my_prefs.get(t["id"]) or "auto", "unread": t["id"] in unread_ids,
             "can_edit": may(ctx, "edit", owner=R.s(t.get("created_by")) == ctx["actor"].judge_id),
         }
+        if t.get("target_kind") == "clip":
+            anchor = R.first_anchor(items)
+            shaped["clip"] = clip_slim(clip)
+            shaped["anchor"] = {
+                "comment_id": anchor["id"], "video_id": anchor.get("video_id") or (clip or {}).get("video_id"),
+                "video_s": anchor.get("video_s"), "clip_s": R.clip_local_s(clip, anchor.get("video_id"), anchor.get("video_s")),
+                "in_range": R.clip_anchor_inside(clip, anchor.get("video_s")),
+            } if anchor else None
         if with_comments:
-            shaped["comments"] = [comment_shape(ctx, c, names) for c in items]
+            shaped["comments"] = [comment_shape(ctx, c, names, clip) for c in items]
         else:
             last = items[-1] if items else None
             shaped["comments_count"] = len(items)

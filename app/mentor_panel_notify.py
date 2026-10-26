@@ -2,7 +2,7 @@
 Panel „Mentor" - powiadomienia: push (BAZA) od razu i zbiorczy e-mail (Brevo)
 najwyżej co 30 minut na osobę (`docs/mentor-panel.md`, 4.3 i 4.8).
 
-Push: `kind=mentor_panel` + `pairId`, `matchId`, `clipId`, `threadId`, `messageId`,
+Push: `kind=mentor_panel` + `pairId`, `matchId`, `clipId`, `threadId`, `messageId`, `clipS`/`videoS`,
 `sheetId`, `target` (sheet|thread|message), `tag` (napisy - FCM przyjmuje tylko
 napisy), przełącznik w telefonie `mentorPanel`. `tag` skleja powiadomienia w jeden kafelek.
 E-mail: zdarzenia czekają w pamięci procesu i wychodzą jednym listem, gdy od
@@ -65,7 +65,8 @@ async def match_image(match_id: Optional[str]) -> Optional[str]:
 
 def push_data(pair_id: Any, *, target: Optional[str] = None, match_id: Optional[str] = None, clip_id: Optional[str] = None,
               thread_id: Optional[str] = None, message_id: Optional[str] = None, sheet_id: Optional[str] = None,
-              tag: Optional[str] = None, quiet: bool = False, image: Optional[str] = None) -> Dict[str, str]:
+              tag: Optional[str] = None, quiet: bool = False, image: Optional[str] = None,
+              extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Ładunek push panelu (FCM: same napisy). `tag` = tag Androida + collapse key + apns-collapse-id."""
     data = {"type": "mentor_panel", "kind": "mentor_panel", "pairId": str(pair_id)}
     for key, value in (("matchId", match_id), ("clipId", clip_id), ("threadId", thread_id), ("messageId", message_id),
@@ -75,6 +76,10 @@ def push_data(pair_id: Any, *, target: Optional[str] = None, match_id: Optional[
     if tag:
         data["notificationTag"] = str(tag)
     data["notificationColor"] = ACCENT
+    # Dodatki celu (np. `clipS`/`videoS` - sekunda kotwicy wątku klipu); same napisy.
+    for key, value in (extra or {}).items():
+        if value not in (None, "") and key not in data:
+            data[str(key)] = str(value)
     if image:
         data["notificationImage"] = image
     if quiet:
@@ -86,13 +91,15 @@ def push_data(pair_id: Any, *, target: Optional[str] = None, match_id: Optional[
 async def notify(ctx: Dict[str, Any], actor_id: str, title: str, body: str, *, recipients: Optional[List[str]] = None,
                  match_id: Optional[str] = None, clip_id: Optional[str] = None, thread_id: Optional[str] = None,
                  link: str = "", message_id: Optional[str] = None, sheet_id: Optional[str] = None,
-                 target: Optional[str] = None, tag: Optional[str] = None, quiet: bool = False) -> Dict[str, Any]:
+                 target: Optional[str] = None, tag: Optional[str] = None, quiet: bool = False,
+                 extra: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     ids = recipients if recipients is not None else recipients_for(ctx, actor_id)
     if not ids:
         return {"push": None, "queued": 0}
     target = target or ("thread" if thread_id else None)
     data = push_data(ctx["pair_id"], target=target, match_id=match_id, clip_id=clip_id, thread_id=thread_id,
-                     message_id=message_id, sheet_id=sheet_id, tag=tag, quiet=quiet, image=await match_image(match_id))
+                     message_id=message_id, sheet_id=sheet_id, tag=tag, quiet=quiet, image=await match_image(match_id),
+                     extra=extra)
     report = None
     try:
         from app.push.push import send_push_to_judges_report

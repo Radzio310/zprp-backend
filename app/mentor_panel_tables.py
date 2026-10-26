@@ -338,6 +338,11 @@ MIGRATIONS = (
     "ALTER TABLE mentor_comments ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_audit ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_compilation_items ADD COLUMN IF NOT EXISTS label VARCHAR",
+    # Wątki przy klipie (26.10.2026): dawny jedyny, płaski wątek klipu (bez tytułu)
+    # staje się pierwszym wątkiem „Rozmowa”. Nowe wątki klipu tytuł mają zawsze.
+    "UPDATE mentor_threads SET title = 'Rozmowa' WHERE target_kind = 'clip' AND (title IS NULL OR title = '')",
+    # Wątki klipów na ścianie Biblioteki: zbiorczo po target_id.
+    "CREATE INDEX IF NOT EXISTS ix_mentor_comments_thread_created ON mentor_comments (thread_id, created_at)",
     "CREATE INDEX IF NOT EXISTS ix_zprp_public_matches_referee_1 ON zprp_public_matches (referee_1_id)",
     "CREATE INDEX IF NOT EXISTS ix_zprp_public_matches_referee_2 ON zprp_public_matches (referee_2_id)",
     "CREATE INDEX IF NOT EXISTS ix_zprp_archive_matches_ref_first ON zprp_archive_matches ((slim_json->'refs'->>'first'))",
