@@ -351,7 +351,8 @@ function gate(id){const b=blocker(id);if(b){explain(id,b);return false}return tr
 (function(){const el=$('tok');let hand=false;const mark=()=>{hand=true};
  ['beforeinput','keydown','paste','drop'].forEach(ev=>el.addEventListener(ev,mark));
  const notice=()=>{const h=$('tok-hint');h.className='hint warn';h.textContent='Przeglądarka sama wpisała tu zapisane hasło. Usunęliśmy je - wklej token connectora ręcznie.'};
- el.addEventListener('input',()=>{const auto=!hand&&el.value;hand=false;if(auto){el.value='';render();notice();return}render()});
+ el.addEventListener('input',()=>{const auto=!hand&&el.value&&document.activeElement!==el;hand=false; // z fokusem = wpisał użytkownik (klawiatury Androida bywają bez beforeinput/paste)
+ if(auto){el.value='';render();notice();return}render()});
  el.addEventListener('animationstart',e=>{if(e.animationName==='autofill'){el.value='';render();notice()}});
 })();
 ['judge','item'].forEach(id=>$(id).addEventListener('input',render));
