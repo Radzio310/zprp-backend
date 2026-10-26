@@ -19,6 +19,36 @@ from .urlrules import is_blocked_navigation
 log = logging.getLogger("bastion.connector")
 VIEWPORT = {"width": 1100, "height": 700}
 MAX_TEXT = 2000
+TAKEOVER_CODE = 4409
+TAKEOVER_REASON = "Widok przejęła inna karta"
+
+# Przegladarka serwerowa nie ma zadnego uwierzytelniacza WebAuthn (klucz bezpieczenstwa, passkey).
+# Discord przy MFA sam uruchamia navigator.credentials.get({publicKey}); w Chromium bez
+# uwierzytelniacza konczy sie to bledem "Wystapil blad. Sprobuj ponownie." zamiast pola na kod.
+# Uczciwie zglaszamy brak WebAuthn: PublicKeyCredential niedostepne, wywolania z publicKey
+# odrzucane NotAllowedError. Strona przechodzi wtedy na kod z aplikacji / SMS / kod zapasowy.
+# To NIE omija MFA - czlowiek nadal podaje drugi skladnik.
+NO_WEBAUTHN_JS = r"""
+(() => {
+  try {
+    const deny = () => Promise.reject(new DOMException(
+      'WebAuthn niedostepne w przegladarce serwerowej', 'NotAllowedError'));
+    try { delete window.PublicKeyCredential; } catch (e) {}
+    try { Object.defineProperty(window, 'PublicKeyCredential',
+      { value: undefined, configurable: true, writable: false, enumerable: false }); } catch (e) {}
+    const c = navigator.credentials;
+    if (c) {
+      const wrap = (orig) => function (opts) {
+        if (opts && opts.publicKey) return deny();
+        return orig ? orig.call(c, opts) : deny();
+      };
+      const get = c.get, create = c.create;
+      try { Object.defineProperty(c, 'get', { value: wrap(get), configurable: true }); } catch (e) {}
+      try { Object.defineProperty(c, 'create', { value: wrap(create), configurable: true }); } catch (e) {}
+    }
+  } catch (e) {}
+})();
+"""
 
 
 class ConnectorError(Exception):
@@ -139,13 +169,21 @@ class Service:
     def _active_for(self, key: str) -> Attempt | None:
         return next((a for a in self.attempts.values() if a.conn_key == key and a.active), None)
 
-    async def create_attempt(self, scope: str, judge_id: str, probe_item_id: int | None) -> tuple[Attempt, str]:
+    async def create_attempt(self, scope: str, judge_id: str, probe_item_id: int | None) -> tuple[Attempt, str, bool]:
+        """Zwraca (proba, bilet, resumed). Handoff 12: jeden aktywny proces logowania na polaczenie,
+        kilka kart oglada te sama probe. Ta sama osoba (conn_key + judge_id) z aktywna proba dostaje
+        ISTNIEJACA probe i nowy bilet (odswiezenie karty nie gubi ekranu MFA); inna osoba - 409."""
         probe = probe_item_id or self.s.probe_bunny_item_id
         if not probe:
             raise ConnectorError("PROBE_ITEM_REQUIRED", 400, "brak bunny_item_id do weryfikacji logowania")
         key = conn_key_for(scope, judge_id)
-        if self._active_for(key):
-            raise ConnectorError("LOGIN_ALREADY_ACTIVE", 409)
+        existing = self._active_for(key)
+        if existing:
+            if existing.judge_id != judge_id:
+                raise ConnectorError("LOGIN_ALREADY_ACTIVE", 409, "na tym polaczeniu trwa proba logowania innej osoby")
+            if existing.cdp is None:
+                raise ConnectorError("LOGIN_STARTING", 409, "proba jeszcze sie uruchamia, sprobuj za kilka sekund")
+            return existing, tickets.mint(self.s.ticket_secret, judge_id, existing.id, self.s.ticket_ttl_s), True
         if sum(1 for a in self.attempts.values() if a.active) >= self.s.max_active_logins:
             raise ConnectorError("LOGIN_CAPACITY", 429)
         now = time.time()
@@ -156,6 +194,7 @@ class Service:
             browser = await self._get_browser()
             # izolowany kontekst kandydujacy: nie dotyka zapisanego stanu dzialajacej sesji
             a.context = await browser.new_context(viewport=VIEWPORT, locale="pl-PL", timezone_id="Europe/Warsaw")
+            await a.context.add_init_script(NO_WEBAUTHN_JS)  # wszystkie ramki, przed skryptami strony
             await a.context.route("**/*", lambda route: route.abort() if is_blocked_navigation(route.request.url)
                                   else route.continue_())
             a.page = await a.context.new_page()
@@ -169,7 +208,7 @@ class Service:
             raise ConnectorError("BASTION_UNAVAILABLE", 503) from e
         a.task = asyncio.create_task(self._watch(a))
         ticket = tickets.mint(self.s.ticket_secret, judge_id, a.id, self.s.ticket_ttl_s)
-        return a, ticket
+        return a, ticket, False
 
     def new_ticket(self, a: Attempt) -> str:
         if not a.active:
@@ -216,9 +255,20 @@ class Service:
 
     # ---------- widok: klatki i wejscie ----------
     async def attach_viewer(self, a: Attempt, ws) -> None:
-        if a.viewer is not None:
-            raise ConnectorError("VIEWER_ALREADY_ATTACHED", 409)
-        a.viewer = ws
+        """Nowy widok przejmuje probe (np. odswiezona karta); poprzedni zamykany czysto kodem 4409."""
+        if a.cdp is None:
+            raise ConnectorError("LOGIN_STARTING", 409)
+        old, a.viewer = a.viewer, ws
+        if old is not None and old is not ws:
+            try:
+                await old.send_json({"type": "takeover"})
+                await old.close(code=TAKEOVER_CODE, reason=TAKEOVER_REASON)
+            except Exception:  # noqa: BLE001
+                pass
+            try:  # restart screencastu: nowy widok dostaje od razu pelna klatke, nawet gdy strona stoi
+                await a.cdp.send("Page.stopScreencast")
+            except Exception:  # noqa: BLE001
+                pass
         await a.cdp.send("Page.startScreencast", {"format": "jpeg", "quality": 60, "maxWidth": VIEWPORT["width"],
                                                   "maxHeight": VIEWPORT["height"], "everyNthFrame": 1})
 

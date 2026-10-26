@@ -198,3 +198,101 @@ def test_embed_expiry_unknown_is_none():
     assert embed_expiry("https://x.mediadelivery.net/e?token=abc") is None
     assert embed_expiry("https://x.mediadelivery.net/e?expires=12") is None
     assert embed_expiry("https://x.mediadelivery.net/e?token_expires=1900000000") == 1900000000
+
+
+def test_no_webauthn_script_in_real_chromium():
+    """Przegladarka serwerowa uczciwie zglasza brak WebAuthn (MFA Discorda przechodzi na kod)."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from connector.service import NO_WEBAUTHN_JS
+    with sync_api.sync_playwright() as p:
+        try:
+            exe = os.environ.get("BASTION_CHROMIUM_PATH")
+            browser = p.chromium.launch(executable_path=exe) if exe else p.chromium.launch()
+        except Exception as e:  # noqa: BLE001
+            pytest.skip(f"brak Chromium: {type(e).__name__}")
+        try:
+            ctx = browser.new_context()
+            ctx.add_init_script(NO_WEBAUTHN_JS)
+            page = ctx.new_page()
+            # bezpieczny kontekst (https), bo navigator.credentials istnieje tylko w nim
+            ctx.route("https://bastion.test/**", lambda r: r.fulfill(body="<p>x</p>", content_type="text/html"))
+            page.goto("https://bastion.test/")
+            res = page.evaluate("""async () => {
+                const out = {pkc: typeof window.PublicKeyCredential, inWin: 'PublicKeyCredential' in window && !!window.PublicKeyCredential};
+                for (const m of ['get', 'create']) {
+                    try { await navigator.credentials[m]({publicKey: {challenge: new Uint8Array(8)}}); out[m] = 'resolved'; }
+                    catch (e) { out[m] = e.name; }
+                }
+                return out;
+            }""")
+        finally:
+            browser.close()
+    assert res == {"pkc": "undefined", "inWin": False, "get": "NotAllowedError", "create": "NotAllowedError"}
+
+
+# ---------- wznowienie proby i przejecie widoku (handoff 12: kilka kart oglada te sama probe) ----------
+class _FakeCdp:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, method, params=None):
+        self.sent.append(method)
+
+
+class _FakeWs:
+    def __init__(self):
+        self.msgs, self.closed = [], None
+
+    async def send_json(self, m):
+        self.msgs.append(m)
+
+    async def close(self, code=1000, reason=""):
+        self.closed = (code, reason)
+
+
+def _svc(tmp_path):
+    from connector.config import Settings
+    from connector.service import Service
+    s = Settings(secrets_key=key(), ticket_secret="t" * 40, data_dir=str(tmp_path), probe_bunny_item_id=5632)
+    return Service(s)
+
+
+def _active(svc, judge="tester1", scope="default"):
+    import time as _t
+    from connector.service import Attempt
+    a = Attempt(id="att1", conn_key=conn_key_for(scope, judge), scope=scope, judge_id=judge, probe_item_id=5632,
+                created=_t.time(), expires=_t.time() + 600, status="waiting_for_user")
+    a.cdp = _FakeCdp()
+    svc.attempts[a.id] = a
+    return a
+
+
+async def test_same_person_resumes_attempt_with_fresh_ticket(tmp_path):
+    svc = _svc(tmp_path)
+    a = _active(svc)
+    got, ticket, resumed = await svc.create_attempt("default", "tester1", 5632)
+    assert got is a and resumed is True and len(svc.attempts) == 1
+    svc.registry.consume("t" * 40, ticket, a.id, "tester1")  # bilet wazny dla tej proby i tej osoby
+
+
+async def test_other_person_still_gets_409(tmp_path):
+    from connector.service import ConnectorError
+    svc = _svc(tmp_path)
+    _active(svc, judge="tester1")
+    with pytest.raises(ConnectorError) as e:
+        await svc.create_attempt("default", "osoba2", 5632)
+    assert e.value.code == "LOGIN_ALREADY_ACTIVE" and e.value.status == 409
+
+
+async def test_new_viewer_takes_over_and_old_closes_cleanly(tmp_path):
+    from connector.service import TAKEOVER_CODE
+    svc = _svc(tmp_path)
+    a = _active(svc)
+    old, new = _FakeWs(), _FakeWs()
+    await svc.attach_viewer(a, old)
+    await svc.attach_viewer(a, new)
+    assert a.viewer is new
+    assert old.closed == (TAKEOVER_CODE, "Widok przejęła inna karta") and {"type": "takeover"} in old.msgs
+    assert a.cdp.sent[-2:] == ["Page.stopScreencast", "Page.startScreencast"]
+    await svc.detach_viewer(a, old)  # zamkniecie starego widoku nie odpina nowego
+    assert a.viewer is new

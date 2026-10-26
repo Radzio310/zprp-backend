@@ -88,9 +88,9 @@ class AttemptIn(BaseModel):
 async def create_attempt(body: AttemptIn):
     _judge(body.judge_id)
     _scope(body.scope, body.judge_id)
-    a, ticket = await svc.create_attempt(body.scope, body.judge_id, body.probe_bunny_item_id)
+    a, ticket, resumed = await svc.create_attempt(body.scope, body.judge_id, body.probe_bunny_item_id)
     return JSONResponse({**svc.public_attempt(a), "ticket": ticket, "ticket_ttl_s": settings.ticket_ttl_s,
-                         "ws_path": f"/ws/login/{a.id}"}, headers={"Cache-Control": "no-store"})
+                         "ws_path": f"/ws/login/{a.id}", "resumed": resumed}, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/attempts/{attempt_id}", dependencies=[Depends(auth)])
@@ -164,15 +164,15 @@ async def ws_login(ws: WebSocket, attempt_id: str):
         return
     await ws.send_json({"type": "ready", "w": 1100, "h": 700, "status": a.status})
     try:
-        while a.active:
+        while a.active and a.viewer is ws:
             raw = await ws.receive_text()
-            if len(raw) > 4096:
+            if len(raw) > 4096 or a.viewer is not ws:  # widok przejety przez inna karte: wejscie ignorowane
                 continue
             try:
                 await svc.handle_input(a, json.loads(raw))
             except (ValueError, TypeError):
                 continue
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):  # RuntimeError: odbior po zamknieciu przy przejeciu widoku
         pass
     finally:
         await svc.detach_viewer(a, ws)  # rozlaczenie widoku NIE jest sukcesem ani anulowaniem; proba wygasa sama
