@@ -276,7 +276,7 @@ def build_router(deps: LiveDeps) -> APIRouter:
         board = view.get("leaderboard") or {}
         final = view.get("final") or {}
         rows = (list(view.get("participants") or []) + list(board.get("top") or []) + list(board.get("full") or [])
-                + list(final.get("board") or []) + list(final.get("ranking") or []))
+                + list(final.get("board") or []) + list(final.get("ranking") or []) + ([view["me"]] if view.get("me") else []))
         for row in rows:
             key = row.get("key") or (L.public_key(row["participant_id"]) if row.get("participant_id") else "")
             url = photos.get(judge_of.get(key, ""))
@@ -290,7 +290,7 @@ def build_router(deps: LiveDeps) -> APIRouter:
         return hit[2] if hit else {}
 
     async def with_photos(view: Dict[str, Any], state: Mapping[str, Any]) -> Dict[str, Any]:
-        has_rows = view.get("participants") or view.get("leaderboard") or view.get("final")
+        has_rows = view.get("participants") or view.get("leaderboard") or view.get("final") or view.get("me")
         return attach_photos(view, state, await photos_of(state)) if has_rows else view
 
     async def projector_view(state: Dict[str, Any], now: datetime) -> Dict[str, Any]:
