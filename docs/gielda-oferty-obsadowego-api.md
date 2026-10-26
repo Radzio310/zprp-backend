@@ -142,6 +142,54 @@ Wpis jeszcze w kolejce znika; wpis już zapisany w ZPRP = do kolejki trafia zdj�
 `DELETE /{id}` (obsadowy) -> OfferView (`status: withdrawn`). Oczekujący zgłoszeni dostają push "Oferta wycofana".
 Przydziały już wpisane do kolejki Obsady zostają (cofa się je osobno przez `unassign`).
 
+## 8. Sugestie przy braku chętnych (obsadowy)
+
+Gdy na wolne gniazdo nikt się nie zgłosił, a inne gniazdo TEJ SAMEJ roli jest obsadzone (przydzielone z oferty albo już stoi w terminarzu),
+serwer podpowiada: (a) STAŁEGO PARTNERA obsadzonego (min. 2 wspólne zagrane mecze w tej samej roli - stolik/boisko - z archiwum obsad,
+wszystkie sezony), (b) osoby z jego PARY MENTORSKIEJ (po numerze sędziego): `mentor`, `mentee` (podopieczny), `pair_mate` (druga osoba pary).
+Pomijani: zgłoszeni/przydzieleni na tę ofertę, już w obsadzie meczu, spoza okręgu, niespełniający filtra odznak ani reguł roli.
+Gniazdo ze zgłoszonym oczekującym na tę rolę nie dostaje sugestii.
+
+`GET /{id}/suggestions` (obsadowy lub konto panelu) ->
+```json
+{"offerId": 7, "inviteLimit": 12, "invitesUsed": 1, "reason": null,
+ "slots": [{"slot": "czas", "label": "mierzący czas", "role": "table", "anchors": [Person],
+   "suggestions": [{
+     "judge": {"id":"..","name":"..","photoUrl":null,"city":"Zabrze"},
+     "reasons": [
+       {"kind":"partner","matches":5,"lastSeason":2025,"with":Person,"text":"Stali razem z ... 5 razy (stolik)"},
+       {"kind":"mentor","relation":"mentor|mentee|pair_mate","relationLabel":"mentor","with":Person,"text":"..."}],
+     "availability": {"state":"free|collision|unavailable","text":"Wolny w tym terminie"},
+     "km": {...}, "season": {...}, "weekMatches": 1, "nearest": {...}, "gap": {...}, "collisions": [...], "unavailable": null,
+     "invited": null}]}]}
+```
+Pola liczbowe jak przy zgłoszonych (sekcja 5). Kolejność: wolni, kolizja, niedyspozycja; w grupie stali partnerzy (wg liczby meczów), mentorzy.
+`availability.state`: `unavailable` = niedyspozycja kolidująca z terminem, `collision` = nakładanie albo odstęp orange/red, `free` w pozostałych (żółty odstęp zostaje w `gap`).
+Brak sugestii: `slots: []` albo gniazda z pustym `suggestions`, powód po polsku w `reason`. Maks. 6 sugestii na gniazdo.
+
+`POST /{id}/invite` -> 201
+```json
+{"judgeId": "6021", "role": "table"}
+```
+`role` wymagana tylko przy ofercie z oboma rodzajami. Efekt: zapis zaproszenia (jedno na sędziego i ofertę, limit `inviteLimit` = 12 na ofertę)
+i OSOBISTY push "Obsada proponuje Ci ten mecz" (`kind: match_market_crew`, dane jak w sekcji Push + `invite: "1"`, `inviteRole`;
+z MIN wersją aplikacji jak reszta giełdy). Zaproszony zgłasza się zwykłym `POST /{id}/claims`. Odpowiedź:
+`{"ok": true, "invite": {"judgeId","role","invitedAt"}, "invitesUsed": 2, "invitesLeft": 10}`.
+Błędy z wyjaśnieniem: 409 (oferta nie przyjmuje zgłoszeń - użyj "Przydziel"; już zaproszony; limit; gniazda roli przydzielone), 422 (spoza okręgu, w obsadzie, już zgłoszony, reguły roli, filtr odznak).
+
+`POST /{id}/assign` rozszerzone o przydział SUGEROWANEGO (bez zgłoszenia):
+```json
+{"judgeId": "6021", "role": "table", "slot": "czas"}
+```
+`claimId` pomijamy; wymagane `judgeId` + (`slot` albo `role`). Serwer tworzy zgłoszenie w imieniu sędziego (`source: "suggested"`, w widoku
+obsadowego `claims[].source`) i idzie ścieżką jak przy zgłoszonym (kolejka Obsady, push "Przydzielono Cię", ostrzeżenia o odstępie po stronie klienta).
+Nieudany przydział nie zostawia takiego zgłoszenia. `unassign` takiego zgłoszenia usuwa je (nie wraca do zgłoszonych): `unassign.suggestedClaimRemoved: true`.
+Te same walidacje co przy zaproszeniu (422).
+
+### Błędy 500
+Nieprzewidziany wyjątek w trasach giełdy obsadowego wraca jako 500 z kopertą `{"error": "..."}` i nagłówkami CORS
+(surowy 500 nie miał CORS, więc przeglądarka pokazywała "brak połączenia"). Klient: status 500 = serwer odpowiedział; brak statusu = faktyczny brak odpowiedzi.
+
 ## Push (deep-link)
 
 `data`: `{"kind": "match_market_crew", "crewOfferId": "<id>", "province", "matchId", "matchNumber", "notificationThread": "match-market-crew-<id>"}`.

@@ -65,3 +65,26 @@ def test_przydzial_idzie_do_wspolnego_szkicu_z_plakietka_market():
 def test_pole_json_jako_napis_idzie_przez_parsowanie():
     src = source("app", "match_market_crew.py")
     assert "state_dict(data.get(\"match_snapshot\"))" in src and "_jl(" in src
+
+
+def test_trasy_sugestii_na_manager_actor_i_zarejestrowane():
+    src = source("app", "match_market_crew_suggest.py")
+    found = routes(src)
+    assert ("GET", "/{offer_id}/suggestions") in found and ("POST", "/{offer_id}/invite") in found
+    for name in ("suggestions", "invite"):
+        head = src[src.index(f"async def {name}("):]
+        assert "M.manager_actor" in head[: head.index(") ->")], name
+    assert "app.include_router(match_market_crew_suggest_router)" in source("main.py")
+
+
+def test_liscie_sugestii_bez_bazy_i_fastapi():
+    src = source("app", "match_market_crew_suggest_rules.py")
+    assert "app.db" not in src and "fastapi" not in src
+
+
+def test_tabela_zaproszen_i_migracja_kolumny_source():
+    tables = source("app", "match_market_crew_tables.py")
+    assert "match_market_crew_invites" in tables and "uq_match_market_crew_invite" in tables
+    assert "ADD COLUMN IF NOT EXISTS source" in tables
+    db = source("app", "db.py")
+    assert "_define_crew_invites(metadata)" in db and "_CREW_MARKET_MIGRATIONS" in db

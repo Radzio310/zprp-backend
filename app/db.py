@@ -4535,11 +4535,16 @@ from app.assignment_board_tables import define_tables as _define_board_tables
 ) = _define_board_tables(metadata)
 
 # Oferty obsadowego na giełdzie meczów (25.10.2026) - schemat w osobnym module.
-from app.match_market_crew_tables import define_tables as _define_crew_market_tables
+from app.match_market_crew_tables import (
+    MIGRATIONS as _CREW_MARKET_MIGRATIONS,
+    define_invites as _define_crew_invites,
+    define_tables as _define_crew_market_tables,
+)
 (
     match_market_crew_offers,
     match_market_crew_claims,
 ) = _define_crew_market_tables(metadata)
+match_market_crew_invites = _define_crew_invites(metadata)
 
 # Role sędziów z listy ZPRP (Sędzia / Delegat / Stolikowy) dla Automatu obsady
 # - schemat w osobnym module.
@@ -5135,6 +5140,16 @@ for _statement in _EXAM_MIGRATIONS:
         import logging as _logging
 
         _logging.getLogger("app.db").warning("Migracja egzaminu nie przeszla: %s", _statement, exc_info=True)
+
+for _statement in _CREW_MARKET_MIGRATIONS:
+    try:
+        with engine.connect() as _conn:
+            _conn.execute(text(_statement))
+            _conn.commit()
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("app.db").warning("Migracja gieldy obsadowego nie przeszla: %s", _statement, exc_info=True)
 
 # Indeksy wyszukiwarki publicznej (pg_trgm, numer meczu) - w tle, nie blokują startu.
 try:

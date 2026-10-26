@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from sqlalchemy import and_, func, insert, select, update
 
@@ -52,7 +53,37 @@ from app.settlement_province import spellings
 
 logger = logging.getLogger("app.match_market_crew")
 
-router = APIRouter(prefix="/match-market/crew-offers", tags=["Giełda: oferty obsadowego"])
+class _ExplainedErrors(APIRoute):
+    """Nieprzewidziany wyjątek wraca jako 500 Z KOPERTĄ i nagłówkami CORS.
+
+    Surowy wyjątek obsługuje najbardziej zewnętrzny middleware, ponad CORS-em,
+    więc przeglądarka dostaje odpowiedź bez nagłówków i pokazuje „brak połączenia”
+    (tak wyglądało „Cofnij” w panelu). HTTPException przechodzi wyżej bez zmian.
+    """
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def handler(request: Request):
+            try:
+                return await original(request)
+            except HTTPException:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("giełda obsadowego: %s %s", request.method, request.url.path)
+                raise HTTPException(
+                    500,
+                    "Serwer giełdy napotkał błąd przy tej operacji (połączenie jest w porządku). "
+                    "Odśwież listę - operacja mogła się wykonać - i spróbuj jeszcze raz. "
+                    f"Szczegół dla programisty: {type(exc).__name__}.",
+                ) from exc
+
+        return handler
+
+
+router = APIRouter(
+    prefix="/match-market/crew-offers", tags=["Giełda: oferty obsadowego"], route_class=_ExplainedErrors
+)
 
 #: Ile dni wstecz widzi lista zamkniętych ofert.
 HISTORY_DAYS = 30
@@ -318,7 +349,9 @@ def _push_data(offer: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
-async def _push(judge_ids: List[str], text: tuple, offer: Dict[str, Any], *, broadcast: bool = False) -> None:
+async def _push(
+    judge_ids: List[str], text: tuple, offer: Dict[str, Any], *, broadcast: bool = False, extra: Optional[Dict[str, str]] = None
+) -> None:
     targets = sorted({_s(j) for j in judge_ids if _s(j)})
     if not targets:
         return
@@ -326,7 +359,7 @@ async def _push(judge_ids: List[str], text: tuple, offer: Dict[str, Any], *, bro
         from app.push.push import send_push_to_judges_report
 
         await send_push_to_judges_report(
-            targets, text[0], text[1], _push_data(offer), app_variant="baza", market_broadcast=broadcast,
+            targets, text[0], text[1], {**_push_data(offer), **(extra or {})}, app_variant="baza", market_broadcast=broadcast,
             min_app_version=MIN_CREW_MARKET_VERSION,
         )
     except Exception:  # noqa: BLE001 - powiadomienie nie wywraca operacji
@@ -708,6 +741,7 @@ async def _claims_view(offer: Dict[str, Any], claims: List[Dict[str, Any]], card
                 "status": claim["status"],
                 "slot": claim.get("slot"),
                 "note": claim.get("note"),
+                "source": claim.get("source"),
                 "createdAt": _iso(claim.get("created_at")),
                 "partner": (
                     {**_person(partner_id, cards), "confirmed": jid in in_pack}
@@ -884,7 +918,7 @@ async def create_claim(offer_id: int, body: ClaimRequest, actor: Actor = Depends
     existing = await database.fetch_one(
         select(claims_t).where(and_(claims_t.c.offer_id == offer_id, claims_t.c.judge_id == actor.judge_id))
     )
-    values = dict(role=role, partner_id=partner_id or None, note=_s(body.note) or None, status=R.PENDING, slot=None)
+    values = dict(role=role, partner_id=partner_id or None, note=_s(body.note) or None, status=R.PENDING, slot=None, source=None)
     if existing is not None:
         if _s(existing["status"]) in R.ACTIVE_CLAIMS:
             raise HTTPException(409, "Już zgłosiłeś się na ten mecz. Możesz zgłoszenie wycofać i złożyć nowe.")
@@ -922,7 +956,10 @@ async def withdraw_claim(offer_id: int, actor: Actor = Depends(market_actor_v)) 
 
 
 class AssignRequest(BaseModel):
-    claimId: int
+    #: Zgłoszenie do przydziału. Pominięte + `judgeId` = przydział SUGEROWANEGO (bez zgłoszenia).
+    claimId: Optional[int] = None
+    judgeId: Optional[str] = None
+    role: Optional[str] = None
     slot: Optional[str] = None
     withPartner: bool = False
 
@@ -972,10 +1009,43 @@ async def assign(offer_id: int, body: AssignRequest, actor: Actor = Depends(mana
     if _s(offer["status"]) != R.OPEN:
         raise HTTPException(409, "Ta oferta jest już zamknięta, więc nie da się w niej nikogo przydzielić.")
     claims = await _claims_of(offer_id)
-    claim = next((c for c in claims if c["id"] == body.claimId), None)
+    held = _assigned(claims)
+    created = False
+    if body.claimId is None:
+        # Przydział sugerowanego: ta sama ścieżka co zgłoszony, zgłoszenie tworzymy w jego imieniu.
+        from app import match_market_crew_suggest as SG
+
+        judge_id = _s(body.judgeId)
+        if not judge_id:
+            raise HTTPException(422, "Podaj claimId (zgłoszenie) albo judgeId (sugerowany sędzia).")
+        wanted_role = R.role_of_slot(B.normalize_slot(body.slot)) if _s(body.slot) else body.role
+        role, refusal = R.resolve_role(R.roles_of(offer["slots"]), wanted_role)
+        if refusal:
+            raise HTTPException(422, refusal)
+        _, refusal = R.pick_slot(offer["slots"], held, role, body.slot)
+        if refusal:
+            raise HTTPException(409, refusal)
+        claim, created = await SG.claim_for_suggestion(offer, claims, judge_id, role)
+        claims = await _claims_of(offer_id)
+    else:
+        claim = next((c for c in claims if c["id"] == body.claimId), None)
     if claim is None or _s(claim["status"]) != R.PENDING:
         raise HTTPException(409, "To zgłoszenie nie czeka już na decyzję (wycofane albo przydzielone).")
-    held = _assigned(claims)
+    try:
+        return await _assign_claim(offer, claims, claim, body, actor, held, key)
+    except Exception:
+        if created:  # po nieudanym przydziale nie zostawiamy zgłoszenia, którego nikt nie złożył
+            from app import match_market_crew_suggest as SG
+
+            await SG.discard_suggested_claim(claim["id"])
+        raise
+
+
+async def _assign_claim(
+    offer: Dict[str, Any], claims: List[Dict[str, Any]], claim: Dict[str, Any], body: "AssignRequest",
+    actor: Actor, held: Dict[str, Dict[str, Any]], key: str,
+) -> Dict[str, Any]:
+    offer_id = offer["id"]
     slot, refusal = R.pick_slot(offer["slots"], held, claim["role"], body.slot)
     if refusal:
         raise HTTPException(409, refusal)
@@ -1029,7 +1099,14 @@ async def unassign(offer_id: int, claim_id: int, actor: Actor = Depends(manager_
         raise HTTPException(409, "Oferta jest zamknięta (wygasła albo wycofana). Przydział zdejmij bezpośrednio w Obsadzie.")
     cid = _market_change_id(claim_id)
     slot = _s(claim["slot"])
-    state = (await _match_context(key, offer["match_id"]))["state"]
+    try:
+        state = (await _match_context(key, offer["match_id"]))["state"]
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        # Mecz zniknął z terminarza (np. skasowany): przydział i tak da się cofnąć.
+        state = offer.get("match_snapshot") or {}
+        state = {k: v for k, v in state.items() if not str(k).startswith("NrSedzia_")}
     in_state = A.slot_person(state, B.normalize_slot(slot))
     present = {"v": False}
 
@@ -1053,7 +1130,11 @@ async def unassign(offer_id: int, claim_id: int, actor: Actor = Depends(manager_
         return None
 
     await _draft_edit(key, edit, actor.full_name or actor.judge_id)
-    await database.execute(update(claims_t).where(claims_t.c.id == claim_id).values(status=R.PENDING, slot=None))
+    suggested = _s(claim.get("source")) == "suggested"
+    # Zgłoszenie z sugestii nikt nie złożył - po cofnięciu znika, a nie wraca na listę zgłoszonych.
+    await database.execute(
+        update(claims_t).where(claims_t.c.id == claim_id).values(status=R.CLAIM_WITHDRAWN if suggested else R.PENDING, slot=None)
+    )
     if _s(offer["status"]) == R.FILLED:
         match_at = _utc(offer.get("match_at"))
         if match_at is None or match_at > _now():
@@ -1074,6 +1155,7 @@ async def unassign(offer_id: int, claim_id: int, actor: Actor = Depends(manager_
             if in_state else "W terminarzu nie było już tego sędziego."
         ),
     }
+    result["unassign"]["suggestedClaimRemoved"] = suggested
     return result
 
 

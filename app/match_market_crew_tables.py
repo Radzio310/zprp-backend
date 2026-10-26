@@ -75,6 +75,8 @@ def define_tables(metadata):
         Column("status", String, nullable=False, server_default=text("'pending'")),
         #: Gniazdo, na które przydzielono (gdy status = assigned).
         Column("slot", String, nullable=True),
+        #: NULL = zgłosił się sam; "suggested" = obsadowy przydzielił z sugestii (bez zgłoszenia).
+        Column("source", String, nullable=True),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column(
             "updated_at",
@@ -86,3 +88,31 @@ def define_tables(metadata):
         UniqueConstraint("offer_id", "judge_id", name="uq_match_market_crew_claim"),
     )
     return offers, claims
+
+
+def define_invites(metadata):
+    """Zaproszenia z sugestii: jedno na sędziego i ofertę (bez dubli), limit liczy się z wierszy."""
+    return Table(
+        "match_market_crew_invites",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column(
+            "offer_id",
+            Integer,
+            ForeignKey("match_market_crew_offers.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
+        Column("judge_id", String, nullable=False),
+        #: table | field
+        Column("role", String, nullable=False),
+        Column("invited_by", String, nullable=True),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        UniqueConstraint("offer_id", "judge_id", name="uq_match_market_crew_invite"),
+    )
+
+
+#: Kolumny dodane po pierwszym wdrożeniu (create_all ich nie dołoży do istniejącej tabeli).
+MIGRATIONS = [
+    "ALTER TABLE match_market_crew_claims ADD COLUMN IF NOT EXISTS source varchar",
+]
