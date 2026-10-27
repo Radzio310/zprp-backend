@@ -243,31 +243,58 @@ class Service:
         return ConnectorError(code, m[code]) if code in m else None
 
     async def clip_submit(self, scope: str, judge_id: str | None, item_id: int, start_s: int, end_s: int) -> tuple[dict, int]:
-        """Jedno zlecenie na (polaczenie, film, zakres). Wpis w ksiedze PRZED POST-em; po timeoucie lub 5xx
-        stan needs_reconciliation i ZERO ponowien. Zwraca (rekord, http)."""
+        """Probne zlecenie (P8): jedno na (polaczenie, film, zakres); drugie = 409 CLIP_ALREADY_SUBMITTED."""
         try:
             start_s, end_s = clips.validate_range(start_s, end_s)
         except clips.ClipError as e:
             raise ConnectorError(e.code, e.status, e.detail) from e
         key = conn_key_for(scope, judge_id)
         fp = clips.ClipLedger.fingerprint(key, item_id, start_s, end_s)
+        return await self._submit(key, fp, scope, judge_id, item_id, start_s, end_s, clips.PROBE_COMMENT, None, idempotent=False)
+
+    async def clip_create(self, scope: str, judge_id: str | None, item_id: int, start_s: int, end_s: int,
+                          fingerprint: str, correlation: str) -> tuple[dict, int]:
+        """Produkcja: idempotentne po odcisku zlecenia (ten sam odcisk = ten sam wynik, bez drugiego POST), takze po
+        restarcie. needs_reconciliation zostaje bez ponowien. Odrzucenie 4xx (failed) mozna ponowic tym samym odciskiem."""
+        try:
+            start_s, end_s = clips.validate_range(start_s, end_s)
+            comment = clips.prod_comment(correlation)
+            ledger_key = clips.prod_key(conn_key_for(scope, judge_id), fingerprint)
+        except clips.ClipError as e:
+            raise ConnectorError(e.code, e.status, e.detail) from e
+        return await self._submit(conn_key_for(scope, judge_id), ledger_key, scope, judge_id, item_id, start_s, end_s,
+                                  comment, correlation, idempotent=True, fingerprint=fingerprint)
+
+    async def _submit(self, key: str, fp: str, scope: str, judge_id: str | None, item_id: int, start_s: int, end_s: int,
+                      comment: str, correlation: str | None, *, idempotent: bool,
+                      fingerprint: str | None = None) -> tuple[dict, int]:
+        """Wpis w ksiedze PRZED POST-em; po timeoucie lub 5xx stan needs_reconciliation i ZERO ponowien."""
         lock = self._clip_locks.setdefault(fp, asyncio.Lock())
         if lock.locked():
             raise ConnectorError("CLIP_SUBMIT_IN_PROGRESS", 409, "to samo zlecenie jest wlasnie wysylane")
         async with lock:
             prev = self.ledger.get(fp)
             if prev and prev.get("state") != "failed":
-                raise ConnectorError("CLIP_ALREADY_SUBMITTED", 409,
-                                     json.dumps({k: prev.get(k) for k in ("state", "code", "remote_id", "clip_code", "created_at")}))
+                if not idempotent:
+                    raise ConnectorError("CLIP_ALREADY_SUBMITTED", 409,
+                                         json.dumps({k: prev.get(k) for k in ("state", "code", "remote_id", "clip_code", "created_at")}))
+                if (prev.get("bunny_item_id"), prev.get("start_s"), prev.get("end_s")) != (item_id, start_s, end_s):
+                    raise ConnectorError("FINGERPRINT_MISMATCH", 409, "ten odcisk dotyczy innego filmu lub zakresu")
+                if prev.get("state") == "submitting":  # wpis zostal po padzie procesu (konstruktor ksiegi go przeklasyfikuje)
+                    raise ConnectorError("CLIP_SUBMIT_IN_PROGRESS", 409)
+                out = {**prev, "sent": clips.sent_summary(start_s, end_s, comment), "connection": key, "idempotent": True}
+                return out, 200 if prev.get("state") == "submitted" else 202
             req, state, meta = await self._with_state_request(key)  # brak sesji = blad zanim cokolwiek zapiszemy
             job = {"state": "submitting", "code": None, "remote_id": None, "clip_code": None, "scope": scope,
                    "judge_id": judge_id, "bunny_item_id": item_id, "start_s": start_s, "end_s": end_s,
                    "created_at": now_iso()}
+            if idempotent:
+                job.update(fingerprint=fingerprint, correlation=correlation)
             self.ledger.put(fp, job)
             try:
                 try:
                     resp = await req.post(f"{self.s.portal_base_url}/api/game-submit",
-                                          data=json.dumps(clips.build_submit_body(item_id, start_s, end_s)),
+                                          data=json.dumps(clips.build_submit_body(item_id, start_s, end_s, comment)),
                                           headers={"Content-Type": "application/json"}, timeout=30000, max_redirects=0)
                     try:
                         body = await resp.json()
@@ -288,7 +315,7 @@ class Service:
                         pass
             finally:
                 await req.dispose()
-        out = {**job, "sent": clips.sent_summary(start_s, end_s), "connection": key}
+        out = {**job, "sent": clips.sent_summary(start_s, end_s, comment), "connection": key}
         if res.state == "submitted":
             return out, 200
         if res.state == "needs_reconciliation":
@@ -298,15 +325,18 @@ class Service:
             raise err
         return out, 422
 
-    def _known_clip(self, remote_id: str) -> dict:
+    def _known_clip(self, remote_id: str, key: str | None = None) -> dict:
         job = self.ledger.by_remote_id(remote_id)
         if not job:
             raise ConnectorError("CLIP_UNKNOWN", 404, "to zlecenie nie powstalo w tym connectorze")
+        if key is not None and conn_key_for(job.get("scope") or "default", job.get("judge_id")) != key:
+            # klip nalezy do sesji innego konta: nie uzywamy cudzej ani nie ujawniamy, ze istnieje
+            raise ConnectorError("CLIP_UNKNOWN", 404, "to zlecenie nie powstalo na tym polaczeniu")
         return job
 
-    async def clip_context(self, scope: str, judge_id: str | None, clip_id: str) -> dict:
+    async def clip_context(self, scope: str, judge_id: str | None, clip_id: str, strict: bool = False) -> dict:
         key = conn_key_for(scope, judge_id)
-        job = self._known_clip(clip_id)
+        job = self._known_clip(clip_id, key if strict else None)
         req, state, meta = await self._with_state_request(key)
         try:
             try:
@@ -333,12 +363,9 @@ class Service:
         finally:
             await req.dispose()
 
-    async def clip_download(self, scope: str, judge_id: str | None, clip_id: str) -> dict:
-        """Sesja tylko do pierwszego zapytania (302). Podpisany adres pobiera OSOBNY klient bez ciasteczek."""
-        import tempfile
+    async def _signed_location(self, key: str, clip_id: str) -> str:
+        """Sesja tylko do pierwszego zapytania (302 bez podazania). Zwraca podpisany adres (wrazliwy: nie logujemy)."""
         from urllib.parse import urljoin
-        key = conn_key_for(scope, judge_id)
-        job = self._known_clip(clip_id)
         req, state, meta = await self._with_state_request(key)
         try:
             try:
@@ -360,6 +387,28 @@ class Service:
         signed = urljoin(self.s.portal_base_url + "/", loc)
         if (urlsplit(signed).hostname or "").lower() == self.s.portal_host:
             raise ConnectorError("DOWNLOAD_HOST_NOT_ALLOWED", 502, "przekierowanie wraca na host portalu (sesja nie pojdzie dalej)")
+        return signed
+
+    async def clip_download_url(self, scope: str, judge_id: str | None, clip_id: str) -> dict:
+        """Produkcja: krotko zyjacy podpisany adres pobrania po walidacji hosta i adresow. Plik pobiera BAZA osobnym
+        klientem BEZ ciasteczek (connector nie przekazuje sesji Bastionu dalej). Adres = sekret: no-store, nigdy w logach."""
+        key = conn_key_for(scope, judge_id)
+        self._known_clip(clip_id, key)
+        signed = await self._signed_location(key, clip_id)
+        host = (urlsplit(signed).hostname or "").lower()
+        if not clips.download_host_ok(signed, self.s.download_host_suffixes):
+            raise ConnectorError("DOWNLOAD_HOST_NOT_ALLOWED", 502, f"host pobrania: {host or '?'} (poza lista dozwolonych sufiksow)")
+        if not await clips.resolve_public_ips(host):
+            raise ConnectorError("DOWNLOAD_ADDRESS_NOT_PUBLIC", 502, f"host {host} wskazuje na adres nie-publiczny albo sie nie rozwiazuje")
+        return {"remote_id": clip_id, "url": signed, "host": host, "cookies": False, "max_age_s": 120,
+                "max_bytes": self.s.max_download_mb * 1024 * 1024}
+
+    async def clip_download(self, scope: str, judge_id: str | None, clip_id: str) -> dict:
+        """Probne (P8): connector sam pobiera podpisany adres osobnym klientem bez ciasteczek, mierzy i kasuje plik."""
+        import tempfile
+        key = conn_key_for(scope, judge_id)
+        job = self._known_clip(clip_id)
+        signed = await self._signed_location(key, clip_id)
         with tempfile.TemporaryDirectory(prefix="p8-") as tmp:  # plik znika zawsze, takze po bledzie
             try:
                 dl = await clips.safe_download(signed, suffixes=self.s.download_host_suffixes,

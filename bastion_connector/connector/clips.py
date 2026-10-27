@@ -14,6 +14,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import socket
 import tempfile
 from dataclasses import dataclass
@@ -59,18 +60,38 @@ def clock(total: int) -> str:
     return f"{h}:{m:02d}:{r:02d}" if h else f"{m}:{r:02d}"
 
 
-def build_submit_body(bunny_item_id: int, start_s: int, end_s: int) -> dict:
+def build_submit_body(bunny_item_id: int, start_s: int, end_s: int, comment: str = PROBE_COMMENT) -> dict:
     """Jeden prywatny klip, neutralna tresc. Nic z ocen ani komentarzy BAZY."""
     return {"bunny_item_id": bunny_item_id, "clips": [{
         "clipNumber": 1, "startTime": clock(start_s), "endTime": clock(end_s), "privateId": None,
         "audience_group_id": None,  # ONLY_ME
-        "comment": PROBE_COMMENT, "situationType": PROBE_SITUATION, "videoTags": list(PROBE_TAGS)}]}
+        "comment": comment, "situationType": PROBE_SITUATION, "videoTags": list(PROBE_TAGS)}]}
 
 
-def sent_summary(start_s: int, end_s: int) -> dict:
+def sent_summary(start_s: int, end_s: int, comment: str = PROBE_COMMENT) -> dict:
     return {"start_s": start_s, "end_s": end_s, "duration_s": end_s - start_s, "startTime": clock(start_s),
-            "endTime": clock(end_s), "title": PROBE_COMMENT, "situation_type": PROBE_SITUATION,
+            "endTime": clock(end_s), "title": comment, "situation_type": PROBE_SITUATION,
             "video_tags": list(PROBE_TAGS), "audience": "ONLY_ME (prywatny)"}
+
+
+# ---------- produkcja: korelacja i odcisk zlecenia ----------
+PROD_COMMENT = "BAZA Mentor"
+CORRELATION_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+FINGERPRINT_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+
+
+def prod_comment(correlation: str) -> str:
+    """Jedyny tekst klipu w Bastionie: neutralny, bez tytulu, notatek ani nazwisk. Korelacja to nieczytelny id zadania."""
+    if not CORRELATION_RE.match(correlation or ""):
+        raise ClipError("BAD_CORRELATION", 400, "korelacja: 1-64 znakow [A-Za-z0-9_-]")
+    return f"{PROD_COMMENT} {correlation}"
+
+
+def prod_key(conn_key: str, fingerprint: str) -> str:
+    """Klucz ksiegi dla zlecen produkcyjnych (osobny od klucza probnego `conn|item|start|end`)."""
+    if not FINGERPRINT_RE.match(fingerprint or ""):
+        raise ClipError("BAD_FINGERPRINT", 400, "odcisk: 8-128 znakow [A-Za-z0-9_-]")
+    return f"v1|{conn_key}|{fingerprint}"
 
 
 # ---------- klasyfikacja odpowiedzi ----------

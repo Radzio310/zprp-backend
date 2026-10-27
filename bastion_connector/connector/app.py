@@ -169,6 +169,41 @@ async def probe_clip_download(clip_id: str, scope: str, judge_id: str | None = N
     return JSONResponse(await svc.clip_download(scope, judge_id, _clip_id(clip_id)), headers={"Cache-Control": "no-store"})
 
 
+class ClipCreateIn(BaseModel):
+    scope: str
+    judge_id: str | None = None  # wymagane dla scope=personal
+    bunny_item_id: int
+    start_s: int  # calkowite sekundy 2-300; ulamek = 422 (nic nie zaokraglamy po cichu)
+    end_s: int
+    fingerprint: str  # odcisk zlecenia z BAZY: ten sam odcisk = ten sam wynik, zero drugiego POST
+    correlation: str  # nieczytelny id zadania; trafia do tresci klipu w Bastionie ("BAZA Mentor <korelacja>")
+
+
+@app.post("/clips", dependencies=[Depends(auth)])
+async def create_clip(body: ClipCreateIn):
+    """Produkcja: JEDEN prywatny klip (ONLY_ME, NORMAL, PLAY_ON). 200 = zlecono (remote_id), 202 = needs_reconciliation
+    (bez ponowien), ten sam odcisk = ten sam wynik z ksiegi (`idempotent: true`)."""
+    _scope(body.scope, body.judge_id)
+    if body.bunny_item_id < 1:
+        raise ConnectorError("BAD_GAME_URL", 400)
+    rec, http = await svc.clip_create(body.scope, body.judge_id, body.bunny_item_id, body.start_s, body.end_s,
+                                      body.fingerprint, body.correlation)
+    return JSONResponse(rec, status_code=http, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/clips/{remote_id}", dependencies=[Depends(auth)])
+async def clip_state(remote_id: str, scope: str, judge_id: str | None = None):
+    _scope(scope, judge_id)
+    ctx = await svc.clip_context(scope, judge_id, _clip_id(remote_id), strict=True)
+    return JSONResponse({**ctx, "ready": bool(ctx.get("download_available"))}, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/clips/{remote_id}/download-url", dependencies=[Depends(auth)])
+async def clip_download_url(remote_id: str, scope: str, judge_id: str | None = None):
+    _scope(scope, judge_id)
+    return JSONResponse(await svc.clip_download_url(scope, judge_id, _clip_id(remote_id)), headers={"Cache-Control": "no-store"})
+
+
 @app.get("/playback", dependencies=[Depends(auth)])
 async def playback(scope: str, bunny_item_id: int | None = None, game_url: str | None = None,
                    judge_id: str | None = None, include_embed: bool = True):

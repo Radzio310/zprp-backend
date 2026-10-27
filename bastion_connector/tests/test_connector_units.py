@@ -676,3 +676,108 @@ async def test_download_connects_to_resolved_ip_with_host_and_sni(tmp_path):
     await clips.safe_download("https://a.b-cdn.net/f", transport=httpx.MockTransport(handler),
                               **{**_kw(tmp_path), "resolver": res})
     assert seen == [("93.184.216.34", "a.b-cdn.net", "a.b-cdn.net")] and calls == ["a.b-cdn.net"]  # DNS raz
+
+
+# ---------- etap 4: produkcyjne /clips (idempotencja po odcisku, korelacja, adres pobrania) ----------
+FP = "a" * 64
+
+
+async def test_prod_create_is_idempotent_by_fingerprint_and_neutral_comment(tmp_path):
+    bodies = []
+
+    async def good():
+        return _FakeResp(200, {"clip_ids": [901], "clip_codes": ["ZZ9"]})
+
+    s, req = _clipsvc(tmp_path, good)
+    orig = req.post
+
+    async def spy(*a, **k):
+        bodies.append(json.loads(k["data"]))
+        return await orig(*a, **k)
+
+    req.post = spy
+    rec, http = await s.clip_create("personal", "101", 5632, 628, 638, FP, "job_1")
+    assert http == 200 and rec["remote_id"] == "901" and "idempotent" not in rec
+    c = bodies[0]["clips"][0]
+    assert c["comment"] == "BAZA Mentor job_1" and c["audience_group_id"] is None
+    assert c["situationType"] == "NORMAL" and c["videoTags"] == ["PLAY_ON"] and c["startTime"] == "10:28"
+    again, http2 = await s.clip_create("personal", "101", 5632, 628, 638, FP, "job_1")
+    assert http2 == 200 and again["remote_id"] == "901" and again["idempotent"] is True and req.posts == 1
+    # restart: ksiega pamieta, nadal zero drugiego POST
+    s2, req2 = _clipsvc(tmp_path, good)
+    rec3, http3 = await s2.clip_create("personal", "101", 5632, 628, 638, FP, "job_1")
+    assert http3 == 200 and rec3["remote_id"] == "901" and req2.posts == 0
+
+
+async def test_prod_needs_reconciliation_not_retried_and_failed_can_retry(tmp_path):
+    async def boom():
+        raise TimeoutError("t")
+
+    s, req = _clipsvc(tmp_path, boom)
+    rec, http = await s.clip_create("default", None, 5632, 628, 638, FP, "job_2")
+    assert http == 202 and rec["state"] == "needs_reconciliation"
+    rec2, http2 = await s.clip_create("default", None, 5632, 628, 638, FP, "job_2")
+    assert http2 == 202 and rec2["idempotent"] is True and req.posts == 1  # zero ponowien
+    from connector.service import ConnectorError
+    with pytest.raises(ConnectorError) as ex:  # ten sam odcisk, inny zakres
+        await s.clip_create("default", None, 5632, 628, 640, FP, "job_2")
+    assert ex.value.code == "FINGERPRINT_MISMATCH" and req.posts == 1
+
+    async def rejected():
+        return _FakeResp(422, {"message": "nie"})
+
+    s3, req3 = _clipsvc(tmp_path / "r", rejected)
+    _, h = await s3.clip_create("default", None, 5632, 10, 20, FP, "job_3")
+    assert h == 422
+    _, h = await s3.clip_create("default", None, 5632, 10, 20, FP, "job_3")  # odrzucone 4xx: wolno ponowic
+    assert h == 422 and req3.posts == 2
+
+
+async def test_prod_validates_input_before_any_post(tmp_path):
+    async def good():
+        return _FakeResp(200, {"clip_ids": [1]})
+
+    s, req = _clipsvc(tmp_path, good)
+    from connector.service import ConnectorError
+    for args, code in (((0, 400, FP, "j"), "BAD_RANGE"), ((0, 10, "x", "j"), "BAD_FINGERPRINT"), ((0, 10, FP, "z z"), "BAD_CORRELATION")):
+        with pytest.raises(ConnectorError) as ex:
+            await s.clip_create("default", None, 5632, *args)
+        assert ex.value.code == code
+    assert req.posts == 0
+
+
+async def test_download_url_validates_host_and_other_connection_cannot_use_clip(tmp_path):
+    async def good():
+        return _FakeResp(200, {"clip_ids": [55]})
+
+    s, _ = _clipsvc(tmp_path, good)
+    await s.clip_create("personal", "101", 5632, 628, 638, FP, "job_4")
+    from connector.service import ConnectorError
+
+    async def signed_ok(key, cid):
+        return "https://vz.b-cdn.net/f.mp4?token=1"
+
+    async def signed_bad(key, cid):
+        return "https://evil.example.com/f.mp4"
+
+    async def public(host):
+        return ["93.184.216.34"]
+
+    s._signed_location = signed_ok
+    orig = clips.resolve_public_ips
+    clips.resolve_public_ips = public
+    try:
+        out = await s.clip_download_url("personal", "101", "55")
+        assert out["url"].startswith("https://vz.b-cdn.net/") and out["cookies"] is False and out["host"] == "vz.b-cdn.net"
+        s._signed_location = signed_bad
+        with pytest.raises(ConnectorError) as ex:
+            await s.clip_download_url("personal", "101", "55")
+        assert ex.value.code == "DOWNLOAD_HOST_NOT_ALLOWED"
+        s._signed_location = signed_ok
+        with pytest.raises(ConnectorError) as ex:  # klip nalezy do sesji 101, nie 102
+            await s.clip_download_url("personal", "102", "55")
+        assert ex.value.code == "CLIP_UNKNOWN"
+        with pytest.raises(ConnectorError):
+            await s.clip_context("personal", "102", "55", strict=True)
+    finally:
+        clips.resolve_public_ips = orig
