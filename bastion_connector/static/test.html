@@ -131,6 +131,7 @@ canvas:focus-visible{box-shadow:inset 0 0 0 2px var(--coral)}
 .win[data-state="load"] .tape.a i{animation:tape 2.4s linear infinite}
 .win[data-state="load"] .tape.b i{animation:tape 2.4s linear infinite reverse}
 @keyframes tape{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+.sendbox{padding:12px 12px 4px;border-top:1px solid var(--line)}
 .tip{font-size:12px;color:var(--soft);padding:10px 12px 12px;border-top:1px solid var(--line)}
 .tip b{color:var(--muted)}
 .win.typing .tip b{color:var(--coral-tint)}
@@ -322,6 +323,11 @@ canvas:focus-visible{box-shadow:none}
       <div class="s" id="cover-s">Wklej token connectora i wybierz „Rozpocznij logowanie”.</div>
      </div>
     </div>
+    <div class="sendbox"><label class="field" style="margin:0"><span>Wklej tekst do okna</span>
+     <span class="row" style="margin:0"><input class="in" id="sendtxt" type="password" name="bastion-window-text" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck="false"
+      placeholder="np. hasło lub kod - trafi do pola z fokusem" data-lpignore="true" data-1p-ignore data-bwignore>
+     <button type="button" class="mini" id="send">Wyślij do okna</button></span></label>
+     <div class="hint" id="send-hint">Najpierw kliknij pole w oknie. Tekst idzie jednym ruchem i nie jest nigdzie zapisywany.</div></div>
     <div class="tip"><b id="tip-b">Kliknij w okno, żeby pisać.</b> Wklejanie: Ctrl+V. Okno zgłasza Discordowi brak klucza bezpieczeństwa, więc od razu zapyta o kod.</div>
    </section>
 
@@ -345,6 +351,7 @@ const st={scope:'default',frames:0,t0:0,final:null,lastStatus:null,clock:null,ar
 const R={}; // wyniki do wierszy §7
 const H=()=>({Authorization:'Bearer '+$('tok').value,'Content-Type':'application/json'});
 const mask=o=>JSON.stringify(o,(k,v)=>k==='embed_url'&&v?(()=>{try{const u=new URL(v);return u.origin+u.pathname+' [query ukryte, '+v.length+' znaków]'}catch{return '[adres ukryty]'}})():v,2);
+const PLS={creating:'start',waiting_for_user:'czeka na Ciebie',verifying:'sprawdzam',succeeded:'zalogowano',failed:'błąd',cancelled:'anulowano',expired:'wygasła'};
 const ACTIVE=['creating','waiting_for_user','verifying'];
 
 /* ---------- oś czasu ---------- */
@@ -417,7 +424,7 @@ $('tok').value='';render();
 const CLOSE={4409:'okno przejęła inna karta - ta karta już nim nie steruje',4401:'bilet odrzucony lub wygasł (jest jednorazowy i krótki)',4403:'Origin tej strony nie jest w BASTION_ALLOWED_ORIGINS',4404:'próba nie istnieje albo już się zakończyła'};
 function onStatus(s,error){
  if(s===st.lastStatus&&!error)return;st.lastStatus=s;R.status=s;if(error)R.error=error;
- $('st').textContent={creating:'start',waiting_for_user:'czeka na Ciebie',verifying:'sprawdzam',succeeded:'zalogowano',failed:'błąd',cancelled:'anulowano',expired:'wygasła'}[s]||s;
+ $('st').textContent=PLS[s]||s;
  if(s==='creating'){step('view','run','Uruchamiam przeglądarkę na serwerze…');win('load','Uruchamiam przeglądarkę','Connector otwiera stronę logowania Bastionu.')}
  else if(s==='waiting_for_user'){step('user','run','Twój ruch: zaloguj się w oknie. Kod MFA i QR są po stronie Discorda.');if(st.frames)win('live')}
  else if(s==='verifying'){step('user','ok','Strona przekierowała z powrotem do Bastionu.');step('verify','run','Connector sprawdza game-context…')}
@@ -460,7 +467,7 @@ function connect(path,ticket){
  ws.onmessage=async e=>{if(typeof e.data==='string'){const m=JSON.parse(e.data);if(m.type==='takeover'){log('Widok przejęła inna karta.','err');return}if(m.type==='ready')log('Widok przyjęty: '+m.w+' × '+m.h+', status '+m.status);if(m.status){if(m.type==='status')log('Status (WSS): '+m.status);onStatus(m.status)}return}
   const bmp=await createImageBitmap(e.data);ctx.drawImage(bmp,0,0,1100,700);
   if(!st.frames++){step('view','ok','Pierwsza klatka po '+((Date.now()-st.t0)/1000).toFixed(1).replace('.',',')+' s');log('Pierwsza klatka z przeglądarki connectora','ok');
-   if(!['succeeded','failed','cancelled','expired'].includes(st.lastStatus))win('live',null,null,st.lastStatus||'na żywo')}
+   if(!['succeeded','failed','cancelled','expired'].includes(st.lastStatus))win('live',null,null,PLS[st.lastStatus]||'na żywo')}
   R.frames=st.frames};
  ws.onclose=e=>{const why=CLOSE[e.code];log('WSS zamknięty '+e.code+(why?': '+why:''),why?'err':'info');
   if(why&&R.view?.state!=='ok')step('view','err','WSS '+e.code+': '+why+'.');
@@ -476,8 +483,23 @@ $('cv').onmousedown=e=>{$('cv').focus();send({t:'mouse',a:'down',b:b(e),mod:mod(
 $('cv').onmouseup=e=>send({t:'mouse',a:'up',b:b(e),mod:mod(e),...pos(e)});
 $('cv').onwheel=e=>{e.preventDefault();send({t:'mouse',a:'wheel',dx:Math.round(e.deltaX),dy:Math.round(e.deltaY),...pos(e)})};
 $('cv').oncontextmenu=e=>e.preventDefault();
-$('cv').onkeydown=e=>{if((e.ctrlKey||e.metaKey)&&e.key==='v')return;e.preventDefault();send({t:'key',a:'down',key:e.key,code:e.code,kc:e.keyCode,mod:mod(e)})};
-$('cv').onkeyup=e=>{e.preventDefault();send({t:'key',a:'up',key:e.key,code:e.code,kc:e.keyCode,mod:mod(e)})};
+// Znaki drukowalne idą jako gotowy tekst (insertText po stronie connectora): układ klawiatury
+// i AltGr (ą, ł, ź) rozstrzyga ta przeglądarka, bez dublowania. Klawisze specjalne i skróty z Ctrl - jako klawisze.
+const altgr=e=>!!(e.getModifierState&&e.getModifierState('AltGraph'))||(e.ctrlKey&&e.altKey);
+const shortcut=e=>(e.ctrlKey||e.metaKey)&&!altgr(e);
+$('cv').onkeydown=e=>{if(shortcut(e)&&e.key==='v')return;if(e.isComposing||e.key==='Dead'||e.key==='Process')return;e.preventDefault();
+ if(e.key.length===1&&!shortcut(e)){send({t:'text',text:e.key});return}
+ send({t:'key',a:'down',key:e.key,code:e.code,kc:e.keyCode,mod:mod(e),altgr:altgr(e)})};
+$('cv').onkeyup=e=>{if(e.key.length===1&&!shortcut(e))return;e.preventDefault();send({t:'key',a:'up',key:e.key,code:e.code,kc:e.keyCode,mod:mod(e),altgr:altgr(e)})};
+function sendText(){const el=$('sendtxt');const v=el.value;el.value='';
+ if(!ws||ws.readyState!==1){$('send-hint').className='hint bad';$('send-hint').textContent='Okno nie jest połączone. Najpierw „Rozpocznij logowanie”.';return}
+ if(!v){$('send-hint').className='hint bad';$('send-hint').textContent='Pole jest puste. Wklej tekst, potem „Wyślij do okna”.';return}
+ send({t:'paste',text:v});log('Wysłano '+v.length+' znaków do pola z fokusem w oknie (treści nie zapisujemy).','ok');
+ $('send-hint').className='hint good';$('send-hint').textContent='Wysłano '+v.length+' znaków. Pole wyczyszczone.';$('cv').focus()}
+$('send').onclick=sendText;
+$('sendtxt').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();sendText()}});
+$('sendtxt').addEventListener('input',e=>{if(document.activeElement!==e.target)e.target.value=''});
+$('sendtxt').addEventListener('animationstart',e=>{if(e.animationName==='autofill')e.target.value=''});
 $('cv').onpaste=e=>{e.preventDefault();send({t:'paste',text:e.clipboardData.getData('text')})};
 $('cv').addEventListener('focus',()=>{$('win').classList.add('typing');$('tip-b').textContent='Klawiatura trafia teraz do okna.'});
 $('cv').addEventListener('blur',()=>{$('win').classList.remove('typing');$('tip-b').textContent='Kliknij w okno, żeby pisać.'});

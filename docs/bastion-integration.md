@@ -70,6 +70,8 @@ Wszystkie z `Authorization: Bearer BASTION_CONNECTOR_TOKEN`, poza WSS.
 `BASTION_MAX_ACTIVE_LOGINS`, `BASTION_EMBED_HOST_SUFFIXES`, `BASTION_PROBE_BUNNY_ITEM_ID`, `BASTION_DATA_DIR`,
 `BASTION_TEST_PAGE`, `BASTION_HEADFUL`, `BASTION_CHROMIUM_PATH` (tylko lokalnie). Connector nie startuje, gdy token
 lub sekret biletów ma < 32 znaki; bez poprawnego `BASTION_SECRETS_KEY` nie da się utworzyć magazynu.
+Obraz Docker uruchamia Chromium z oknem pod Xvfb (`xvfb-run`, `BASTION_HEADFUL=true` domyślnie): headless ma w UA
+"HeadlessChrome" i hCaptcha Discorda się na nim zapętla. Bez wtyczek stealth; captchę rozwiązuje człowiek w oknie.
 
 ## 4. Uruchomienie lokalne
 
@@ -147,14 +149,14 @@ Wyniki lokalne uzyskane 26.10.2026 na Windows 11, Python 3.14, Playwright 1.63 (
 | Bilet: ponowne użycie / zły Origin | zweryfikowane (lokalnie) | odrzucone (HTTP 403 przy handshake) |
 | `GET /api/game-context` bez sesji (po stronie connectora, `APIRequest`) | zweryfikowane (lokalnie) | 401 -> `BASTION_AUTH_REQUIRED` |
 | Zapisany stan po restarcie procesu (stan syntetyczny, fałszywe cookie) | zweryfikowane (lokalnie) | odtworzony, 401 rozpoznane jako `BASTION_AUTH_REQUIRED` (409), stan nie skasowany; to NIE dowodzi trwałości prawdziwej sesji |
-| Logowanie z kodem MFA, wejście klawiaturą i wklejanie w widoku | czeka na człowieka | P1 |
-| `game-context` z prawdziwą sesją, `embed_url` dla 5632 i host embed | czeka na człowieka | P2 |
+| Logowanie z kodem MFA, wejście klawiaturą i wklejanie w widoku | **zweryfikowane (Railway, 27.10)** | P1: `succeeded` po 61 s, portal "Witaj, Radosław Witkowicz!". Wymagało: Chromium z oknem pod Xvfb (headless = pętla hCaptcha), znaki przez `insertText`, brak WebAuthn zgłaszany Discordowi |
+| `game-context` z prawdziwą sesją, `embed_url` dla 5632 i host embed | **zweryfikowane (Railway, 27.10)** | P2: HTTP 200 `OK`, `video_state=READY`, klucze game-context: assistant, audiences, bunny_item_id, crew, extra_people_max, match, nav, video, viewer. Adres embed ważny ok. 2 h (`expires_at` = +7200 s) |
 | Prawdziwa sesja po restarcie (Railway) | czeka na człowieka | P3 |
 | Embed Bunny na domenie BAZY, inne IP (komputer + LTE) | czeka na człowieka | P4 |
 | Ponowne uzyskanie embed po wygaśnięciu | czeka na człowieka | P5 |
 | Dwa konta osobiste, izolacja | czeka na człowieka (logika kluczy i AAD: zweryfikowana testami) | P6 |
-| TTL sesji, zachowanie po wylogowaniu/cofnięciu dostępu | czeka na człowieka (`expires_at=null`) | P3, P7 |
-| Build obrazu Docker i start na Railway | czeka na człowieka (nie budowano: brak wdrożenia, tag `v1.63.0-noble` do potwierdzenia przy pierwszym buildzie) | |
+| TTL sesji, zachowanie po wylogowaniu/cofnięciu dostępu | częściowo: zapisane 1 ciasteczko sesji Bastionu z terminem +7 dni (604 800 s od logowania). To termin ciasteczka, nie potwierdzony czas sesji po stronie serwera, więc `expires_at` zostaje `null` | P3 (1 h / 24 h / 7 dni), P7 |
+| Build obrazu Docker i start na Railway | **zweryfikowane (27.10)** | obraz z Xvfb (commit 332d846) działa na Railway |
 | Tożsamość konta (`external_identity_id`) | otwarte | brak znanego endpointu; do ustalenia przy P1 (np. strona profilu) |
 
 ## 8. Ryzyka i otwarte kwestie

@@ -356,6 +356,20 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
     markers: List[Dict[str, Any]] = []
     for video in raw_videos:
         markers += R.markers_as_clips(video, clean_markers(R.json_value(video.get("markers_json"), [])))
+    if markers:
+        # Znacznik, którego klip usunięto, to nagrobek - nie wraca na oś ani do licznika „Klipy”.
+        gone = await C.rows(select(mentor_clips.c.video_id, mentor_clips.c.source_key).where(mentor_clips.c.pair_id == ctx["pair_id"])
+                            .where(mentor_clips.c.match_id == mid).where(mentor_clips.c.source == "marker")
+                            .where(mentor_clips.c.deleted_at.is_not(None)))
+        live_keys = {R.marker_clip_key(c.get("video_id"), c.get("source_key")) for c in clips if c.get("source") == "marker"}
+        dead = [R.marker_clip_key(r.get("video_id"), r.get("source_key")) for r in gone if r.get("source_key")]
+        markers = R.unclaimed_marker_clips(markers, [k for k in dead if k not in live_keys])
+    if markers:
+        # Autor znacznika w wierszu osi (kategoria raz + czas + autor).
+        marker_names = await C.people({m.get("author_id") for m in markers if m.get("author_id")})
+        for m in markers:
+            if m.get("author_id"):
+                m["author"] = C.person(marker_names, m["author_id"])
     situations: List[Dict[str, Any]] = []
     for r in delegate:
         situations += R.situations_from_sheet(R.json_value(r.get("evaluation_json"), {}), "delegate", r.get("delegate_name"))

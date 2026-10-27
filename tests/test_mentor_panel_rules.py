@@ -187,12 +187,50 @@ def test_ciecie_klipu_i_nazwa_pliku():
 
 def test_znaczniki_z_zakresem_jako_klipy_do_odczytu():
     video = {"id": "v1", "match_id": "m1"}
-    markers = [{"id": "a", "label": "Akcja", "video_s": 10, "end_s": 30, "category": "dobra"}, {"id": "b", "video_s": 5, "important": True}, {"id": "c", "video_s": 50}]
+    markers = [
+        {"id": "a", "label": "Akcja", "video_s": 10, "end_s": 30, "category": "dobra"},
+        {"id": "b", "video_s": 5, "important": True},
+        # Ręczny punkt bez oznaczenia - też klip (decyzja 27.10.2026).
+        {"id": "c", "video_s": 50},
+        # Nieoznaczony punkt z importu osi ProEla - nie klip.
+        {"id": "d", "video_s": 70, "type": "goal", "kind": "goal", "source_key": "goal:host:7:65000"},
+    ]
     clips = R.markers_as_clips(video, markers)
-    # "c" (punkt bez oznaczenia, import osi) nie jest klipem; "b" bez końca = punkt: okno -6/+4 s wokół 5 s (start przycięty do 0).
-    assert len(clips) == 2 and clips[1]["point"] and (clips[1]["start_s"], clips[1]["end_s"]) == (0.0, 9.0)
-    assert clips[0]["read_only"] and clips[0]["source"] == "marker"
-    assert clips[0]["id"] == "marker:v1:a" and clips[0]["category_key"] == "dobra"
+    by = {c["marker_id"]: c for c in clips}
+    assert set(by) == {"a", "b", "c"}
+    # Punkt: okno -5/+3 s wokół sekundy (start przycięty do 0).
+    assert by["b"]["point"] and (by["b"]["start_s"], by["b"]["end_s"]) == (0.0, 8.0)
+    assert (by["c"]["start_s"], by["c"]["end_s"]) == (45.0, 53.0)
+    assert by["a"]["read_only"] and by["a"]["source"] == "marker"
+    assert by["a"]["id"] == "marker:v1:a" and by["a"]["category_key"] == "dobra"
+
+
+def test_znacznik_jest_klipem_tylko_gdy_reczny_albo_oznaczony():
+    assert R.marker_is_clip({"video_s": 3, "end_s": 9})
+    assert R.marker_is_clip({"video_s": 3, "kind": "manual"})
+    assert R.marker_is_clip({"video_s": 3, "comment": "Wznowienie"})
+    assert R.marker_is_clip({"video_s": 3, "type": "goal", "source_key": "k", "important": True})
+    assert not R.marker_is_clip({"video_s": 3, "type": "penalty1", "kind": "penalty", "source_key": "k"})
+    assert not R.marker_is_clip({"video_s": 3, "kind": "goal"})
+
+
+def test_znacznik_z_klipem_nie_wraca_drugi_raz():
+    video = {"id": "v1", "match_id": "m1"}
+    clips = R.markers_as_clips(video, [{"id": "a", "video_s": 10}, {"id": "b", "video_s": 20}, {"id": "c", "video_s": 30}])
+    # "a" ma klip, "b" miał klip i go usunięto (nagrobek) - zostaje tylko "c".
+    left = R.unclaimed_marker_clips(clips, [R.marker_clip_key("v1", "a"), R.marker_clip_key("v1", "b"), R.marker_clip_key("v2", "c")])
+    assert [c["marker_id"] for c in left] == ["c"]
+
+
+def test_wiersz_klipu_ze_znacznika():
+    video = {"id": "v1", "match_id": "m1"}
+    mc = R.markers_as_clips(video, [{"id": "a", "label": "Dobra decyzja", "video_s": 100, "category": "dobra", "comment": "Błędne wznowienie", "match_ms": 61000, "half": 1}])[0]
+    row = R.clip_row_from_marker(mc, {"dobra": "cat-1"})
+    assert row["source"] == "marker" and row["source_key"] == "a"
+    assert (row["start_s"], row["end_s"]) == (95.0, 103.0)
+    assert row["note"] == "Błędne wznowienie" and row["title"] == "Dobra decyzja"
+    assert row["category_ids"] == ["cat-1"] and row["match_ms"] == 61000 and row["half"] == 1
+    assert R.clip_row_from_marker(mc, {})["category_ids"] == []
 
 
 # ─── Zestawienia ────────────────────────────────────────────────────────────
