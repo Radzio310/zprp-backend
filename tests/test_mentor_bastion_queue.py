@@ -542,3 +542,61 @@ def test_resolve_linku_podsumowanie_meczu_bez_embedu_i_porownanie_z_pokojem(q):
     assert q.fake.playback_params["include_embed"] == "false" and "embed" not in str(same)
     assert other["same_match"] is False and unknown["same_match"] is None and unknown["match_summary"] is None
     assert bad == "BAD_BASTION_URL" and q.bastion.CAPABILITIES == {"seek": True, "rate": False, "mute": False}
+
+
+# ─── Push „Klip gotowy” ─────────────────────────────────────────────────────
+
+
+def test_gotowy_klip_wysyla_jeden_cichy_push_do_zamawiajacego(q):
+    import app.push.push as P
+
+    sent = []
+
+    async def fake_push(ids, title, body, data, **kw):
+        sent.append({"ids": list(ids), "title": title, "body": body, "data": dict(data), **kw})
+        return {"sent": len(ids)}
+
+    q.mp.setattr(P, "send_push_to_judges_report", fake_push)
+
+    async def go():
+        conn = await seed(q)
+        await make_job(q, conn)
+        await drive(q)
+        await drive(q)  # kolejne przebiegi nie dosyłają drugiego pushu
+        return await job_of(q)
+
+    job = q.run(go, seed=True)
+    assert job["state"] == "ready"
+    assert len(sent) == 1
+    msg = sent[0]
+    assert msg["ids"] == [A] and msg["title"] == "Klip gotowy" and "10,0 s" in msg["body"] and "720p" in msg["body"]
+    d = msg["data"]
+    assert d["kind"] == "mentor_panel" and d["target"] == "clip" and d["clipId"] == "clip1" and d["matchId"] == "m1"
+    assert d["pairId"] == PAIR and d["notificationSilent"] == "1" and d["tag"] == "mentor-clip-clip1"
+    assert msg["preference_key"] == "mentorPanel" and msg["app_variant"] == "baza"
+    assert all(isinstance(v, str) for v in d.values())
+
+
+def test_blad_pushu_nie_cofa_gotowego_klipu(q):
+    import app.push.push as P
+
+    async def broken(*a, **kw):
+        raise RuntimeError("FCM down")
+
+    q.mp.setattr(P, "send_push_to_judges_report", broken)
+
+    async def go():
+        conn = await seed(q)
+        await make_job(q, conn)
+        await drive(q)
+        return await job_of(q), await clip_of(q)
+
+    job, clip = q.run(go, seed=True)
+    assert job["state"] == "ready" and clip["mp4_status"] == "ready"
+
+
+def test_tekst_pushu_klipu_gotowego():
+    from app.mentor_bastion_jobs import clip_ready_text
+
+    assert clip_ready_text("Faul w ataku", 10.02, 720) == ("Klip gotowy", "„Faul w ataku” wywołał się: MP4 · 10,0 s · 720p. Gra z pliku BAZY, także w zwolnieniu.")
+    assert clip_ready_text(None, None, None)[1].startswith("„Klip” wywołał się: MP4.")

@@ -816,6 +816,7 @@ async def _store(job, clip, wid, client, conn, scope, owner) -> None:
         await _release(job, wid, "ready", notify="clip_media_ready", asset_id=asset_id, finished_at=stamp, attempts=0,
                        last_error_code=None, last_error_message=None)
         uploaded = []
+        await notify_clip_ready(job, {**clip, **(after or {})}, probe.get("duration_s"), probe.get("height"))
         # Poprzednie rewizje (jeśli były) służyły do czasu sukcesu nowej: teraz je sprzątamy.
         older = await C.rows(select(A).where(A.c.clip_id == clip["id"]).where(A.c.revision < rev))
         if older:
@@ -825,6 +826,49 @@ async def _store(job, clip, wid, client, conn, scope, owner) -> None:
         if uploaded:  # wyjątek po uploadzie, a przed zapisem metadanych: nie zostawiamy sierot
             await _delete_objects(uploaded)
         await asyncio.to_thread(shutil.rmtree, folder, True)
+
+
+# ─── Push „Klip gotowy” ─────────────────────────────────────────────────────
+
+
+def clip_ready_text(title: Any, duration_s: Any, height: Any) -> tuple[str, str]:
+    """Tytuł i treść cichego pushu: nazwa klipu + pieczęć pliku (jak na karcie „Ciemni”)."""
+    name = str(title or "").strip() or "Klip"
+    if len(name) > 60:
+        name = name[:57] + "..."
+    stamp = ["MP4"]
+    try:
+        if duration_s is not None and float(duration_s) > 0:
+            stamp.append(f"{float(duration_s):.1f}".replace(".", ",") + " s")
+    except (TypeError, ValueError):
+        pass
+    try:
+        if height and int(height) > 0:
+            stamp.append(f"{int(height)}p")
+    except (TypeError, ValueError):
+        pass
+    return "Klip gotowy", f"„{name}” wywołał się: {' · '.join(stamp)}. Gra z pliku BAZY, także w zwolnieniu."
+
+
+async def notify_clip_ready(job: Dict[str, Any], clip: Dict[str, Any], duration_s: Any = None, height: Any = None) -> None:
+    """Jeden cichy push do osoby, która zamówiła MP4 (zwykle autor klipu), z celem `clip` -> kino klipu w aplikacji.
+    Wzorem pushy Mentora (`mentor_panel_notify.push_data`, ten sam dispatcher i przełącznik `mentorPanel`), ale bez
+    e-maila: to tylko znak, że plik czeka. Tag per klip skleja ewentualny drugi push tej samej rzeczy w jeden kafelek.
+    Wysyłka nigdy nie cofa stanu `ready` - błąd kończy się wpisem w logu."""
+    try:
+        from app.mentor_panel_notify import PREFERENCE_KEY, match_image, push_data
+        from app.push.push import send_push_to_judges_report
+
+        who = str(job.get("requested_by_real_judge_id") or clip.get("author_id") or "").strip()
+        if not who:
+            return
+        title, body = clip_ready_text(clip.get("title"), duration_s, height)
+        data = push_data(clip.get("pair_id") or job.get("pair_id"), target="clip", match_id=clip.get("match_id") or job.get("match_id"),
+                         clip_id=clip.get("id") or job.get("clip_id"), tag=f"mentor-clip-{clip.get('id') or job.get('clip_id')}",
+                         quiet=True, image=await match_image(clip.get("match_id") or job.get("match_id")))
+        await send_push_to_judges_report([who], title, body, data, app_variant="baza", preference_key=PREFERENCE_KEY)
+    except Exception:  # noqa: BLE001
+        logger.warning("bastion: push „Klip gotowy” nieudany", exc_info=True)
 
 
 # ─── Pętla workera ──────────────────────────────────────────────────────────
