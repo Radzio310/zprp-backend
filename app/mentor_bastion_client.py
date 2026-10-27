@@ -155,6 +155,18 @@ class ConnectorClient:
     async def connection_status(self, scope: str, judge_id: Optional[str]) -> Reply:
         return await self.request("GET", "/connections/status", params=_scope_params(scope, judge_id))
 
+    async def check(self, scope: str, judge_id: Optional[str], probe: Optional[int] = None) -> Reply:
+        """`GET /connections/check`: lekka weryfikacja sesji bez embedu. Body: `verdict` = ok | auth_required | unavailable
+        (+ tozsamość konta). Brak werdyktu w odpowiedzi to zła odpowiedź connectora, nie dowód wygaśnięcia sesji."""
+        params = _scope_params(scope, judge_id)
+        if probe:
+            params["probe_bunny_item_id"] = int(probe)
+        rep = await self.request("GET", "/connections/check", params=params)
+        if rep.status == 200 and rep.body.get("verdict") not in ("ok", "auth_required", "unavailable"):
+            self.breaker.failure()
+            raise ConnectorUnavailable("bad_response")
+        return rep
+
     async def disconnect(self, scope: str, judge_id: Optional[str]) -> Reply:
         return await self.request("DELETE", "/connections", params=_scope_params(scope, judge_id))
 

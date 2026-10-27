@@ -148,14 +148,26 @@ def ip_is_public(ip_text: str) -> bool:
                 or ip.is_unspecified)
 
 
-async def resolve_public(host: str) -> bool:
-    """True, gdy KAZDY adres hosta jest publiczny (odrzuca adresy prywatne i lokalne)."""
+async def resolve_public_ips(host: str) -> list[str]:
+    """Rozwiazuje host RAZ i zwraca liste adresow, ale tylko gdy KAZDY jest publiczny (inaczej pusta lista).
+    Polaczenie idzie potem na jeden z tych adresow, wiec ponowne zapytanie DNS (rebinding) nic nie zmieni."""
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(host, 443, type=socket.SOCK_STREAM)
     except OSError:
-        return False
-    addrs = {i[4][0] for i in infos}
-    return bool(addrs) and all(ip_is_public(a) for a in addrs)
+        return []
+    addrs = list(dict.fromkeys(i[4][0].split("%")[0] for i in infos))
+    return addrs if addrs and all(ip_is_public(a) for a in addrs) else []
+
+
+async def resolve_public(host: str) -> bool:
+    return bool(await resolve_public_ips(host))
+
+
+def pin_url(url: str, ip: str) -> str:
+    """Ten sam adres, ale z literalem IP zamiast nazwy (host/SNI idzie osobno: naglowek Host i extensions)."""
+    u = urlsplit(url)
+    ip_host = f"[{ip}]" if ":" in ip else ip
+    return u._replace(netloc=ip_host).geturl()
 
 
 # ---------- pobranie podpisanego adresu osobnym klientem ----------
@@ -171,9 +183,11 @@ class Downloaded:
 
 async def safe_download(url: str, *, suffixes: list[str], max_bytes: int, dest_dir: str, timeout_s: float = 120.0,
                         transport: Any = None,
-                        resolver: Callable[[str], Awaitable[bool]] = resolve_public) -> Downloaded:
+                        resolver: Callable[[str], Awaitable[list[str]]] = resolve_public_ips) -> Downloaded:
     """Osobny klient httpx: ZERO ciasteczek Bastionu i zadnych naglowkow autoryzacji. Kazdy hop (takze po
-    przekierowaniu) przechodzi te sama kontrole hosta i adresow. Strumien do pliku z limitem rozmiaru."""
+    przekierowaniu) przechodzi te sama kontrole hosta i adresow.
+    Anty-rebinding: host rozwiazywany raz na hop, wszystkie adresy musza byc publiczne, laczymy na ten adres
+    (URL z IP, Host i SNI = nazwa hosta, wiec certyfikat nadal jest sprawdzany dla nazwy). Strumien do pliku z limitem rozmiaru."""
     import httpx
 
     cur = url
@@ -184,9 +198,11 @@ async def safe_download(url: str, *, suffixes: list[str], max_bytes: int, dest_d
             host = (urlsplit(cur).hostname or "").lower()
             if not download_host_ok(cur, suffixes):
                 raise ClipError("DOWNLOAD_HOST_NOT_ALLOWED", 502, f"host pobrania: {host or '?'} (poza lista dozwolonych sufiksow)")
-            if not await resolver(host):
+            ips = await resolver(host)
+            if not ips:
                 raise ClipError("DOWNLOAD_ADDRESS_NOT_PUBLIC", 502, f"host {host} wskazuje na adres nie-publiczny albo sie nie rozwiazuje")
-            async with cl.stream("GET", cur) as r:
+            async with cl.stream("GET", pin_url(cur, ips[0]), headers={"Host": host},
+                                 extensions={"sni_hostname": host}) as r:
                 if r.status_code in (301, 302, 303, 307, 308):
                     loc = r.headers.get("location")
                     if not loc:

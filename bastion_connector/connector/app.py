@@ -118,6 +118,13 @@ async def conn_status(scope: str, judge_id: str | None = None):
     return JSONResponse(svc.status(scope, judge_id), headers={"Cache-Control": "no-store"})
 
 
+@app.get("/connections/check", dependencies=[Depends(auth)])
+async def conn_check(scope: str, judge_id: str | None = None, probe_bunny_item_id: int | None = None):
+    """Lekka weryfikacja sesji bez wydawania embedu. 200 + verdict: ok | auth_required | unavailable."""
+    _scope(scope, judge_id)
+    return JSONResponse(await svc.check(scope, judge_id, probe_bunny_item_id), headers={"Cache-Control": "no-store"})
+
+
 @app.delete("/connections", dependencies=[Depends(auth)])
 async def conn_delete(scope: str, judge_id: str | None = None):
     _scope(scope, judge_id)

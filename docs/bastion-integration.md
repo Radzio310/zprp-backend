@@ -161,7 +161,7 @@ Wyniki lokalne uzyskane 26.10.2026 na Windows 11, Python 3.14, Playwright 1.63 (
 | TTL sesji, zachowanie po wylogowaniu/cofnięciu dostępu | częściowo: zapisane 1 ciasteczko sesji Bastionu z terminem +7 dni (604 800 s od logowania). To termin ciasteczka, nie potwierdzony czas sesji po stronie serwera, więc `expires_at` zostaje `null` | P3 (1 h / 24 h / 7 dni), P7 |
 | Build obrazu Docker i start na Railway | **zweryfikowane (27.10)** | obraz z Xvfb (commit 332d846) działa na Railway |
 | Cięcie klipu 628-638 s w 5632, pobranie MP4, ffprobe, SHA-256 (P8) | czeka na człowieka | kod gotowy (commit w historii), test na Railway: `/test` sekcja „P8”. Wynik wklej z „Kopiuj wiersze do §7” |
-| Tożsamość konta (`external_identity_id`) | otwarte | brak znanego endpointu; do ustalenia przy P1 (np. strona profilu) |
+| Tożsamość konta (`external_identity_id`) | **wdrożone, do potwierdzenia na Railway** | Z `viewer` w game-context: pole id, jeśli jest, inaczej odcisk `viewer.display_name` (`dn:<sha256[:16]>`; publiczne skrypty portalu czytają tylko `display_name`). `GET /connections/check` zwraca `viewer_keys` pośrednio w `identity_source`; kształt `viewer` sprawdzić na żywo |
 
 ## 8. Ryzyka i otwarte kwestie
 

@@ -12,7 +12,8 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
-from . import clips, crypto, tickets
+from . import attempts_store, clips, crypto, tickets
+from .attempts_store import AttemptStore
 from .bastion import GameResult, fetch_game_context
 from .config import Settings
 from .store import StateStore, conn_key_for, cookie_summary, filter_state_to_host, now_iso
@@ -107,7 +108,7 @@ class Attempt:
     probe_item_id: int
     created: float
     expires: float
-    status: str = "creating"  # creating | waiting_for_user | verifying | succeeded | failed | cancelled | expired
+    status: str = "creating"  # creating | waiting_for_user | verifying | succeeded | failed | cancelled | expired | interrupted
     error: str | None = None
     context: object | None = None
     page: object | None = None
@@ -116,6 +117,14 @@ class Attempt:
     task: asyncio.Task | None = None
     last_verify: float = 0.0
     identity: dict = field(default_factory=dict)
+    on_change: object | None = field(default=None, repr=False, compare=False)  # zapis trwałego stanu przy zmianie statusu
+
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        if name in ("status", "error"):
+            cb = self.__dict__.get("on_change")
+            if cb:
+                cb(self)
 
     @property
     def active(self) -> bool:
@@ -131,6 +140,7 @@ class Service:
         self._pw = None
         self._browser = None
         self._browser_lock = asyncio.Lock()
+        self.attempt_store = AttemptStore(settings.data_dir)
         self.ledger = clips.ClipLedger(settings.data_dir)
         self._clip_locks: dict[str, asyncio.Lock] = {}
 
@@ -138,6 +148,26 @@ class Service:
     async def start(self) -> None:
         from playwright.async_api import async_playwright
         self._pw = await async_playwright().start()
+        self.recover_attempts()
+
+    def _persist_attempt(self, a: "Attempt") -> None:
+        try:
+            self.attempt_store.save({"id": a.id, "conn_key": a.conn_key, "scope": a.scope, "judge_id": a.judge_id,
+                                     "probe_item_id": a.probe_item_id, "created": a.created, "expires": a.expires,
+                                     "status": a.status, "error": a.error})
+        except OSError as e:  # brak zapisu nie może przewrócić logowania
+            log.warning("zapis stanu proby nie powiodl sie: %s", type(e).__name__)
+
+    def recover_attempts(self) -> None:
+        for d in self.attempt_store.recover():
+            if d["id"] in self.attempts:
+                continue
+            a = Attempt(id=d["id"], conn_key=d["conn_key"], scope=d.get("scope") or "default",
+                        judge_id=d.get("judge_id") or "", probe_item_id=int(d.get("probe_item_id") or 0),
+                        created=float(d.get("created") or 0), expires=float(d.get("expires") or 0),
+                        status=d["status"], error=d.get("error"))
+            a.on_change = self._persist_attempt
+            self.attempts[a.id] = a
 
     async def stop(self) -> None:
         for a in list(self.attempts.values()):
@@ -343,6 +373,63 @@ class Service:
                 "download_host": dl.final_host, "redirect_hops": dl.hops, "file_deleted": True, **probe,
                 "requested": {"start_s": job["start_s"], "end_s": job["end_s"]}}
 
+    # ---------- tożsamość konta zewnętrznego ----------
+    @staticmethod
+    def merge_identity(prev_meta: dict, ident: dict) -> dict:
+        """To samo konto (to samo id) zachowuje tożsamość, inne daje nową wartość i identity_changed=True.
+        Brak tożsamości w odpowiedzi nie kasuje poprzedniej i nie jest zmianą konta."""
+        new_id = (ident or {}).get("id")
+        if not new_id:
+            return {"external_identity_id": prev_meta.get("external_identity_id"),
+                    "external_identity_label": prev_meta.get("external_identity_label"),
+                    "identity_source": prev_meta.get("identity_source"), "identity_changed": False}
+        old_id = prev_meta.get("external_identity_id")
+        return {"external_identity_id": new_id, "external_identity_label": ident.get("label"),
+                "identity_source": ident.get("source"), "identity_changed": bool(old_id and old_id != new_id)}
+
+    @staticmethod
+    def _identity_view(meta: dict) -> dict:
+        return {"external_identity_id": meta.get("external_identity_id"),
+                "external_identity_label": meta.get("external_identity_label"),
+                "identity_source": meta.get("identity_source"),
+                "identity_changed": bool(meta.get("identity_changed"))}
+
+    async def check(self, scope: str, judge_id: str | None, probe_item_id: int | None = None) -> dict:
+        """Lekka weryfikacja sesji: jedno game-context dla elementu próbnego, BEZ wydawania embedu (adres
+        zostaje w pamięci i nie wraca do wywołującego). Werdykt: ok | auth_required | unavailable."""
+        key = conn_key_for(scope, judge_id)
+        item = probe_item_id or self.s.probe_bunny_item_id
+        if not item:
+            raise ConnectorError("PROBE_ITEM_REQUIRED", 400, "brak bunny_item_id do weryfikacji sesji")
+        try:
+            res, info = await self.game_context(scope, judge_id, item)
+        except ConnectorError as e:
+            if e.code == "BASTION_NOT_CONNECTED":
+                return {"connection": key, "verdict": "auth_required", "code": e.code, "checked_at": now_iso()}
+            raise
+        # 403 = zalogowano, ale konto nie ma dostępu do elementu próbnego: sesja żyje
+        verdict = {"OK": "ok", "BASTION_RESOURCE_FORBIDDEN": "ok", "BASTION_EMBED_HOST_NOT_ALLOWED": "ok",
+                   "BASTION_AUTH_REQUIRED": "auth_required"}.get(res.code, "unavailable")
+        out = {"connection": key, "verdict": verdict, "code": res.code, "checked_at": now_iso(),
+               "generation": info.get("generation"), "last_validated_at": info.get("last_validated_at")}
+        if verdict == "ok":
+            try:
+                async with self.store.lock(key):
+                    loaded = self.store.load(key)
+                    if loaded:
+                        meta = loaded[1]
+                        cur = res.identity.get("id")
+                        if cur and not meta.get("external_identity_id"):  # dopełnienie starej generacji
+                            upd = self.merge_identity(meta, res.identity)
+                            self.store.touch_meta(key, **upd)
+                            meta = {**meta, **upd}
+                        out.update(self._identity_view(meta))
+                        stored = meta.get("external_identity_id")
+                        out["identity_matches"] = (cur == stored) if cur and stored else None
+            except crypto.CryptoError:
+                pass
+        return out
+
     def status(self, scope: str, judge_id: str | None) -> dict:
         key = conn_key_for(scope, judge_id)
         loaded = self.store.load(key)
@@ -352,7 +439,7 @@ class Service:
         return {"connection": key, "status": "stored", "generation": meta.get("generation"),
                 "connected_at": meta.get("connected_at"), "last_validated_at": meta.get("validated_at"),
                 "last_error_code": meta.get("last_error_code"), "expires_at": None,
-                "cookies": cookie_summary(state)}
+                **self._identity_view(meta), "cookies": cookie_summary(state)}
 
     def disconnect(self, scope: str, judge_id: str | None) -> bool:
         return self.store.delete(conn_key_for(scope, judge_id))
@@ -382,6 +469,8 @@ class Service:
         a = Attempt(id=secrets.token_urlsafe(12), conn_key=key, scope=scope, judge_id=judge_id,
                     probe_item_id=probe, created=now, expires=now + self.s.attempt_ttl_s)
         self.attempts[a.id] = a
+        a.on_change = self._persist_attempt
+        self._persist_attempt(a)
         try:
             browser = await self._get_browser()
             # izolowany kontekst kandydujacy: nie dotyka zapisanego stanu dzialajacej sesji
@@ -414,8 +503,18 @@ class Service:
         return a
 
     def public_attempt(self, a: Attempt) -> dict:
-        return {"id": a.id, "scope": a.scope, "status": a.status, "expires_at": int(a.expires),
-                "error": a.error, "connection": a.conn_key}
+        out = {"id": a.id, "scope": a.scope, "status": a.status, "expires_at": int(a.expires),
+               "error": a.error, "connection": a.conn_key, "message": attempts_store.MESSAGES.get(a.status)}
+        if a.status == "succeeded":
+            ident = a.identity
+            if not ident.get("external_identity_id"):  # po restarcie: z zaszyfrowanego stanu połączenia
+                try:
+                    loaded = self.store.load(a.conn_key)
+                except Exception:  # noqa: BLE001
+                    loaded = None
+                ident = self._identity_view(loaded[1]) if loaded else {}
+            out.update(ident)
+        return out
 
     async def cancel(self, a: Attempt) -> None:
         if a.active:
@@ -536,12 +635,13 @@ class Service:
             gen = (prev[1].get("generation", 0) if prev else 0) + 1
             meta = {"generation": gen, "connected_at": now_iso(), "validated_at": now_iso(),
                     "verified_with": "game-context", "game_context_code": res.code,
-                    "external_identity_id": None}  # tozsamosc konta: brak potwierdzonego endpointu (do ustalenia)
+                    **self.merge_identity(prev[1] if prev else {}, res.identity)}
             self.store.save(a.conn_key, state, meta)  # wymiana generacji dopiero po udanej weryfikacji
-        a.identity = {"game_context_code": res.code}
+        a.identity = self._identity_view(meta)
         await self._close_attempt(a, "succeeded")
 
     def sweep(self) -> None:
         cutoff = time.time() - 3600
         for k in [k for k, a in self.attempts.items() if not a.active and a.expires < cutoff]:
             del self.attempts[k]
+            self.attempt_store.delete(k)

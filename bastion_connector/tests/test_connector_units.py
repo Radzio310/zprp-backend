@@ -385,11 +385,11 @@ def test_ip_public():
 
 
 async def _public(_h):
-    return True
+    return ["93.184.216.34"]
 
 
 async def _private(_h):
-    return False
+    return []
 
 
 def _kw(tmp_path, **o):
@@ -415,9 +415,9 @@ async def test_download_redirect_chain_is_revalidated_and_clean(tmp_path):
     seen = []
 
     def handler(req: httpx.Request) -> httpx.Response:
-        seen.append(str(req.url.host))
+        seen.append(req.headers["host"])
         assert "cookie" not in req.headers
-        if req.url.host == "a.b-cdn.net":
+        if req.headers["host"] == "a.b-cdn.net":
             return httpx.Response(302, headers={"location": "https://evil.example.com/steal"})
         return httpx.Response(200, content=b"x")
 
@@ -428,7 +428,7 @@ async def test_download_redirect_chain_is_revalidated_and_clean(tmp_path):
 
 async def test_download_allowed_redirect_followed_and_loops_cut(tmp_path):
     def ok(req):
-        return httpx.Response(302, headers={"location": "https://b.b-cdn.net/z"}) if req.url.host == "a.b-cdn.net" else httpx.Response(200, content=b"x")
+        return httpx.Response(302, headers={"location": "https://b.b-cdn.net/z"}) if req.headers["host"] == "a.b-cdn.net" else httpx.Response(200, content=b"x")
 
     d = await clips.safe_download("https://a.b-cdn.net/f", transport=httpx.MockTransport(ok), **_kw(tmp_path))
     assert d.final_host == "b.b-cdn.net" and d.hops == 1
@@ -555,3 +555,124 @@ async def test_bad_range_never_posts(tmp_path):
     with pytest.raises(ConnectorError) as ex:
         await s.clip_submit("default", "t1", 5632, 0, 400)
     assert ex.value.code == "BAD_RANGE" and req.posts == 0
+
+
+# ---------- etap 1 backendu: tozsamosc, check, trwale proby, pin DNS ----------
+def test_extract_identity_shapes():
+    from connector.bastion import extract_identity
+    a = extract_identity({"viewer": {"display_name": "Jan Kowalski", "avatar_url": "x"}})
+    assert a["label"] == "Jan Kowalski" and a["id"].startswith("dn:") and a["source"] == "viewer.display_name"
+    assert a["viewer_keys"] == ["avatar_url", "display_name"]
+    assert extract_identity({"viewer": {"display_name": "JAN KOWALSKI"}})["id"] == a["id"]
+    b = extract_identity({"viewer": {"discord_user_id": 123, "display_name": "Jan"}})
+    assert b["id"] == "123" and b["source"] == "viewer.discord_user_id"
+    for body in ({}, {"viewer": {}}, {"viewer": None}, [], {"viewer": True}):
+        assert extract_identity(body)["id"] is None
+
+
+def test_merge_identity_same_account_keeps_other_flags_change():
+    from connector.service import Service
+    ident = {"id": "dn:a", "label": "Jan", "source": "viewer.display_name"}
+    first = Service.merge_identity({}, ident)
+    assert first["external_identity_id"] == "dn:a" and first["identity_changed"] is False
+    assert Service.merge_identity(first, ident)["identity_changed"] is False
+    other = Service.merge_identity(first, {"id": "dn:b", "label": "Ewa", "source": "viewer.display_name"})
+    assert other["external_identity_id"] == "dn:b" and other["external_identity_label"] == "Ewa" and other["identity_changed"] is True
+    unknown = Service.merge_identity(first, {})
+    assert unknown["external_identity_id"] == "dn:a" and unknown["identity_changed"] is False
+
+
+async def test_check_verdicts_and_no_embed(tmp_path):
+    from connector.bastion import GameResult
+    from connector.service import ConnectorError
+    svc = _svc(tmp_path)
+    key_ = conn_key_for("default", None)
+    svc.store.save(key_, {"cookies": [], "origins": []}, {"generation": 1, "external_identity_id": None})
+    out = {}
+
+    async def fake(scope, judge, item):
+        return out["res"], {"connection": key_, "generation": 1, "last_validated_at": "t"}
+
+    svc.game_context = fake
+    ident = {"id": "dn:a", "label": "Jan", "source": "viewer.display_name", "viewer_keys": []}
+    out["res"] = GameResult("OK", 200, embed_url="https://x.mediadelivery.net/secret", identity=ident)
+    r = await svc.check("default", None)
+    assert r["verdict"] == "ok" and "embed_url" not in json.dumps(r) and "secret" not in json.dumps(r)
+    assert r["external_identity_id"] == "dn:a" and r["external_identity_label"] == "Jan"  # dopelnienie starej generacji
+    assert svc.status("default", None)["external_identity_label"] == "Jan"
+    out["res"] = GameResult("BASTION_RESOURCE_FORBIDDEN", 403)
+    assert (await svc.check("default", None))["verdict"] == "ok"
+    out["res"] = GameResult("BASTION_AUTH_REQUIRED", 401)
+    assert (await svc.check("default", None))["verdict"] == "auth_required"
+    for code in ("BASTION_UNAVAILABLE", "BASTION_RATE_LIMITED", "BASTION_BAD_RESPONSE"):
+        out["res"] = GameResult(code)
+        assert (await svc.check("default", None))["verdict"] == "unavailable"
+
+    async def not_conn(*a):
+        raise ConnectorError("BASTION_NOT_CONNECTED", 409)
+
+    svc.game_context = not_conn
+    assert (await svc.check("default", None))["verdict"] == "auth_required"
+    svc.s.probe_bunny_item_id = None
+    with pytest.raises(ConnectorError) as e:
+        await svc.check("default", None)
+    assert e.value.code == "PROBE_ITEM_REQUIRED"
+
+
+async def test_attempt_status_persists_and_restart_marks_interrupted(tmp_path):
+    svc = _svc(tmp_path)
+    a = _active(svc)
+    a.on_change = svc._persist_attempt
+    a.status = "verifying"
+    assert json.loads((tmp_path / "attempts" / "att1.json").read_text(encoding="utf-8"))["status"] == "verifying"
+    assert "tester1" in (tmp_path / "attempts" / "att1.json").read_text(encoding="utf-8")
+    # drugi proces (restart): przegladarka zginela
+    svc2 = _svc(tmp_path)
+    svc2.recover_attempts()
+    b = svc2.get_attempt("att1")
+    pub = svc2.public_attempt(b)
+    assert pub["status"] == "interrupted" and "zrestartowana" in pub["message"] and pub["error"] == "CONNECTOR_RESTARTED"
+    assert not b.active
+    # stan zapisany na dysku, kolejny restart go nie zmienia
+    svc3 = _svc(tmp_path)
+    svc3.recover_attempts()
+    assert svc3.get_attempt("att1").status == "interrupted"
+
+
+async def test_restart_keeps_terminal_states_and_expires_overdue(tmp_path):
+    svc = _svc(tmp_path)
+    for i, st in enumerate(("succeeded", "failed", "cancelled")):
+        a = _active(svc)
+        a.id = f"t{i}"
+        a.status = st
+        svc._persist_attempt(a)
+    old = _active(svc)
+    old.id = "old1"
+    old.expires = 1.0
+    svc._persist_attempt(old)
+    svc2 = _svc(tmp_path)
+    svc2.recover_attempts()
+    assert [svc2.attempts[k].status for k in ("t0", "t1", "t2")] == ["succeeded", "failed", "cancelled"]
+    assert svc2.attempts["old1"].status == "expired"
+
+
+def test_pin_url_and_ipv6():
+    assert clips.pin_url("https://a.b-cdn.net/f.mp4?t=1", "93.184.216.34") == "https://93.184.216.34/f.mp4?t=1"
+    assert clips.pin_url("https://a.b-cdn.net/f", "2606:2800::1") == "https://[2606:2800::1]/f"
+
+
+async def test_download_connects_to_resolved_ip_with_host_and_sni(tmp_path):
+    seen = []
+    calls = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append((req.url.host, req.headers["host"], req.extensions.get("sni_hostname")))
+        return httpx.Response(200, content=b"x")
+
+    async def res(h):
+        calls.append(h)
+        return ["93.184.216.34", "93.184.216.35"]
+
+    await clips.safe_download("https://a.b-cdn.net/f", transport=httpx.MockTransport(handler),
+                              **{**_kw(tmp_path), "resolver": res})
+    assert seen == [("93.184.216.34", "a.b-cdn.net", "a.b-cdn.net")] and calls == ["a.b-cdn.net"]  # DNS raz
