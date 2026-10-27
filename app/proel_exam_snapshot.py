@@ -10,14 +10,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, insert, select, update
 
-from app.db import database, proel_match_state
+from app.db import database, proel_match_state, saved_matches
 from app.proel_auth import Actor, crew_is_known, merge_guard, proel_actor, roles_for
 from app.proel_exam_snapshot_rules import (
     clean_snapshot,
+    exam_confirmations,
+    merge_exam_confirmations,
     snapshot_hash,
     snapshot_is_frozen,
     valid_date_key,
 )
+from app.protocol_category import exam_requirement_for_code
 from app.proel_match_key import (
     IDENTITY_CONFLICT,
     identity_verdict,
@@ -93,9 +96,21 @@ def _identity_conflicts(row: Dict[str, Any], zprp_id: str, local_key: str) -> bo
     return identity_verdict(known, incoming) == IDENTITY_CONFLICT
 
 
-def _response(row: Dict[str, Any]) -> Dict[str, Any]:
+def _response(
+    row: Dict[str, Any],
+    confirmations: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     snapshot = row.get("exam_snapshot_json")
     exists = isinstance(snapshot, dict)
+    host = list((snapshot or {}).get("hostPlayers") or [])
+    guest = list((snapshot or {}).get("guestPlayers") or [])
+    if confirmations:
+        # Starsze buildy aplikacji nie znają `exam_confirmations` - dostają
+        # karty już po scaleniu. Nowe scalają drugi raz (bez skutku) także
+        # lokalne źródła, gdy migawki na serwerze nie ma.
+        requirement = exam_requirement_for_code(row.get("match_number"))
+        host = merge_exam_confirmations(host, "host", confirmations, requirement)
+        guest = merge_exam_confirmations(guest, "guest", confirmations, requirement)
     return {
         "exists": exists,
         "match_number": str(row.get("match_number") or ""),
@@ -107,15 +122,59 @@ def _response(row: Dict[str, Any]) -> Dict[str, Any]:
             row.get("exam_snapshot_date")
             and snapshot_is_frozen(str(row["exam_snapshot_date"]), _now())
         ),
-        "host_players": list((snapshot or {}).get("hostPlayers") or []),
-        "guest_players": list((snapshot or {}).get("guestPlayers") or []),
+        "host_players": host,
+        "guest_players": guest,
+        "exam_confirmations": list(confirmations or []),
     }
+
+
+async def _match_confirmations(
+    number: str, row: Dict[str, Any], date_hint: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Potwierdzenia badań z overlaya i z zapisu ProEla meczu (bloba).
+
+    Osobne zapytania, poza `EXAM_STATE_COLUMNS`: overlay czytamy w całości
+    (tylko on wie, kto i kiedy), a z bloba wyłącznie `matchConfig` - karty
+    zawodników - nie cały protokół. Błąd tu nie może zabrać migawki.
+    """
+    try:
+        state = _as_dict(
+            await database.fetch_one(
+                select(proel_match_state.c.fields_json).where(
+                    proel_match_state.c.match_number == number
+                )
+            )
+        )
+        overlay = state.get("fields_json")
+        if isinstance(overlay, str):
+            overlay = json.loads(overlay)
+        blob_row = _as_dict(
+            await database.fetch_one(
+                select(
+                    saved_matches.c.data_json["matchConfig"].label("match_config"),
+                    saved_matches.c.zprp_match_id,
+                ).where(saved_matches.c.match_number == number)
+            )
+        )
+        config = blob_row.get("match_config")
+        if isinstance(config, str):
+            config = json.loads(config)
+        known = str(row.get("zprp_match_id") or "").strip()
+        blob_id = str(blob_row.get("zprp_match_id") or "").strip()
+        if known and blob_id and known != blob_id:
+            config = None  # zapis innego meczu pod tym samym numerem
+        return exam_confirmations(
+            overlay, config, row.get("exam_snapshot_date") or date_hint
+        )
+    except Exception:  # noqa: BLE001
+        return []
 
 
 @router.get("")
 async def get_exam_snapshot(
     match: str = Query(..., min_length=1, max_length=100),
     zprp_match_id: Optional[str] = Query(None, max_length=100),
+    date_key: Optional[str] = Query(None, max_length=10),
     actor: Actor = Depends(proel_actor),
 ):
     number = str(match or "").strip()
@@ -137,6 +196,7 @@ async def get_exam_snapshot(
             "frozen": False,
             "host_players": [],
             "guest_players": [],
+            "exam_confirmations": [],
         }
 
     incoming_id = str(zprp_match_id or "").strip()
@@ -146,7 +206,7 @@ async def get_exam_snapshot(
             detail={"code": "MATCH_ID_MISMATCH", "message": "Migawka należy do innego meczu."},
         )
     _require_match_official(actor, row.get("guard_json"))
-    return _response(row)
+    return _response(row, await _match_confirmations(number, row, date_key))
 
 
 @router.put("")
