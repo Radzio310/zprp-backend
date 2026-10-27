@@ -356,6 +356,12 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
     markers: List[Dict[str, Any]] = []
     for video in raw_videos:
         markers += R.markers_as_clips(video, clean_markers(R.json_value(video.get("markers_json"), [])))
+    if markers:
+        # Autor znacznika w wierszu osi (kategoria raz + czas + autor).
+        marker_names = await C.people({m.get("author_id") for m in markers if m.get("author_id")})
+        for m in markers:
+            if m.get("author_id"):
+                m["author"] = C.person(marker_names, m["author_id"])
     situations: List[Dict[str, Any]] = []
     for r in delegate:
         situations += R.situations_from_sheet(R.json_value(r.get("evaluation_json"), {}), "delegate", r.get("delegate_name"))
