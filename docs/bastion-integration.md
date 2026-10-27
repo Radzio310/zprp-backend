@@ -59,6 +59,9 @@ Wszystkie z `Authorization: Bearer BASTION_CONNECTOR_TOKEN`, poza WSS.
 | `WSS /ws/login/{id}` | klatki JPEG (binarne) + wejście (JSON), bilet w 1. wiadomości |
 | `GET /playback?scope&judge_id&bunny_item_id` (lub `game_url`) | game-context z zapisanej sesji, `embed_url` |
 | `GET /connections/status`, `DELETE /connections` | metadane (bez sekretów), usunięcie stanu |
+| `POST /probe/clip` `{scope, judge_id, bunny_item_id, start_s, end_s}` | P8: jedno zlecenie cięcia (prywatny klip), zwraca zdalne `remote_id` i kod; 202 = `needs_reconciliation` |
+| `GET /probe/clip/{id}?scope&judge_id` | P8: `clip-context` (m.in. `download_available`) |
+| `POST /probe/clip/{id}/download?scope&judge_id` | P8: pobranie do katalogu tymczasowego, ffprobe, SHA-256, skasowanie pliku; zwraca metadane |
 | `GET /test` | techniczna strona testowa (tylko gdy `BASTION_TEST_PAGE=true`) |
 
 `judge_id` ustala backend BAZY z prawdziwej sesji (`base_actor`), nigdy z `act_as` (Etap 1).
@@ -157,6 +160,7 @@ Wyniki lokalne uzyskane 26.10.2026 na Windows 11, Python 3.14, Playwright 1.63 (
 | Dwa konta osobiste, izolacja | czeka na człowieka (logika kluczy i AAD: zweryfikowana testami) | P6 |
 | TTL sesji, zachowanie po wylogowaniu/cofnięciu dostępu | częściowo: zapisane 1 ciasteczko sesji Bastionu z terminem +7 dni (604 800 s od logowania). To termin ciasteczka, nie potwierdzony czas sesji po stronie serwera, więc `expires_at` zostaje `null` | P3 (1 h / 24 h / 7 dni), P7 |
 | Build obrazu Docker i start na Railway | **zweryfikowane (27.10)** | obraz z Xvfb (commit 332d846) działa na Railway |
+| Cięcie klipu 628-638 s w 5632, pobranie MP4, ffprobe, SHA-256 (P8) | czeka na człowieka | kod gotowy (commit w historii), test na Railway: `/test` sekcja „P8”. Wynik wklej z „Kopiuj wiersze do §7” |
 | Tożsamość konta (`external_identity_id`) | otwarte | brak znanego endpointu; do ustalenia przy P1 (np. strona profilu) |
 
 ## 8. Ryzyka i otwarte kwestie
@@ -170,3 +174,56 @@ Wyniki lokalne uzyskane 26.10.2026 na Windows 11, Python 3.14, Playwright 1.63 (
 - Okrojenie stanu do domeny portalu zakłada, że sesja Bastionu to cookie własne portalu. Jeśli P1 pokaże, że
   `game-context` po restarcie wymaga czegoś jeszcze (np. cookie Discorda), trzeba jawnie rozszerzyć zakres i opisać go w UI.
 - Widok obsługuje jedną kartę przeglądarki serwerowej (OAuth w tej samej karcie); popup `window.open` strony nie byłby widoczny.
+
+
+## 10. Kontrakt klipów Bastionu (P8)
+
+Źródło: publiczne skrypty portalu `GET /static/game.js` i `/static/clip.js` (pobrane bez logowania 27.10.2026). Strony `/game`
+i `/clip` bez sesji dają 303 na `/auth/login`, ale skrypty są publiczne. To **wewnętrzne API portalu**; walidacja po stronie
+serwera nie jest potwierdzona, dopóki P8 nie przejdzie na koncie.
+
+**`POST /api/game-submit`** (JSON, sesja, `credentials: include`):
+
+```text
+{ bunny_item_id: <int>,
+  clips: [ {                       # 1..10 elementów (MAX_CLIPS)
+    clipNumber: 1,
+    startTime: "10:28",            # "m:ss" albo "h:mm:ss", całe sekundy (regex ^([0-9]{1,2}:)?[0-9]{1,2}:[0-9]{2}$)
+    endTime:   "10:38",
+    privateId: null,               # opcjonalne, <= 20 znaków
+    audience_group_id: null,       # null = tylko ja (ONLY_ME); audience_crew / audience_extra_ids pomijamy
+    comment: "BAZA test P8",       # WYMAGANE, 1..300 znaków (to jedyny tekst klipu, nie ma osobnego tytułu)
+    situationType: "NORMAL",       # WYMAGANE: NORMAL | TRAINING | CURIOSITY | NEEDS_ANALYSIS
+    videoTags: ["PLAY_ON"] } ] }   # WYMAGANE 1..5 z 22 kluczy (PENALTY, ADVANTAGE, ... PLAY_ON, ... VR)
+```
+
+Odpowiedź sukcesu (z `showSuccessState`): `{clip_codes: [...], clip_ids: [...], addressees: [...]}`. Błędy w skrypcie: 401
+(brak logowania), 403 (brak uprawnień), 422 (walidacja), inne = komunikat `message`. Skrypt klienta wymusza czas 2-300 s
+(`MIN_DIFF_SECONDS`, `MAX_DIFF_SECONDS`) i tylko całe sekundy (`dataset.seconds` jest całkowite).
+Jest też `supersedes_clip_id` (ponowne cięcie, jeden klip); nie używamy. Brak idempotencji i brak pola korelacji,
+więc po timeoucie nie wiemy, czy klip powstał.
+
+**`GET /api/clip-context?clip_id=<int>`** -> `{clip: {clip_code, time_start_sec, time_end_sec, situation_type, video_tags,
+description, private_id}, download_available: bool, is_owner, ...}`. 401/403/404 jak wyżej. `download_available=true` oznacza
+zapisany plik. Z odpowiedzi bierzemy tylko pola potrzebne do próby (bez opisów, osób, komentarzy).
+
+**`GET /api/clip/{id}/download`** -> 302 do podpisanego adresu Bunny z wymuszonym pobraniem (z komentarza w `clip.js`).
+Host przekierowania **nieznany do P8**; lista dozwolonych sufiksów: `b-cdn.net, mediadelivery.net, bunnycdn.com`
+(`BASTION_DOWNLOAD_HOST_SUFFIXES`). Inny host = błąd `DOWNLOAD_HOST_NOT_ALLOWED` z nazwą hosta w `detail` (po ocenie dopisz sufiks).
+
+**Co robi connector:**
+
+1. `POST /probe/clip`: zakres musi być całkowity, 2-300 s (inaczej 400 `BAD_RANGE`, ułamki 422; nic nie jest zaokrąglane).
+   Wpis w księdze (`<BASTION_DATA_DIR>/clip_jobs.json`, odcisk = połączenie + film + zakres) powstaje **przed** POST-em.
+   Odpowiedź zawiera `sent` (dokładnie wysłane `startTime`/`endTime`, tytuł, typ, tagi, odbiorca).
+2. Timeout, błąd sieci, 5xx albo sukces bez dokładnie jednego `clip_ids` -> `needs_reconciliation` (HTTP 202), **zero ponowień**.
+   Ten sam zakres drugi raz -> 409 `CLIP_ALREADY_SUBMITTED` (bez drugiego POST), także po restarcie. Odrzucenie 4xx = `failed`, można poprawić i ponowić.
+   Rozstrzygnięcie ręczne: lista klipów w portalu Bastionu.
+3. `GET /probe/clip/{id}` i `POST .../download` działają tylko dla klipów utworzonych przez ten connector (`CLIP_UNKNOWN`).
+4. Pobranie: sesja połączenia tylko do pierwszego żądania `/api/clip/{id}/download` (bez podążania za przekierowaniem). Podpisany
+   adres pobiera **osobny klient httpx**: bez ciasteczek i nagłówków autoryzacji, bez `trust_env`, `https` bez userinfo i portu,
+   host na liście sufiksów, literały IP odrzucane, nazwa musi się rozwiązać wyłącznie na adresy publiczne, każde przekierowanie
+   (maks. 3) przechodzi te same kontrole, strumień do katalogu tymczasowego z limitem `BASTION_MAX_DOWNLOAD_MB` (domyślnie 200).
+   Potem `ffprobe` (czas, rozdzielczość, kodeki, obecność obrazu), SHA-256, i katalog zawsze jest kasowany. Ograniczenie: DNS jest
+   sprawdzany przed połączeniem, nie przypięty do gniazda (DNS rebinding nie jest wykluczony; to próba, nie produkcja).
+5. `ffmpeg` (zawiera `ffprobe`) jest w obrazie (Dockerfile).

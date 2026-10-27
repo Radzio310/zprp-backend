@@ -331,7 +331,26 @@ canvas:focus-visible{box-shadow:none}
     <div class="tip"><b id="tip-b">Kliknij w okno, żeby pisać.</b> Wklejanie: Ctrl+V. Okno zgłasza Discordowi brak klucza bezpieczeństwa, więc od razu zapyta o kod.</div>
    </section>
 
-   <section class="card rise" style="--i:6" aria-labelledby="h-log">
+   <section class="card rise" style="--i:6" aria-labelledby="h-p8">
+    <p class="eyebrow" id="h-p8"><span class="n">P8</span>Cięcie klipu i pobranie MP4</p>
+    <div class="why" style="margin-bottom:12px"><b>Uwaga:</b> przycisk poniżej utworzy jeden prywatny klip na koncie Bastionu (połączenie wybrane po lewej). Klip ma treść „BAZA test P8”, typ NORMAL, znacznik PLAY_ON, odbiorca: tylko to konto. Klip zostaje w Bastionie, my kasujemy tylko pobrany plik.</div>
+    <div class="two">
+     <label class="field"><span>Od (sekundy filmu)</span><input class="in" id="p8from" value="628" inputmode="numeric" autocomplete="off"></label>
+     <label class="field"><span>Do (sekundy filmu)</span><input class="in" id="p8to" value="638" inputmode="numeric" autocomplete="off"></label>
+    </div>
+    <div class="hint" id="p8hint" aria-live="polite"></div>
+    <ol class="steps">
+     <li class="step" id="s-cs" data-state="idle"><span class="lamp"></span><div><b>Zlecenie wysłane</b><span class="msg">POST /probe/clip, sesją tego połączenia, raz</span></div><span class="tag">oczekuje</span></li>
+     <li class="step" id="s-cw" data-state="idle"><span class="lamp"></span><div><b>Bastion przygotowuje plik</b><span class="msg">clip-context co 5 s, najwyżej 5 minut</span></div><span class="tag">oczekuje</span></li>
+     <li class="step" id="s-cd" data-state="idle"><span class="lamp"></span><div><b>Pobranie i kontrola pliku</b><span class="msg">osobny klient bez ciasteczek, ffprobe, SHA-256, plik kasowany</span></div><span class="tag">oczekuje</span></li>
+    </ol>
+    <div class="acts">
+     <button type="button" class="btn danger" id="p8go">Utwórz klip i pobierz MP4</button>
+     <div class="why" id="p8why" aria-live="polite"></div>
+    </div>
+   </section>
+
+   <section class="card rise" style="--i:7" aria-labelledby="h-log">
     <p class="eyebrow" id="h-log"><span class="n">3</span>Oś czasu i wyniki do docs §7</p>
     <ol class="log" id="out" aria-live="polite"><li class="empty">Tu pojawi się każdy krok i odpowiedź connectora (adresy embed z ukrytymi parametrami).</li></ol>
     <label class="field" style="margin:12px 0 0"><span>Twoje uwagi do wierszy (CAPTCHA, kod, QR, klawiatura, wklejanie)</span>
@@ -533,6 +552,71 @@ $('restart').onclick=async()=>{if(!attempt)return;const old=attempt;
  try{const j=await (await fetch('/attempts/'+old.id+'/cancel',{method:'POST',headers:H()})).json();log('Anulowano trwającą próbę '+old.id.slice(0,8)+': '+j.status,'info',j)}catch(e){log('Anulowanie nie przeszło: '+e.message,'err');return}
  clearInterval(poll);try{ws&&ws.close()}catch{}attempt=null;st.lastStatus=null;$('resume').hidden=true;$('start').onclick()};
 
+/* ---------- P8: cięcie klipu, odpytywanie, pobranie ---------- */
+const P8DEF={cs:'POST /probe/clip, sesją tego połączenia, raz',cw:'clip-context co 5 s, najwyżej 5 minut',cd:'osobny klient bez ciasteczek, ffprobe, SHA-256, plik kasowany'};
+const P8L='Utwórz klip i pobierz MP4';let p8arm=null,p8busy=false;
+const clk=n=>{const h=Math.floor(n/3600),m=Math.floor(n%3600/60),r=n%60,p=x=>String(x).padStart(2,'0');return h?h+':'+p(m)+':'+p(r):m+':'+p(r)};
+function p8range(){
+ const a=$('p8from').value.trim(),b=$('p8to').value.trim();
+ if(!/^\d+$/.test(a)||!/^\d+$/.test(b))return{why:'Podaj całe sekundy (bez ułamków i przecinków), np. 628 i 638. Niczego nie zaokrąglamy.'};
+ const s=+a,e=+b,d=e-s;
+ if(d<2)return{why:'Klip musi trwać co najmniej 2 s, a „Do” musi być później niż „Od” (jest '+d+' s).'};
+ if(d>300)return{why:'Bastion przyjmuje klipy do 300 s (jest '+d+' s). Skróć zakres.'};
+ return{ok:true,s,e,d};
+}
+function p8render(){const r=p8range(),h=$('p8hint');
+ h.className='hint'+(r.ok?' good':' bad');
+ h.textContent=r.ok?'Wysyłamy dokładnie: '+clk(r.s)+' do '+clk(r.e)+' ('+r.s+'-'+r.e+' s, '+r.d+' s) w filmie '+$('item').value.trim()+'.':r.why;
+ $('p8from').setAttribute('aria-invalid',!r.ok);$('p8to').setAttribute('aria-invalid',!r.ok)}
+['p8from','p8to','item'].forEach(id=>$(id).addEventListener('input',p8render));p8render();
+function p8why(t){const w=$('p8why');w.innerHTML='<b></b> ';w.firstChild.textContent='Zablokowane.';w.append(t);w.classList.remove('flash');void w.offsetWidth;w.classList.add('flash')}
+function p8disarm(){clearTimeout(p8arm);p8arm=null;$('p8go').classList.remove('arm');$('p8go').textContent=P8L}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const api=async(path,opt)=>{const r=await fetch(path,{headers:H(),...opt});let j=null;try{j=await r.json()}catch{}return{r,j:j||{}}};
+$('p8go').onclick=async()=>{
+ if(p8busy){p8why('Próba P8 już trwa. Poczekaj na wynik.');return}
+ const t=token();if(!t.ok){p8why(t.why);$('tok').focus();return}
+ if(!$('judge').value.trim()){p8why('Podaj identyfikator sędziego (judge_id).');$('judge').focus();return}
+ if(!/^\d+$/.test($('item').value.trim())||+$('item').value<1){p8why('Numer nagrania Bunny to liczba całkowita, np. 5632.');$('item').focus();return}
+ const rg=p8range();if(!rg.ok){p8why(rg.why);return}
+ if(!p8arm){p8arm=setTimeout(p8disarm,6000);$('p8go').classList.add('arm');
+  $('p8go').textContent='Na pewno? Utworzy PRYWATNY klip '+clk(rg.s)+'-'+clk(rg.e)+' na koncie '+st.scope+'/'+$('judge').value.trim()+'. Stuknij ponownie';return}
+ p8disarm();$('p8why').innerHTML='';p8busy=true;
+ for(const k in P8DEF){const li=$('s-'+k);li.dataset.state='idle';li.querySelector('.tag').textContent=TAG.idle;li.querySelector('.msg').textContent=P8DEF[k];delete R[k]}
+ delete R.p8;const jd=$('judge').value.trim(),sc=st.scope,item=+$('item').value,qs=new URLSearchParams({scope:sc,judge_id:jd});
+ const rec=(o)=>{R.p8={...(R.p8||{}),...o,at:new Date()}};
+ try{
+  step('cs','run','Wysyłam zlecenie: '+clk(rg.s)+' do '+clk(rg.e)+' ('+rg.s+'-'+rg.e+' s), film '+item+'…');
+  let {r,j}=await api('/probe/clip',{method:'POST',body:JSON.stringify({scope:sc,judge_id:jd,bunny_item_id:item,start_s:rg.s,end_s:rg.e})}).catch(e=>({r:null,j:{error:'NETWORK',detail:e.message}}));
+  let id=null;
+  if(r&&r.status===200){id=j.remote_id;rec({id,code:j.clip_code,sent:j.sent});step('cs','ok','Zlecono. Zdalne id '+id+', kod '+(j.clip_code||'-')+'. Wysłano: '+j.sent.startTime+' do '+j.sent.endTime+' ('+j.sent.duration_s+' s), tytuł „'+j.sent.title+'”, '+j.sent.audience+'.');log('P8 zlecenie przyjęte','ok',j)}
+  else if(r&&r.status===202){rec({state:'needs_reconciliation',code:j.code});step('cs','err','Wynik nierozstrzygnięty ('+(j.code||'')+'). Zlecenie mogło powstać, więc NIE ponawiamy. Sprawdź listę klipów w Bastionie ręcznie.');log('P8: needs_reconciliation','err',j);return}
+  else if(r&&r.status===409&&j.error==='CLIP_ALREADY_SUBMITTED'){let o={};try{o=JSON.parse(j.detail)}catch{}
+   if(o.state==='submitted'&&o.remote_id){id=o.remote_id;rec({id,code:o.clip_code,reused:true});step('cs','ok','Ten zakres był już zlecony (id '+id+'). Nie tworzę drugiego klipu, wracam do tego.');log('P8: użyto istniejącego zlecenia','info',o)}
+   else{step('cs','err','Ten zakres ma zlecenie w stanie '+o.state+' ('+(o.code||'-')+'). Nie ponawiamy; sprawdź w Bastionie ręcznie albo zmień zakres.');log('P8: zlecenie już istnieje','err',j);return}}
+  else{const msg=!r?'Błąd sieci: '+j.detail:'HTTP '+r.status+' · '+(j.error||j.code||'')+(j.detail?' · '+(typeof j.detail==='string'?j.detail:JSON.stringify(j.detail)):'')+(r.status===401?' (token odrzucony)':'')+(j.error==='BASTION_NOT_CONNECTED'?' · najpierw zaloguj to połączenie (P1)':'');
+   step('cs','err',msg);log('P8 zlecenie: '+msg,'err',j);return}
+  step('cw','run','Czekam na plik… (0/60)');
+  let ready=false,ctx=null;
+  for(let i=1;i<=60;i++){
+   ({r,j}=await api('/probe/clip/'+id+'?'+qs).catch(e=>({r:null,j:{error:'NETWORK',detail:e.message}})));
+   if(!r||r.status!==200){if(r&&[403,404,409].includes(r.status)){step('cw','err','HTTP '+r.status+' · '+(j.error||'')+(j.detail?' · '+j.detail:'')+'. Przerywam odpytywanie.');log('P8 clip-context','err',j);return}
+    step('cw','run','Chwilowy błąd ('+(r?'HTTP '+r.status:'sieć')+'), próba '+i+'/60…')}
+   else{ctx=j;if(j.download_available){ready=true;break}step('cw','run','Plik jeszcze niegotowy (download_available=false), próba '+i+'/60…')}
+   await sleep(5000)}
+  if(!ready){step('cw','err','Po 5 minutach plik wciąż niegotowy. Klip '+id+' został w Bastionie; spróbuj pobrania później.');log('P8 limit odpytywania','err',ctx);return}
+  step('cw','ok','Plik gotowy. Zakres w Bastionie: '+ctx.time_start_sec+'-'+ctx.time_end_sec+' s, typ '+ctx.situation_type+'.');log('P8 clip-context','ok',ctx);rec({ctx});
+  step('cd','run','Pobieram podpisany adres bez ciasteczek…');
+  ({r,j}=await api('/probe/clip/'+id+'/download?'+qs,{method:'POST'}).catch(e=>({r:null,j:{error:'NETWORK',detail:e.message}})));
+  if(!r||r.status!==200){const msg=!r?'Błąd sieci: '+j.detail:'HTTP '+r.status+' · '+(j.error||'')+(j.detail?' · '+j.detail:'');step('cd','err',msg);log('P8 pobranie: '+msg,'err',j);return}
+  const mb=(j.size_bytes/1048576).toFixed(2).replace('.',',');
+  const good=j.has_video&&j.duration_s>0;
+  rec({dl:j});
+  step('cd',good?'ok':'err',mb+' MB · '+j.duration_s+' s (oczekiwane '+j.expected_s+', różnica '+j.delta_s+') · '+(j.width||'?')+'×'+(j.height||'?')+' · '+(j.video_codec||'brak obrazu')+(j.audio_codec?' + '+j.audio_codec:', bez dźwięku')+' · host '+j.download_host+' · SHA-256 '+j.sha256.slice(0,12)+'… · plik skasowany');
+  log('P8 pobranie i ffprobe','ok',j);
+ }finally{p8busy=false}
+};
+
 /* ---------- kopiowanie do docs §7 ---------- */
 const esc=s=>String(s).replace(/\|/g,'\\|').replace(/\n/g,' ');
 function rows(){
@@ -545,6 +629,10 @@ function rows(){
    'klucze game-context: '+((R.play.keys||[]).join(', ')||'-')];
   L.push('| `game-context` z prawdziwą sesją, `embed_url` dla '+$('item').value.trim()+' i host embed | '+(R.play.ok?'zweryfikowane':'nie przeszło')+' | '+esc(p.join('; '))+' |')}
  if(R.conn)L.push('| Stan połączenia '+st.scope+' / '+$('judge').value.trim()+' (P3, P6, P7) | '+(R.conn.ok?'zapisane':'brak')+' | '+esc(R.conn.at.toLocaleString('pl-PL')+'; '+R.conn.msg)+' |');
+ if(R.p8&&R.p8.dl){const d=R.p8.dl,x=R.p8.sent||{};const p=[R.p8.at.toLocaleDateString('pl-PL'),'film '+$('item').value.trim()+', zakres '+(d.requested.start_s)+'-'+(d.requested.end_s)+' s','klip '+R.p8.id+(R.p8.code?' ('+R.p8.code+')':''),
+   d.size_bytes+' B','czas '+d.duration_s+' s (różnica '+d.delta_s+' s)',(d.width||'?')+'x'+(d.height||'?'),'wideo '+(d.video_codec||'brak')+', audio '+(d.audio_codec||'brak'),'host '+d.download_host,'SHA-256 '+d.sha256,notes||null].filter(Boolean);
+  L.push('| Cięcie klipu i pobranie MP4 (P8) | '+(d.has_video&&d.duration_s>0?'zweryfikowane':'nie przeszło')+' | '+esc(p.join('; '))+' |')}
+ else if(R.p8&&R.p8.state)L.push('| Cięcie klipu (P8) | nierozstrzygnięte | '+esc(R.p8.at.toLocaleDateString('pl-PL')+'; '+R.p8.state+' '+(R.p8.code||'')+'; '+(notes||''))+' |');
  return L.join('\n')||'| (brak wykonanych prób) | | |';
 }
 async function copy(text,btn,label){

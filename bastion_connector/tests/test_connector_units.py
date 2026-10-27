@@ -337,3 +337,221 @@ def test_keyboard_text_message_and_specials():
 def test_keyboard_ctrl_shortcut_is_key_event_not_text():
     text, calls = _typed(_press("a", "KeyA", 2))
     assert text == "" and calls[0][1]["type"] == "rawKeyDown" and calls[0][1]["windowsVirtualKeyCode"] == 65
+
+
+# ---------- P8: klip i pobranie ----------
+import httpx  # noqa: E402
+
+from connector import clips  # noqa: E402
+
+
+@pytest.mark.parametrize("s,e", [(628, 638), (0, 2), (10, 310)])
+def test_range_ok(s, e):
+    assert clips.validate_range(s, e) == (s, e)
+
+
+@pytest.mark.parametrize("s,e", [(10, 11), (10, 10), (20, 10), (0, 301), (-1, 5), (628.5, 640), (628, "640"), (True, 5), (0, 99999999)])
+def test_range_rejected(s, e):
+    with pytest.raises(clips.ClipError) as ex:
+        clips.validate_range(s, e)
+    assert ex.value.code == "BAD_RANGE"
+
+
+def test_submit_body_is_neutral_private_and_explicit():
+    b = clips.build_submit_body(5632, 628, 638)
+    c = b["clips"][0]
+    assert b["bunny_item_id"] == 5632 and len(b["clips"]) == 1
+    assert (c["startTime"], c["endTime"]) == ("10:28", "10:38")
+    assert c["audience_group_id"] is None and "audience_crew" not in c and c["privateId"] is None
+    assert c["comment"] == "BAZA test P8" and c["situationType"] == "NORMAL" and c["videoTags"] == ["PLAY_ON"]
+    assert clips.clock(3725) == "1:02:05" and clips.clock(59) == "0:59"
+    assert clips.sent_summary(628, 638)["duration_s"] == 10
+
+
+def test_download_host_allowlist():
+    sfx = clips.DEFAULT_DOWNLOAD_SUFFIXES
+    assert clips.download_host_ok("https://vz-abc.b-cdn.net/x/play.mp4?token=1", sfx)
+    assert clips.download_host_ok("https://b-cdn.net/x", sfx)
+    for bad in ("http://x.b-cdn.net/a", "https://evilb-cdn.net/a", "https://b-cdn.net.evil.com/a",
+                "https://user@x.b-cdn.net/a", "https://x.b-cdn.net:8443/a", "https://10.0.0.5/a",
+                "https://127.0.0.1/a", "https://[::1]/a", "https://portal.handball-bastion.pl/a", "ftp://x.b-cdn.net/a", ""):
+        assert not clips.download_host_ok(bad, sfx), bad
+
+
+def test_ip_public():
+    assert clips.ip_is_public("8.8.8.8")
+    for ip in ("10.1.2.3", "127.0.0.1", "169.254.169.254", "192.168.0.1", "::1", "0.0.0.0", "fe80::1"):
+        assert not clips.ip_is_public(ip), ip
+
+
+async def _public(_h):
+    return True
+
+
+async def _private(_h):
+    return False
+
+
+def _kw(tmp_path, **o):
+    return dict(suffixes=clips.DEFAULT_DOWNLOAD_SUFFIXES, max_bytes=1000, dest_dir=str(tmp_path), resolver=_public, **o)
+
+
+async def test_download_sends_no_cookies_or_auth_and_hashes(tmp_path):
+    seen = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req)
+        return httpx.Response(200, content=b"abc" * 10, headers={"content-type": "video/mp4"})
+
+    d = await clips.safe_download("https://x.b-cdn.net/f.mp4?t=1", transport=httpx.MockTransport(handler), **_kw(tmp_path))
+    import hashlib
+    assert d.sha256 == hashlib.sha256(b"abc" * 10).hexdigest() and d.size == 30
+    assert len(seen) == 1
+    assert "cookie" not in seen[0].headers and "authorization" not in seen[0].headers
+    assert open(d.path, "rb").read() == b"abc" * 10
+
+
+async def test_download_redirect_chain_is_revalidated_and_clean(tmp_path):
+    seen = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(str(req.url.host))
+        assert "cookie" not in req.headers
+        if req.url.host == "a.b-cdn.net":
+            return httpx.Response(302, headers={"location": "https://evil.example.com/steal"})
+        return httpx.Response(200, content=b"x")
+
+    with pytest.raises(clips.ClipError) as ex:
+        await clips.safe_download("https://a.b-cdn.net/f", transport=httpx.MockTransport(handler), **_kw(tmp_path))
+    assert ex.value.code == "DOWNLOAD_HOST_NOT_ALLOWED" and seen == ["a.b-cdn.net"]  # na zly host nie poszlo zadne zapytanie
+
+
+async def test_download_allowed_redirect_followed_and_loops_cut(tmp_path):
+    def ok(req):
+        return httpx.Response(302, headers={"location": "https://b.b-cdn.net/z"}) if req.url.host == "a.b-cdn.net" else httpx.Response(200, content=b"x")
+
+    d = await clips.safe_download("https://a.b-cdn.net/f", transport=httpx.MockTransport(ok), **_kw(tmp_path))
+    assert d.final_host == "b.b-cdn.net" and d.hops == 1
+    loop = httpx.MockTransport(lambda r: httpx.Response(302, headers={"location": "https://a.b-cdn.net/f"}))
+    with pytest.raises(clips.ClipError) as ex:
+        await clips.safe_download("https://a.b-cdn.net/f", transport=loop, **_kw(tmp_path))
+    assert ex.value.code == "DOWNLOAD_TOO_MANY_REDIRECTS"
+
+
+async def test_download_rejects_private_address_and_oversize_and_cleans(tmp_path):
+    t = httpx.MockTransport(lambda r: httpx.Response(200, content=b"x" * 5000))
+    with pytest.raises(clips.ClipError) as ex:
+        await clips.safe_download("https://a.b-cdn.net/f", transport=t, **{**_kw(tmp_path), "resolver": _private})
+    assert ex.value.code == "DOWNLOAD_ADDRESS_NOT_PUBLIC"
+    with pytest.raises(clips.ClipError) as ex:
+        await clips.safe_download("https://a.b-cdn.net/f", transport=t, **_kw(tmp_path))
+    assert ex.value.code == "DOWNLOAD_TOO_LARGE"
+    assert list(tmp_path.iterdir()) == []  # zadnych resztek
+
+
+def test_classify_submit_never_retries_uncertain():
+    ok = clips.classify_submit(200, {"clip_ids": [77], "clip_codes": ["ABC"]})
+    assert (ok.state, ok.remote_id, ok.clip_code) == ("submitted", "77", "ABC")
+    for status in (None, 500, 502, 504, 408):
+        r = clips.classify_submit(status, None)
+        assert r.state == "needs_reconciliation", status
+    assert clips.classify_submit(200, {"clip_ids": []}).state == "needs_reconciliation"
+    assert clips.classify_submit(200, {"clip_ids": [1, 2]}).state == "needs_reconciliation"
+    assert clips.classify_submit(422, {"message": "x"}).state == "failed"
+    assert clips.classify_submit(401, None).code == "BASTION_AUTH_REQUIRED"
+
+
+def test_parse_ffprobe():
+    d = {"format": {"format_name": "mov,mp4", "duration": "10.4"},
+         "streams": [{"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720},
+                     {"codec_type": "audio", "codec_name": "aac"}]}
+    r = clips.parse_ffprobe(d, 10)
+    assert r["has_video"] and r["width"] == 1280 and r["video_codec"] == "h264" and r["delta_s"] == 0.4
+    assert not clips.parse_ffprobe({"streams": [{"codec_type": "audio"}]})["has_video"]
+
+
+class _FakeResp:
+    def __init__(self, status, body=None):
+        self.status, self._b = status, body
+
+    async def json(self):
+        return self._b
+
+
+class _FakeReq:
+    def __init__(self, post):
+        self.post_fn, self.posts = post, 0
+
+    async def post(self, *a, **k):
+        self.posts += 1
+        return await self.post_fn()
+
+    async def storage_state(self):
+        return {"cookies": [], "origins": []}
+
+    async def dispose(self):
+        pass
+
+
+async def _noop(*a, **k):
+    return None
+
+
+def _clipsvc(tmp_path, post):
+    from connector.config import Settings
+    from connector.service import Service
+    s = Service(Settings(data_dir=str(tmp_path), secrets_key=key()))
+    req = _FakeReq(post)
+
+    async def fake(_key):
+        return req, {"cookies": [], "origins": []}, {}
+
+    s._with_state_request = fake
+    s._persist_if_changed = _noop
+    return s, req
+
+
+async def test_timeout_after_post_is_needs_reconciliation_and_no_resubmit(tmp_path):
+    async def boom():
+        raise TimeoutError("timeout")
+
+    s, req = _clipsvc(tmp_path, boom)
+    rec, http = await s.clip_submit("default", "t1", 5632, 628, 638)
+    assert http == 202 and rec["state"] == "needs_reconciliation" and rec["sent"]["startTime"] == "10:28"
+    from connector.service import ConnectorError
+    with pytest.raises(ConnectorError) as ex:  # ponowna proba tego samego: zero drugiego POST
+        await s.clip_submit("default", "t1", 5632, 628, 638)
+    assert ex.value.code == "CLIP_ALREADY_SUBMITTED" and req.posts == 1
+    # restart: ksiega pamieta, wciaz zero ponowien
+    s2, req2 = _clipsvc(tmp_path, boom)
+    with pytest.raises(ConnectorError):
+        await s2.clip_submit("default", "t1", 5632, 628, 638)
+    assert req2.posts == 0
+
+
+async def test_success_and_rejected_can_retry(tmp_path):
+    async def good():
+        return _FakeResp(200, {"clip_ids": [4321], "clip_codes": ["Q1"]})
+
+    s, req = _clipsvc(tmp_path, good)
+    rec, http = await s.clip_submit("default", "t1", 5632, 628, 638)
+    assert http == 200 and rec["remote_id"] == "4321" and s._known_clip("4321")["clip_code"] == "Q1"
+
+    async def bad():
+        return _FakeResp(422, {"message": "nie"})
+
+    s2, _ = _clipsvc(tmp_path / "b", bad)
+    rec, http = await s2.clip_submit("default", "t1", 5632, 10, 20)
+    assert http == 422 and rec["state"] == "failed"
+    assert s2.ledger.get(clips.ClipLedger.fingerprint("default", 5632, 10, 20))["state"] == "failed"  # odrzucone: mozna poprawic i ponowic
+
+
+async def test_bad_range_never_posts(tmp_path):
+    async def good():
+        return _FakeResp(200, {"clip_ids": [1]})
+
+    s, req = _clipsvc(tmp_path, good)
+    from connector.service import ConnectorError
+    with pytest.raises(ConnectorError) as ex:
+        await s.clip_submit("default", "t1", 5632, 0, 400)
+    assert ex.value.code == "BAD_RANGE" and req.posts == 0

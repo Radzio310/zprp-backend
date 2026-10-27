@@ -22,6 +22,8 @@ class Settings:
     ticket_ttl_s: int = 60
     max_active_logins: int = 2
     embed_host_suffixes: list[str] = field(default_factory=lambda: ["mediadelivery.net"])
+    download_host_suffixes: list[str] = field(default_factory=lambda: ["b-cdn.net", "mediadelivery.net", "bunnycdn.com"])
+    max_download_mb: int = 200
     probe_bunny_item_id: int | None = None
     data_dir: str = "./.data"
     test_page: bool = False
@@ -47,6 +49,8 @@ class Settings:
             ticket_ttl_s=int(os.environ.get("BASTION_TICKET_TTL_SECONDS", "60")),
             max_active_logins=int(os.environ.get("BASTION_MAX_ACTIVE_LOGINS", "2")),
             embed_host_suffixes=_csv("BASTION_EMBED_HOST_SUFFIXES") or ["mediadelivery.net"],
+            download_host_suffixes=_csv("BASTION_DOWNLOAD_HOST_SUFFIXES") or ["b-cdn.net", "mediadelivery.net", "bunnycdn.com"],
+            max_download_mb=int(os.environ.get("BASTION_MAX_DOWNLOAD_MB", "200")),
             probe_bunny_item_id=int(probe) if probe.isdigit() else None,
             data_dir=os.environ.get("BASTION_DATA_DIR", "./.data"),
             test_page=flag("BASTION_TEST_PAGE"),

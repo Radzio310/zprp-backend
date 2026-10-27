@@ -6,7 +6,7 @@ FROM mcr.microsoft.com/playwright/python:v1.63.0-noble
 # "HeadlessChrome" i hCaptcha Discorda zapetla sie na nim. Bez wtyczek "stealth" i podrabiania
 # odciskow - jestesmy zwykla przegladarka, captche rozwiazuje czlowiek w oknie.
 # apt jest idempotentny: jesli obraz ma juz xvfb, nic sie nie zmieni.
-RUN apt-get update  && apt-get install -y --no-install-recommends xvfb xauth  && rm -rf /var/lib/apt/lists/*
+RUN apt-get update  && apt-get install -y --no-install-recommends xvfb xauth ffmpeg  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .

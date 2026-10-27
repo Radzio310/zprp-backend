@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
-from . import crypto, tickets
+from . import clips, crypto, tickets
 from .bastion import GameResult, fetch_game_context
 from .config import Settings
 from .store import StateStore, conn_key_for, cookie_summary, filter_state_to_host, now_iso
@@ -131,6 +131,8 @@ class Service:
         self._pw = None
         self._browser = None
         self._browser_lock = asyncio.Lock()
+        self.ledger = clips.ClipLedger(settings.data_dir)
+        self._clip_locks: dict[str, asyncio.Lock] = {}
 
     # ---------- infrastruktura ----------
     async def start(self) -> None:
@@ -195,6 +197,151 @@ class Service:
             return res, info
         finally:
             await req.dispose()
+
+    # ---------- P8: ciecie klipu i pobranie MP4 (sesja tego polaczenia) ----------
+    async def _persist_if_changed(self, req, key: str, state: dict, meta: dict) -> None:
+        fresh = filter_state_to_host(await req.storage_state(), self.s.portal_host)
+        async with self.store.lock(key):
+            if json.dumps(fresh, sort_keys=True) != json.dumps(state, sort_keys=True):
+                self.store.save(key, fresh, {**meta, "validated_at": now_iso()})
+            else:
+                self.store.touch_meta(key, validated_at=now_iso())
+
+    @staticmethod
+    def _auth_err(code: str) -> "ConnectorError | None":
+        m = {"BASTION_AUTH_REQUIRED": 409, "BASTION_RESOURCE_FORBIDDEN": 403, "BASTION_RATE_LIMITED": 429}
+        return ConnectorError(code, m[code]) if code in m else None
+
+    async def clip_submit(self, scope: str, judge_id: str | None, item_id: int, start_s: int, end_s: int) -> tuple[dict, int]:
+        """Jedno zlecenie na (polaczenie, film, zakres). Wpis w ksiedze PRZED POST-em; po timeoucie lub 5xx
+        stan needs_reconciliation i ZERO ponowien. Zwraca (rekord, http)."""
+        try:
+            start_s, end_s = clips.validate_range(start_s, end_s)
+        except clips.ClipError as e:
+            raise ConnectorError(e.code, e.status, e.detail) from e
+        key = conn_key_for(scope, judge_id)
+        fp = clips.ClipLedger.fingerprint(key, item_id, start_s, end_s)
+        lock = self._clip_locks.setdefault(fp, asyncio.Lock())
+        if lock.locked():
+            raise ConnectorError("CLIP_SUBMIT_IN_PROGRESS", 409, "to samo zlecenie jest wlasnie wysylane")
+        async with lock:
+            prev = self.ledger.get(fp)
+            if prev and prev.get("state") != "failed":
+                raise ConnectorError("CLIP_ALREADY_SUBMITTED", 409,
+                                     json.dumps({k: prev.get(k) for k in ("state", "code", "remote_id", "clip_code", "created_at")}))
+            req, state, meta = await self._with_state_request(key)  # brak sesji = blad zanim cokolwiek zapiszemy
+            job = {"state": "submitting", "code": None, "remote_id": None, "clip_code": None, "scope": scope,
+                   "judge_id": judge_id, "bunny_item_id": item_id, "start_s": start_s, "end_s": end_s,
+                   "created_at": now_iso()}
+            self.ledger.put(fp, job)
+            try:
+                try:
+                    resp = await req.post(f"{self.s.portal_base_url}/api/game-submit",
+                                          data=json.dumps(clips.build_submit_body(item_id, start_s, end_s)),
+                                          headers={"Content-Type": "application/json"}, timeout=30000, max_redirects=0)
+                    try:
+                        body = await resp.json()
+                    except Exception:  # noqa: BLE001
+                        body = None
+                    res = clips.classify_submit(resp.status, body)
+                except Exception as e:  # noqa: BLE001 - po wyslaniu POST timeout/siec to NIE dowod, ze nic nie powstalo
+                    log.warning("game-submit bez odpowiedzi: %s", type(e).__name__)
+                    res = clips.classify_submit(None, None)
+                    res.detail = type(e).__name__
+                job.update(state=res.state, code=res.code, remote_id=res.remote_id, clip_code=res.clip_code,
+                           http_status=res.http_status, detail=res.detail)
+                self.ledger.put(fp, job)
+                if res.state == "submitted":
+                    try:
+                        await self._persist_if_changed(req, key, state, meta)
+                    except Exception:  # noqa: BLE001
+                        pass
+            finally:
+                await req.dispose()
+        out = {**job, "sent": clips.sent_summary(start_s, end_s), "connection": key}
+        if res.state == "submitted":
+            return out, 200
+        if res.state == "needs_reconciliation":
+            return out, 202
+        err = self._auth_err(res.code)
+        if err:
+            raise err
+        return out, 422
+
+    def _known_clip(self, remote_id: str) -> dict:
+        job = self.ledger.by_remote_id(remote_id)
+        if not job:
+            raise ConnectorError("CLIP_UNKNOWN", 404, "to zlecenie nie powstalo w tym connectorze")
+        return job
+
+    async def clip_context(self, scope: str, judge_id: str | None, clip_id: str) -> dict:
+        key = conn_key_for(scope, judge_id)
+        job = self._known_clip(clip_id)
+        req, state, meta = await self._with_state_request(key)
+        try:
+            try:
+                resp = await req.get(f"{self.s.portal_base_url}/api/clip-context", params={"clip_id": clip_id},
+                                     timeout=15000, max_redirects=0)
+                try:
+                    body = await resp.json()
+                except Exception:  # noqa: BLE001
+                    body = None
+                status = resp.status
+            except Exception as e:  # noqa: BLE001
+                raise ConnectorError("BASTION_UNAVAILABLE", 503, type(e).__name__) from e
+            if status == 401:
+                raise ConnectorError("BASTION_AUTH_REQUIRED", 409)
+            if status == 403:
+                raise ConnectorError("BASTION_RESOURCE_FORBIDDEN", 403)
+            if status == 404:
+                raise ConnectorError("BASTION_CLIP_NOT_FOUND", 404)
+            if status != 200 or not isinstance(body, dict):
+                raise ConnectorError("BASTION_UNAVAILABLE" if status >= 500 else "BASTION_BAD_RESPONSE",
+                                     503 if status >= 500 else 502, f"HTTP {status}")
+            await self._persist_if_changed(req, key, state, meta)
+            return {"remote_id": clip_id, "job_state": job.get("state"), **clips.summarize_context(body)}
+        finally:
+            await req.dispose()
+
+    async def clip_download(self, scope: str, judge_id: str | None, clip_id: str) -> dict:
+        """Sesja tylko do pierwszego zapytania (302). Podpisany adres pobiera OSOBNY klient bez ciasteczek."""
+        import tempfile
+        from urllib.parse import urljoin
+        key = conn_key_for(scope, judge_id)
+        job = self._known_clip(clip_id)
+        req, state, meta = await self._with_state_request(key)
+        try:
+            try:
+                resp = await req.get(f"{self.s.portal_base_url}/api/clip/{clip_id}/download", timeout=20000, max_redirects=0)
+            except Exception as e:  # noqa: BLE001
+                raise ConnectorError("BASTION_UNAVAILABLE", 503, type(e).__name__) from e
+            status, loc = resp.status, resp.headers.get("location")
+            if status == 401:
+                raise ConnectorError("BASTION_AUTH_REQUIRED", 409)
+            if status == 403:
+                raise ConnectorError("BASTION_RESOURCE_FORBIDDEN", 403)
+            if status == 404:
+                raise ConnectorError("BASTION_DOWNLOAD_NOT_READY", 404, "portal nie ma jeszcze pliku (download_available=false?)")
+            if status not in (301, 302, 303, 307, 308) or not loc:
+                raise ConnectorError("BASTION_BAD_RESPONSE", 502, f"oczekiwano przekierowania, jest HTTP {status}")
+            await self._persist_if_changed(req, key, state, meta)
+        finally:
+            await req.dispose()
+        signed = urljoin(self.s.portal_base_url + "/", loc)
+        if (urlsplit(signed).hostname or "").lower() == self.s.portal_host:
+            raise ConnectorError("DOWNLOAD_HOST_NOT_ALLOWED", 502, "przekierowanie wraca na host portalu (sesja nie pojdzie dalej)")
+        with tempfile.TemporaryDirectory(prefix="p8-") as tmp:  # plik znika zawsze, takze po bledzie
+            try:
+                dl = await clips.safe_download(signed, suffixes=self.s.download_host_suffixes,
+                                               max_bytes=self.s.max_download_mb * 1024 * 1024, dest_dir=tmp)
+                probe = await clips.ffprobe_file(dl.path, job["end_s"] - job["start_s"])
+            except clips.ClipError as e:
+                raise ConnectorError(e.code, e.status, e.detail) from e
+            except Exception as e:  # noqa: BLE001
+                raise ConnectorError("DOWNLOAD_FAILED", 502, type(e).__name__) from e
+        return {"remote_id": clip_id, "size_bytes": dl.size, "sha256": dl.sha256, "content_type": dl.content_type,
+                "download_host": dl.final_host, "redirect_hops": dl.hops, "file_deleted": True, **probe,
+                "requested": {"start_s": job["start_s"], "end_s": job["end_s"]}}
 
     def status(self, scope: str, judge_id: str | None) -> dict:
         key = conn_key_for(scope, judge_id)

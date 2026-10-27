@@ -124,6 +124,44 @@ async def conn_delete(scope: str, judge_id: str | None = None):
     return {"deleted": svc.disconnect(scope, judge_id)}
 
 
+class ClipIn(BaseModel):
+    scope: str
+    judge_id: str
+    bunny_item_id: int
+    start_s: int  # calkowite sekundy; ulamek = 422 (nic nie zaokraglamy po cichu)
+    end_s: int
+
+
+def _clip_id(v: str) -> str:
+    if not v.isdigit() or len(v) > 12:
+        raise ConnectorError("BAD_CLIP_ID", 400)
+    return v
+
+
+@app.post("/probe/clip", dependencies=[Depends(auth)])
+async def probe_clip(body: ClipIn):
+    """P8: JEDEN prywatny klip na koncie Bastionu tego polaczenia. Zlecenie wysylane raz; po timeoucie
+    needs_reconciliation (202) i zero ponowien."""
+    _judge(body.judge_id)
+    _scope(body.scope, body.judge_id)
+    if body.bunny_item_id < 1:
+        raise ConnectorError("BAD_GAME_URL", 400)
+    rec, http = await svc.clip_submit(body.scope, body.judge_id, body.bunny_item_id, body.start_s, body.end_s)
+    return JSONResponse(rec, status_code=http, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/probe/clip/{clip_id}", dependencies=[Depends(auth)])
+async def probe_clip_context(clip_id: str, scope: str, judge_id: str | None = None):
+    _scope(scope, judge_id)
+    return JSONResponse(await svc.clip_context(scope, judge_id, _clip_id(clip_id)), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/probe/clip/{clip_id}/download", dependencies=[Depends(auth)])
+async def probe_clip_download(clip_id: str, scope: str, judge_id: str | None = None):
+    _scope(scope, judge_id)
+    return JSONResponse(await svc.clip_download(scope, judge_id, _clip_id(clip_id)), headers={"Cache-Control": "no-store"})
+
+
 @app.get("/playback", dependencies=[Depends(auth)])
 async def playback(scope: str, bunny_item_id: int | None = None, game_url: str | None = None,
                    judge_id: str | None = None, include_embed: bool = True):
