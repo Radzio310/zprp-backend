@@ -594,3 +594,25 @@ def test_rozlaczenie_wstrzymuje_zadania_ale_nie_kasuje_assetow(env):
 
     job, jobs, assets = env.run(go)
     assert jobs[0]["state"] == "waiting_for_auth" and assets[0]["status"] == "ready" and assets[0]["origin_provider"] == "bastion"
+
+
+def test_kolejka_mp4_dla_admina_i_odmowa_dla_sedziego(env):
+    async def go():
+        await seed_video(env)
+        conn = await env.bastion._ensure_connection("default", None)
+        conn = await env.bastion._set_connection(conn, status="ready", external_identity_id="u-d")
+        job = await env.bastion_jobs.enqueue_clip_job(clip=clip_row(), bunny_item_id=5632, revision=1, requested_by=A, connection=conn)
+        await env.core.database.execute(env.T["mentor_bastion_clip_jobs"].update().where(
+            env.T["mentor_bastion_clip_jobs"].c.id == job["id"]).values(state="waiting_for_auth", last_error_code="BASTION_AUTH_REQUIRED"))
+        _, real_a, _ = await actors(env, A, method="GET")
+        no = await denied(env.bastion.bastion_jobs(Response(), 30, real_a))
+        _, real_admin, _ = await actors(env, ADMIN, method="GET")
+        out = await env.bastion.bastion_jobs(Response(), 30, real_admin)
+        return no, out
+
+    no, out = env.run(go)
+    assert no[:2] == (403, "BASTION_CONNECTION_FORBIDDEN")
+    assert out["counts"] == {"waiting_for_auth": 1}
+    j = out["jobs"][0]
+    assert j["can_resume"] is True and j["range"] == {"start_s": 628, "end_s": 638} and j["error_code"] == "BASTION_AUTH_REQUIRED"
+    assert "remote_clip_id" not in j and "connection_id" not in j

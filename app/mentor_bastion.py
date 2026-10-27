@@ -704,3 +704,35 @@ async def resolve_link(pair_id: str, match_id: str, body: ResolveBody, response:
         if verdict.kind in ("rate_limited", "unavailable"):
             break
     return out
+
+
+# ─── Kolejka MP4 dla panelu admina („taśmociąg” w pulsie połączenia) ─────────
+
+RESUMABLE = ("waiting_for_auth", "failed", "retryable_failed", "needs_reconciliation")
+
+
+@router.get("/bastion/jobs")
+async def bastion_jobs(response: Response, limit: int = 30, real: Actor = Depends(base_actor)):
+    """Ostatnie zadania MP4 (tylko prawdziwy admin): stan, zakres, próby, kod błędu. Bez sekretów, adresów i nazwisk.
+    „Wznów” idzie zwykłą trasą `POST /clips/{id}/media/resume`."""
+    from app.db import mentor_bastion_clip_jobs as JOBS
+
+    response.headers["Cache-Control"] = "no-store"
+    flags = _flags()
+    _need_enabled(flags)
+    if not real.is_admin:
+        raise berr(403, "BASTION_CONNECTION_FORBIDDEN", BR.MSG_CONNECTION_FORBIDDEN)
+    rows = await database.fetch_all(
+        select(JOBS.c.id, JOBS.c.clip_id, JOBS.c.pair_id, JOBS.c.match_id, JOBS.c.state, JOBS.c.attempts, JOBS.c.start_s,
+               JOBS.c.end_s, JOBS.c.last_error_code, JOBS.c.updated_at, JOBS.c.clip_revision)
+        .where(JOBS.c.state != "cancelled").order_by(JOBS.c.updated_at.desc()).limit(max(1, min(int(limit), 100))))
+    jobs = [{
+        "id": r["id"], "clip_id": r["clip_id"], "pair_id": r["pair_id"], "match_id": r["match_id"], "state": r["state"],
+        "attempts": int(r["attempts"] or 0), "range": {"start_s": int(r["start_s"]), "end_s": int(r["end_s"])},
+        "error_code": r["last_error_code"], "updated_at": _iso(r["updated_at"]), "revision": int(r["clip_revision"] or 1),
+        "can_resume": r["state"] in RESUMABLE,
+    } for r in rows]
+    counts: Dict[str, int] = {}
+    for j in jobs:
+        counts[j["state"]] = counts.get(j["state"], 0) + 1
+    return {"jobs": jobs, "counts": counts}
