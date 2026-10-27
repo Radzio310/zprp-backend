@@ -77,6 +77,7 @@ class FakeConnector:
 def env(monkeypatch, tmp_path):
     e = Env(monkeypatch, tmp_path)
     monkeypatch.setenv("BASTION_ENABLED", "true")
+    monkeypatch.setenv("BASTION_STATUS_CACHE_S", "0")
     monkeypatch.setenv("BASTION_CONNECTOR_URL", "http://connector")
     monkeypatch.setenv("BASTION_CONNECTOR_TOKEN", "t" * 40)
     monkeypatch.setenv("BASTION_LOGIN_VIEW_BASE_URL", "wss://connector.example")
@@ -616,3 +617,41 @@ def test_kolejka_mp4_dla_admina_i_odmowa_dla_sedziego(env):
     j = out["jobs"][0]
     assert j["can_resume"] is True and j["range"] == {"start_s": 628, "end_s": 638} and j["error_code"] == "BASTION_AUTH_REQUIRED"
     assert "remote_clip_id" not in j and "connection_id" not in j
+
+
+# ─── Odczyt statusu: cache i zapisy ─────────────────────────────────────────
+
+
+def test_status_cache_i_zapis_tylko_przy_zmianie(env):
+    async def go():
+        env.mp.setenv("BASTION_STATUS_CACHE_S", "15")
+        env.bastion._STATUS_CACHE.clear()
+        released = []
+        import app.mentor_bastion_jobs as J
+
+        async def spy(connection_id=None):
+            released.append(connection_id)
+            return 0
+
+        env.mp.setattr(J, "release_waiting_jobs", spy)
+        env.fake.status[f"personal-{A}"] = stored("p", external_identity_id="u-1")
+        _, real, _ = await actors(env, A, method="GET")
+        first = await env.bastion.bastion_status(Response(), real)
+        row1 = await env.core.one(select(env.T["mentor_bastion_connections"]))
+        calls1 = len([c for c in env.fake.calls if c[1] == "/connections/status"])
+        for _ in range(3):
+            await env.bastion.bastion_status(Response(), real)
+        row2 = await env.core.one(select(env.T["mentor_bastion_connections"]))
+        calls2 = len([c for c in env.fake.calls if c[1] == "/connections/status"])
+        # zmiana stanu po stronie connectora widoczna po wygaśnięciu cache (tu: unieważnienie) i zapisana
+        env.bastion._STATUS_CACHE.clear()
+        env.fake.status[f"personal-{A}"] = {"connection": "p", "status": "reauth_required"}
+        await env.bastion.bastion_status(Response(), real)
+        row3 = await env.core.one(select(env.T["mentor_bastion_connections"]))
+        return first, row1, row2, row3, calls1, calls2, released
+
+    first, row1, row2, row3, calls1, calls2, released = env.run(go)
+    assert first["personal"]["status"] == "ready" and calls1 == calls2 >= 1
+    assert row1["updated_at"] == row2["updated_at"]  # kolejne odczyty nic nie zapisują
+    assert row3["status"] == "reauth_required"
+    assert released == [row1["id"]]  # release tylko przy przejściu w ready (raz)
