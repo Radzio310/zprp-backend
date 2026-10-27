@@ -332,6 +332,65 @@ def test_agregat_proel_powroty_top():
     assert top[0]["match"]["match_id"] == "m1" and top[0]["side"] == "home" and top[0]["deficit"] == 3
 
 
+def _summary(evs, zid="m1", number="X"):
+    return P.protocol_summary(_blob(evs), {"status": "finished", "match_number": number, "zprp_match_id": zid})
+
+
+def test_zegar_nie_ruszyl_protokol_poza_statystykami_czasu():
+    # Stolikowy nie włączył zegara: wszystko na 00:00 (Szczypiorno Kalisz 37:36 Energa Start Elbląg).
+    evs = [_ev("goal", "host" if i % 3 else "guest", 0) for i in range(9)] + [_ev("penalty1", "guest", 0), _ev("teamTime", "host", 0)]
+    s = _summary(evs)
+    assert s["clock"] is False
+    assert sum(s["minutes"]) == 0 and s["first5"] == 0 and s["last5"] == 0
+    assert s["first"][1] is None and s["run"] is None and s["best5"] is None and s["decider"] is None
+    assert s["pp"] == [0, 0] and s["window"] == [0, 0] and s["to"][0] == 1 and s["to"][4] == 0
+    # Kolejność bramek nie zależy od zegara - zmiany prowadzenia i strata zostają.
+    assert s["goals"] == {"home": 6, "away": 3} and s["halves"] == [9, 0] and s["deficit"]["home"] == 1
+    f = frame([s])
+    agg = P.aggregate(f, R.Scope())
+    assert agg["matches"] == 1 and agg["coverage"]["no_clock"] == 1 and agg["coverage"]["timed"] == 0
+    assert sum(x["goals"] for x in agg["goals_by_minute"]) == 0 and agg["first5_share_pct"] is None
+    assert agg["halves"]["first"] == 9 and agg["halves"]["second_pct"] == 0.0
+    assert agg["timeouts"]["count"] == 1 and agg["timeouts"]["before_diff"] is None
+    assert agg["longest_runs"] == [] and agg["best_5min"] == []
+    kinds = {r["kind"] for r in P.records(f, R.Scope())}
+    assert "fastest_goal" not in kinds and "latest_winner" not in kinds and "longest_run" not in kinds
+
+
+def test_pojedyncze_zdarzenie_na_0000_pomijane_w_czasie():
+    # Zegar chodził, ale pierwsza bramka zapisana na 00:00 - nie trafia do minut ani do rekordu.
+    s = _summary([_ev("goal", "host", 0), _ev("goal", "guest", 90_000), _ev("goal", "host", 400_000)])
+    assert s["clock"] is True
+    assert sum(s["minutes"]) == 2 and s["minutes"][0] == 0 and s["minutes"][1] == 1
+    assert s["first"] == ["home", None]
+    assert s["halves"] == [3, 0]
+    recs = {r["kind"]: r for r in P.records(frame([s]), R.Scope())}
+    assert "fastest_goal" not in recs
+
+
+def test_najszybsza_bramka_co_najmniej_5_s():
+    fast = _summary([_ev("goal", "host", 3_000), _ev("goal", "guest", 200_000)], zid="m1", number="A")
+    ok = _summary([_ev("goal", "guest", 12_000), _ev("goal", "host", 300_000)], zid="m7", number="B")
+    recs = {r["kind"]: r for r in P.records(frame([fast, ok]), R.Scope())}
+    assert recs["fastest_goal"]["value"] == 12 and recs["fastest_goal"]["detail"] == "00:12"
+    assert recs["fastest_goal"]["match"]["match_id"] == "m7"
+    # Bramka z 3. sekundy liczy się w minutach (zegar chodził), tylko nie jest rekordem.
+    assert P.aggregate(frame([fast, ok]), R.Scope())["goals_by_minute"][0]["goals"] == 2
+
+
+def test_agregat_czasu_tylko_z_protokolow_z_zegarem():
+    timed = _summary([_ev("goal", "host", 60_000), _ev("teamTime", "guest", 100_000), _ev("goal", "guest", 120_000),
+                      _ev("goal", "host", 3_000_000)], zid="m1", number="A")
+    dead = _summary([_ev("goal", "host", 0) for _ in range(4)] + [_ev("teamTime", "guest", 0)], zid="m7", number="B")
+    agg = P.aggregate(frame([timed, dead]), R.Scope())
+    assert agg["matches"] == 2 and agg["coverage"]["timed"] == 1 and agg["coverage"]["no_clock"] == 1
+    assert sum(x["goals"] for x in agg["goals_by_minute"]) == 3
+    assert agg["timeouts"]["count"] == 2 and agg["timeouts"]["per_match"] == 1.0
+    # Efekt czasu z jednego (mierzalnego) czasu: przed -1 (gol gospodarza), po +1 (gol gościa).
+    assert agg["timeouts"]["before_diff"] == -1.0 and agg["timeouts"]["after_diff"] == 1.0
+    assert agg["halves"]["first"] == 6 and agg["halves"]["second"] == 1
+
+
 def test_faza_jak_live():
     now = datetime(2026, 10, 26, 15, 0).astimezone()
     assert P.phase({"status": "finished"}, now) == "finished"

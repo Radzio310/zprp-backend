@@ -4674,6 +4674,11 @@ from app.zprp_public_stats_tables import define_tables as _define_zprp_public_st
 
 zprp_public_stats_snapshots = _define_zprp_public_stats_tables(metadata)
 
+# Zgłoszenia błędów rysowania z przeglądarki portalu (`app/client_errors.py`) - bez danych osobowych.
+from app.client_error_tables import define_tables as _define_client_error_tables
+
+client_error_reports = _define_client_error_tables(metadata)
+
 # Funkcje produktowe BAZA pod RĘKĄ: raporty, sesje klubowe i Talenty.
 from app.pod_reka_tables import define_tables as _define_pod_reka_tables
 

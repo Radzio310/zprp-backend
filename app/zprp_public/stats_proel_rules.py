@@ -20,7 +20,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from app.zprp_public import proel_live_rules as L
 from app.zprp_public import stats_rules as R
 
-VERSION = 1
+# 2: zegar nie ruszył (zdarzenia na 00:00) = protokół poza statystykami czasu (`clock`, `to[4]`, `susp_t`).
+VERSION = 2
 SUSPENSION_MS = 120_000
 WINDOW_MS = 300_000
 GOAL_KINDS = ("goal", "seven_goal")
@@ -33,6 +34,10 @@ LIVE_FRESH = timedelta(minutes=20)
 JUST_FINISHED = timedelta(minutes=90)
 HALF_BREAK_MS = 10 * 60_000
 SIDES = ("home", "away")
+#: Tyle zdarzeń z czasem gry 00:00 = stolikowy nie włączył zegara: czasy protokołu nic nie znaczą.
+CLOCKLESS_EVENTS = 3
+#: Najszybsza bramka meczu: szybciej niż 5 s po gwizdku to błąd zapisu, nie rekord.
+FASTEST_MIN_MS = 5_000
 
 
 def _other(side: str) -> str:
@@ -51,45 +56,67 @@ def minute_bin(t: int, full_ms: int) -> int:
     return max(0, min(59, (max(0, int(t) - 1) * 60) // full_ms))
 
 
+def clock_started(evs: List[Dict[str, Any]]) -> bool:
+    """Czy zegar protokołu chodził. Kilka zdarzeń na 00:00 (albo wszystkie bramki na 00:00)
+    = stolikowy nie włączył zegara; pojedyncze 00:00 to zwykły błąd zapisu tego zdarzenia."""
+    zero = [e for e in evs if int(e.get("t") or 0) <= 0]
+    goals = [e for e in evs if e["kind"] in GOAL_KINDS]
+    if len(zero) >= CLOCKLESS_EVENTS:
+        return False
+    return not goals or any(int(g.get("t") or 0) > 0 for g in goals)
+
+
 def summarize(tl: Dict[str, Any]) -> Dict[str, Any]:
-    """Liczniki jednego przebiegu (`proel_live_rules.timeline`). Strony jak w przebiegu."""
+    """Liczniki jednego przebiegu (`proel_live_rules.timeline`). Strony jak w przebiegu.
+
+    Statystyki CZASU (minuty, końcówki, przewaga, okna kar i czasów, najlepsze 5 minut,
+    serie z minutami, najszybsza i decydująca bramka) liczą tylko zdarzenia z czasem gry
+    > 0, a protokół bez zegara (`clock` = False) w ogóle ich nie dostaje. Kolejność bramek
+    (zmiany prowadzenia, remisy, odrobione straty, kto pierwszy) zostaje - nie zależy od zegara."""
     hms = int(tl.get("half_ms") or L.DEFAULT_HALF_MIN * 60_000)
     full = 2 * hms
     evs = list(tl.get("events") or [])
     goals = [e for e in evs if e["kind"] in GOAL_KINDS]
     susp = [e for e in evs if e["kind"] in SUSPENSION_KINDS]
+    clock = clock_started(evs)
+    tgoals = [g for g in goals if g["t"] > 0] if clock else []
+    tsusp = [e for e in susp if e["t"] > 0] if clock else []
 
     minutes = [0] * 60
     halves = [0, 0]
-    for g in goals:
+    for g in tgoals:
         minutes[minute_bin(g["t"], full)] += 1
+    for g in goals:
         halves[1 if g.get("half") == 2 else 0] += 1
 
     pp = sh = 0
-    for g in goals:
-        own, opp = _short(susp, g["side"], g["t"] - 1), _short(susp, _other(g["side"]), g["t"] - 1)
+    for g in tgoals:
+        own, opp = _short(tsusp, g["side"], g["t"] - 1), _short(tsusp, _other(g["side"]), g["t"] - 1)
         if opp > own:
             pp += 1
         elif own > opp:
             sh += 1
     win_own = win_opp = 0
-    for s in susp:
-        for g in goals:
+    for s in tsusp:
+        for g in tgoals:
             if s["t"] < g["t"] <= s["t"] + SUSPENSION_MS:
                 if g["side"] == s["side"]:
                     win_own += 1
                 else:
                     win_opp += 1
 
-    to_n = to_before = to_after = to_pos = 0
+    to_n = to_t = to_before = to_after = to_pos = 0
     for e in evs:
         if e["kind"] != "timeout":
             continue
-        before = [g for g in goals if e["t"] - WINDOW_MS <= g["t"] < e["t"]]
-        after = [g for g in goals if e["t"] < g["t"] <= e["t"] + WINDOW_MS]
+        to_n += 1
+        if not clock or e["t"] <= 0:
+            continue
+        before = [g for g in tgoals if e["t"] - WINDOW_MS <= g["t"] < e["t"]]
+        after = [g for g in tgoals if e["t"] < g["t"] <= e["t"] + WINDOW_MS]
         b = sum(1 if g["side"] == e["side"] else -1 for g in before)
         a = sum(1 if g["side"] == e["side"] else -1 for g in after)
-        to_n += 1
+        to_t += 1
         to_before += b
         to_after += a
         to_pos += 1 if a - b > 0 else 0
@@ -116,7 +143,7 @@ def summarize(tl: Dict[str, Any]) -> Dict[str, Any]:
 
     run = None
     i = 0
-    while i < len(goals):
+    while clock and i < len(goals):
         j = i
         while j + 1 < len(goals) and goals[j + 1]["side"] == goals[i]["side"]:
             j += 1
@@ -127,7 +154,7 @@ def summarize(tl: Dict[str, Any]) -> Dict[str, Any]:
 
     best5 = None
     for side in SIDES:
-        ts = [g["t"] for g in goals if g["side"] == side]
+        ts = [g["t"] for g in tgoals if g["side"] == side]
         k = 0
         for j, t in enumerate(ts):
             while ts[k] < t - WINDOW_MS + 1:
@@ -144,7 +171,7 @@ def summarize(tl: Dict[str, Any]) -> Dict[str, Any]:
             before = goals[k - 1]["score"] if k > 0 else {"home": 0, "away": 0}
             own = before[winner] - before[_other(winner)]
             if own <= 0:
-                if goals[k]["side"] == winner:
+                if goals[k]["side"] == winner and clock and goals[k]["t"] > 0:
                     decider = [winner, goals[k]["t"]]
                 break
     ht_diff = ht_score["home"] - ht_score["away"]
@@ -160,8 +187,11 @@ def summarize(tl: Dict[str, Any]) -> Dict[str, Any]:
         "reds": sum(1 for e in evs if e["kind"] in ("red", "blue")),
         "pp": [pp, sh],
         "window": [win_own, win_opp],
-        "to": [to_n, to_before, to_after, to_pos],
-        "first": [goals[0]["side"], goals[0]["t"]] if goals else None,
+        "to": [to_n, to_before, to_after, to_pos, to_t],
+        "susp_t": len(tsusp),
+        # Kto pierwszy - z kolejności; czas pierwszej bramki tylko z działającym zegarem.
+        "first": [goals[0]["side"], goals[0]["t"] if clock and goals[0]["t"] > 0 else None] if goals else None,
+        "clock": clock,
         "ht": "home" if ht_diff > 0 else "away" if ht_diff < 0 else None,
         "lead_changes": lead_changes,
         "ties": ties,
@@ -278,29 +308,36 @@ def aggregate(frame: "R.Frame", scope: "R.Scope") -> Dict[str, Any]:
     n = len(items)
     minutes = [0] * 60
     halves = [0, 0]
-    sev_a = sev_g = susp = pp = sh = w_own = w_opp = 0
-    to_n = to_b = to_a = to_pos = 0
+    sev_a = sev_g = susp = susp_t = pp = sh = w_own = w_opp = 0
+    to_n = to_t = to_b = to_a = to_pos = 0
+    timed = 0
     lead = ties = 0
     first_n = first_w = ht_n = ht_w = comebacks = 0
     biggest = None
     backs: List[Tuple[int, str, "R.Match"]] = []
     runs, best5 = [], []
     for s, m in items:
-        for i, v in enumerate(s["minutes"]):
-            minutes[i] += v
+        clock = s.get("clock", True) is not False
         halves[0] += s["halves"][0]
         halves[1] += s["halves"][1]
         sev_a += s["sevens"][0]
         sev_g += s["sevens"][1]
         susp += s["susp"]
-        pp += s["pp"][0]
-        sh += s["pp"][1]
-        w_own += s["window"][0]
-        w_opp += s["window"][1]
         to_n += s["to"][0]
-        to_b += s["to"][1]
-        to_a += s["to"][2]
-        to_pos += s["to"][3]
+        if clock:
+            # Statystyki czasu tylko z protokołów, w których zegar chodził.
+            timed += 1
+            for i, v in enumerate(s["minutes"]):
+                minutes[i] += v
+            susp_t += s.get("susp_t", s["susp"])
+            pp += s["pp"][0]
+            sh += s["pp"][1]
+            w_own += s["window"][0]
+            w_opp += s["window"][1]
+            to_t += s["to"][4] if len(s["to"]) > 4 else s["to"][0]
+            to_b += s["to"][1]
+            to_a += s["to"][2]
+            to_pos += s["to"][3]
         lead += s["lead_changes"]
         ties += s["ties"]
         win = _winner(m, s)
@@ -332,19 +369,21 @@ def aggregate(frame: "R.Frame", scope: "R.Scope") -> Dict[str, Any]:
     return {
         "matches": n,
         "coverage": {"protocols": n, "played_matches": len(played), "pct": R.pct(n, len(played)),
+                     # „bez zegara": protokoły poza statystykami czasu (zdarzenia na 00:00).
+                     "timed": timed, "no_clock": n - timed,
                      "by_category": [{"key": k, "label": R.CATEGORY_LABELS[k], "protocols": by_cat[k][0], "played": by_cat[k][1],
                                       "pct": R.pct(by_cat[k][0], by_cat[k][1])} for k in R.CATEGORY_LABELS if k in by_cat]},
         "goals_by_minute": [{"minute": i + 1, "goals": v} for i, v in enumerate(minutes)],
         "goals_by_5min": [{"from": i * 5, "to": i * 5 + 5, "goals": sum(minutes[i * 5:i * 5 + 5])} for i in range(12)],
-        "halves": {"first": halves[0], "second": halves[1], "second_pct": R.pct(halves[1], goals)},
+        "halves": {"first": halves[0], "second": halves[1], "second_pct": R.pct(halves[1], halves[0] + halves[1])},
         "last5_share_pct": R.pct(sum(minutes[55:]), goals),
         "first5_share_pct": R.pct(sum(minutes[:5]), goals),
         "sevens": {"attempts": sev_a, "goals": sev_g, "pct": R.pct(sev_g, sev_a), "per_match": R.avg(sev_a, n)},
         "suspensions": {"count": susp, "per_match": R.avg(susp, n), "pp_goals": pp, "sh_goals": sh,
-                        "pp_goal_pct": R.pct(pp, goals), "window_own": R.avg(w_own, susp), "window_opp": R.avg(w_opp, susp),
-                        "pp_per_match": R.avg(pp, n)},
-        "timeouts": {"count": to_n, "per_match": R.avg(to_n, n), "before_diff": R.avg(to_b, to_n), "after_diff": R.avg(to_a, to_n),
-                     "avg_swing": R.avg(to_a - to_b, to_n), "positive_pct": R.pct(to_pos, to_n)},
+                        "pp_goal_pct": R.pct(pp, goals), "window_own": R.avg(w_own, susp_t), "window_opp": R.avg(w_opp, susp_t),
+                        "pp_per_match": R.avg(pp, timed)},
+        "timeouts": {"count": to_n, "per_match": R.avg(to_n, n), "before_diff": R.avg(to_b, to_t), "after_diff": R.avg(to_a, to_t),
+                     "avg_swing": R.avg(to_a - to_b, to_t), "positive_pct": R.pct(to_pos, to_t)},
         "comebacks": {"matches": comebacks, "pct": R.pct(comebacks, n),
                       "biggest": {"match": _ref(biggest[2], frame), "side": biggest[1], "deficit": biggest[0]} if biggest else None,
                       "top": [{"match": _ref(m, frame), "side": w, "deficit": d}
@@ -362,7 +401,9 @@ def aggregate(frame: "R.Frame", scope: "R.Scope") -> Dict[str, Any]:
 def records(frame: "R.Frame", scope: "R.Scope") -> List[Dict[str, Any]]:
     items = [(frame.proel[m.match_id], m) for m in R.scoped(frame, scope) if _usable(m) and m.match_id in frame.proel]
     out: List[Dict[str, Any]] = []
-    firsts = [(s["first"], m) for s, m in items if s.get("first")]
+    # Najszybsza bramka: tylko z działającym zegarem i nie szybciej niż 5 s (00:00 = zegar stał).
+    firsts = [(s["first"], m) for s, m in items
+              if s.get("clock", True) is not False and s.get("first") and s["first"][1] is not None and s["first"][1] >= FASTEST_MIN_MS]
     if firsts:
         f, m = min(firsts, key=lambda x: (x[0][1], x[1].match_id))
         out.append(R.record("fastest_goal", "Najszybsza bramka meczu", round(f[1] / 1000), "s", _ref(m, frame),

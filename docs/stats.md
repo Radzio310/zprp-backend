@@ -257,7 +257,7 @@ Tylko publiczne protokoły ProEl (bez testów i szkoleń) zakończone/zatwierdzo
 powiązane z meczem ZPRP z zakresu. Zero danych osobowych - wyłącznie zdarzenia.
 
 ```json
-{"coverage": {"protocols": 800, "played_matches": 9000, "pct": 8.9,
+{"coverage": {"protocols": 800, "played_matches": 9000, "pct": 8.9, "timed": 790, "no_clock": 10,
               "by_category": [{"key": "OS", "label": "Superliga", "protocols": 90, "played": 100, "pct": 90.0}]},
  "goals_by_minute": [{"minute": 1, "goals": 410}],
  "halves": {"first": 18000, "second": 19500, "second_pct": 52.0},
@@ -296,6 +296,16 @@ Sekcje `/season`, `/geo`, `/trends` (poza rekordami ProEl) liczą wyłącznie wy
 * Protokół łączy się z meczem ZPRP po `zprp_match_id` (z wiersza albo `matchConfig.matchId`),
   a bez niego po numerze meczu i dniu z protokołu. Niepołączony protokół nie liczy się nigdzie.
 * Minuta to czas gry z protokołu; dla połów 20/25 min histogram jest skalowany do 60.
+* Czas gry 00:00 = zegar stał. Zdarzenie z czasem ≤ 0 nie wchodzi do statystyk CZASU
+  (minuty, pierwsze/ostatnie 5 minut, przewaga i okna kar, efekt czasu drużyny, najlepsze
+  5 minut, serie z minutami, najszybsza i decydująca bramka). Protokół z co najmniej 3
+  zdarzeniami na 00:00 (albo ze wszystkimi bramkami na 00:00) to „bez zegara”
+  (`coverage.no_clock`, reszta = `coverage.timed`): wypada ze statystyk czasu w całości,
+  a zostaje w tym, co wynika z kolejności bramek (kto pierwszy, zmiany prowadzenia,
+  remisy, powroty, prowadzenie do przerwy, karne, liczba kar i czasów).
+  `per_match` kar/czasów dzieli przez wszystkie protokoły, przewagę i efekty czasu przez
+  `timed`. Najszybsza bramka meczu: co najmniej 5 s (`stats_proel_rules.FASTEST_MIN_MS`).
+  Zmiana reguł = `stats_proel_rules.VERSION` + 1: zapisane streszczenia liczą się od nowa.
   Dogrywki (rzadkie, puchary) wpadają do ostatniego przedziału.
 * `ticker.at` jest szacunkiem (zapis protokołu − czas gry od bramki, + 10 min przerwy dla
   bramek z 1. połowy oglądanych w 2.). Kolejność między meczami może się minimalnie różnić.
