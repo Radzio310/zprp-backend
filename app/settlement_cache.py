@@ -33,6 +33,7 @@ w TYM procesie nieaktualny wynik nie wyjdzie już ani razu.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import gzip
 import hashlib
 import json
@@ -53,6 +54,25 @@ MAX_ENTRIES = 160
 LATE_BUMPS = (0.4, 2.5)
 #: Odpowiedź krótsza niż tyle bajtów idzie bez kompresji.
 GZIP_FROM = 1400
+
+# --- Rozgrzewanie (27.10.2026: „Przeliczam rozliczenia" trwało za długo) ---
+#
+# Pamięć oddaje wynik od ręki, ale PIERWSZE pytanie po jej wygaśnięciu (TTL albo
+# zapis) czekało na pełne liczenie okręgu. Teraz wyniki, które ktoś niedawno
+# oglądał, liczą się W TLE: tuż przed końcem TTL i chwilę po zapisie. Kolejne
+# otwarcie zakładki dostaje gotowe dane - nigdy starsze niż dotąd, bo stary
+# wynik dalej żyje tylko do swojego TTL albo do zapisu.
+
+#: Rodzaje rozgrzewane - to, o co pyta zakładka Rozliczenia przy otwarciu.
+WARM_KINDS = frozenset({"http:summary", "http:judges", "http:months", "http:clubs_bundle"})
+#: Rozgrzewamy tylko to, o co ktoś pytał w ciągu tylu sekund.
+HOT_SECONDS = 15 * 60.0
+#: Liczymy na zapas, gdy do końca TTL zostało mniej niż tyle sekund.
+WARM_BEFORE_TTL = 90.0
+#: Po zapisie czekamy, aż okręg ucichnie - pobieranie z ZPRP pisze serią.
+QUIET_SECONDS = 8.0
+#: Co tyle sekund pętla rozgrzewania przegląda listę.
+WARM_EVERY = 10.0
 
 #: Tabele, z których liczą się rozliczenia sędziów i panel klubów. Zapis do
 #: którejkolwiek unieważnia policzone wyniki okręgu (albo wszystkich okręgów,
@@ -124,7 +144,16 @@ _ALL = "*"
 _versions: dict[tuple[str, str], int] = {}
 _store: "OrderedDict[tuple, _Entry]" = OrderedDict()
 _inflight: dict[tuple, "asyncio.Future[Any]"] = {}
-_stats = {"hits": 0, "misses": 0, "bumps": 0}
+_stats = {"hits": 0, "misses": 0, "bumps": 0, "warmed": 0}
+#: Klucz wyniku -> (kiedy ktoś o niego pytał, jak go policzyć). Tylko WARM_KINDS.
+_hot: dict[tuple, tuple[float, Callable[[], Awaitable[Any]]]] = {}
+#: Okręg -> chwila ostatniego podbicia wersji (dla QUIET_SECONDS).
+_last_bump: dict[str, float] = {}
+#: Liczenie na zapas: wpisy zapamiętane przed tą chwilą traktujemy jak martwe,
+#: żeby nowy wynik nie powstał ze starego (TTL nie może się w ten sposób wydłużać).
+_fresh_since: contextvars.ContextVar[float] = contextvars.ContextVar(
+    "settlement_cache_fresh_since", default=float("-inf")
+)
 
 
 class _Entry:
@@ -171,6 +200,7 @@ def bump(province: Any = None, *, base: bool = True, reason: str = "") -> None:
         scopes = ("all", "base") if base else ("all",)
         for scope in scopes:
             _versions[(key, scope)] = _versions.get((key, scope), 0) + 1
+        _last_bump[key] = time.monotonic()
         _stats["bumps"] += 1
         if reason:
             logger.debug("[settlement_cache] %s: %s", key, reason)
@@ -216,6 +246,8 @@ def clear() -> None:
     _late.clear()
     _store.clear()
     _inflight.clear()
+    _hot.clear()
+    _last_bump.clear()
     for name in _stats:
         _stats[name] = 0
 
@@ -225,7 +257,11 @@ def stats() -> dict[str, int]:
 
 
 def _alive(entry: _Entry, current: tuple[int, int], now: float) -> bool:
-    return entry.version == current and now - entry.stored_at < TTL_SECONDS
+    return (
+        entry.version == current
+        and now - entry.stored_at < TTL_SECONDS
+        and entry.stored_at >= _fresh_since.get()
+    )
 
 
 def peek(kind: str, province: Any, params: Hashable = ()) -> Any:
@@ -255,6 +291,8 @@ async def remember(
     current = version(province, _scope(kind))
     key = (kind, _key_of(province), params)
     now = time.monotonic()
+    if _warmable(kind, params):
+        _hot[key] = (now, compute)
     entry = _store.get(key)
     if entry is not None and _alive(entry, current, now):
         _store.move_to_end(key)
@@ -301,6 +339,73 @@ async def remember(
         while len(_store) > MAX_ENTRIES:
             _store.popitem(last=False)
     return value
+
+
+def _warmable(kind: str, params: Hashable) -> bool:
+    """
+    Czy rozgrzewać ten wynik. Siatka miesięcy JEDNEGO sędziego (aplikacja,
+    pierwszy parametr to numer) - nie: to setki osobnych wyników, a każdy
+    sędzia otwiera swój rzadko. Rozgrzewamy widok okręgu.
+    """
+    if kind not in WARM_KINDS:
+        return False
+    if kind == "http:months" and isinstance(params, tuple) and params and params[0]:
+        return False
+    return True
+
+
+def _needs_warming(key: tuple, now: float) -> bool:
+    kind, province, _params = key
+    entry = _store.get(key)
+    if entry is not None and entry.version == version(province, _scope(kind)):
+        if now - entry.stored_at < TTL_SECONDS - WARM_BEFORE_TTL:
+            return False
+    quiet = max(_last_bump.get(province, float("-inf")), _last_bump.get(_ALL, float("-inf")))
+    return now - quiet >= QUIET_SECONDS
+
+
+async def warm_once() -> int:
+    """
+    Jedno przejście rozgrzewania: liczy na zapas gorące wyniki, którym kończy
+    się TTL albo które unieważnił zapis. Po kolei, nie naraz - w tle ma być
+    lekko. Zwraca, ile policzyło.
+    """
+    now = time.monotonic()
+    warmed = 0
+    for key, (asked, compute) in list(_hot.items()):
+        if now - asked > HOT_SECONDS:
+            _hot.pop(key, None)
+            continue
+        if not _needs_warming(key, time.monotonic()):
+            continue
+        kind, province, params = key
+        started = time.monotonic()
+        token = _fresh_since.set(started - (TTL_SECONDS - WARM_BEFORE_TTL))
+        try:
+            await remember(kind, province, params, compute)
+            # `remember` zapisał nas jako pytających - to nie było pytanie.
+            _hot[key] = (asked, compute)
+            warmed += 1
+            _stats["warmed"] += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[settlement_cache] rozgrzewanie %s %s", kind, province)
+        finally:
+            _fresh_since.reset(token)
+    return warmed
+
+
+async def run_warmer() -> None:
+    """Pętla rozgrzewania - jedna na proces, start w `main.py`."""
+    while True:
+        await asyncio.sleep(WARM_EVERY)
+        try:
+            await warm_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - pętla nie może umrzeć
+            logger.exception("[settlement_cache] pętla rozgrzewania")
 
 
 # ---------------------------------------------------------------------------

@@ -892,6 +892,8 @@ _standings_sync_task: asyncio.Task | None = None
 _email_grace_task: asyncio.Task | None = None
 _mp_snapshot_task: asyncio.Task | None = None
 _province_match_monitor_task: asyncio.Task | None = None
+# Rozgrzewanie policzonych rozliczeń w tle (`app/settlement_cache.run_warmer`).
+_settlement_warm_task: asyncio.Task | None = None
 _exam_promotion_task: asyncio.Task | None = None
 _alarm_scan_task: asyncio.Task | None = None
 _province_offtime_sync_task: asyncio.Task | None = None
@@ -1492,6 +1494,10 @@ async def startup():
     _push_task = asyncio.create_task(run_push_scheduler())
     _deploy_push_test_task = asyncio.create_task(_run_deploy_push_test_safely())
     _province_match_monitor_task = asyncio.create_task(run_province_match_monitor())
+    global _settlement_warm_task
+    from app.settlement_cache import run_warmer as run_settlement_warmer
+
+    _settlement_warm_task = asyncio.create_task(run_settlement_warmer())
     _province_offtime_sync_task = asyncio.create_task(run_province_offtime_sync())
     _zprp_unavailability_mail_task = asyncio.create_task(run_overlap_mail_scheduler())
     _calendar_feed_task = asyncio.create_task(run_calendar_feed_sync())
@@ -1670,6 +1676,13 @@ async def shutdown():
         _province_match_monitor_task.cancel()
         try:
             await _province_match_monitor_task
+        except asyncio.CancelledError:
+            pass
+
+    if _settlement_warm_task:
+        _settlement_warm_task.cancel()
+        try:
+            await _settlement_warm_task
         except asyncio.CancelledError:
             pass
 

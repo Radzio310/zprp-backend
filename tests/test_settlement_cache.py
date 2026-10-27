@@ -9,6 +9,7 @@ zapisie - to sprawdzają testy niżej.
 import asyncio
 import gzip
 import json
+from types import SimpleNamespace
 
 from sqlalchemy import Column, Integer, MetaData, String, Table, delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -274,3 +275,106 @@ def test_wplata_nie_czyta_faktow_okregu_od_nowa():
     assert clubs is None
     SC.bump("SLASKIE")  # jawne podbicie bez zakresu rusza wszystko
     assert SC.peek("base", "SLASKIE") is None
+
+
+# ---------------------------------------------------------------------------
+# Rozgrzewanie (27.10.2026): wynik, o który ktoś pytał, liczy się w tle przed
+# końcem TTL i po zapisie - ale NIGDY nie powstaje ze starego wyniku.
+# ---------------------------------------------------------------------------
+
+
+def test_rozgrzewanie_liczy_od_nowa_tuz_przed_koncem_ttl(monkeypatch):
+    calls = []
+
+    async def compute():
+        calls.append(1)
+        return len(calls)
+
+    async def scenario():
+        clock = [1000.0]
+        monkeypatch.setattr(SC, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+        await SC.remember("http:summary", "SLASKIE", (2026, 10), compute)
+        clock[0] += 30
+        assert await SC.warm_once() == 0  # świeży - nic do roboty
+        clock[0] += SC.TTL_SECONDS - SC.WARM_BEFORE_TTL
+        assert await SC.warm_once() == 1
+        return await SC.remember("http:summary", "SLASKIE", (2026, 10), compute)
+
+    assert run(scenario()) == 2
+    assert len(calls) == 2  # pytanie po rozgrzaniu nie liczy trzeci raz
+
+
+def test_rozgrzewanie_nie_skleja_nowego_wyniku_ze_starego(monkeypatch):
+    """Wewnętrzny wynik (miesiąc) też musi zostać policzony od nowa."""
+    inner = []
+
+    async def month():
+        inner.append(1)
+        return {"suma": len(inner)}
+
+    async def summary():
+        return {"z miesiaca": (await SC.remember("month", "SLASKIE", (2026, 10), month))["suma"]}
+
+    async def scenario():
+        clock = [1000.0]
+        monkeypatch.setattr(SC, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+        await SC.remember("http:summary", "SLASKIE", (2026, 10), summary)
+        clock[0] += SC.TTL_SECONDS - SC.WARM_BEFORE_TTL + 1
+        await SC.warm_once()
+        return await SC.remember("http:summary", "SLASKIE", (2026, 10), summary)
+
+    assert run(scenario()) == {"z miesiaca": 2}
+
+
+def test_po_zapisie_rozgrzewa_dopiero_gdy_okreg_ucichnie(monkeypatch):
+    calls = []
+
+    async def compute():
+        calls.append(1)
+        return len(calls)
+
+    async def scenario():
+        clock = [1000.0]
+        monkeypatch.setattr(SC, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+        await SC.remember("http:summary", "SLASKIE", (2026, 10), compute)
+        SC.bump("SLASKIE")
+        clock[0] += 1
+        first = await SC.warm_once()  # seria zapisów trwa
+        clock[0] += SC.QUIET_SECONDS
+        second = await SC.warm_once()
+        return first, second
+
+    assert run(scenario()) == (0, 1)
+    assert len(calls) == 2
+
+
+def test_nie_rozgrzewa_tego_o_co_dawno_nikt_nie_pytal(monkeypatch):
+    calls = []
+
+    async def compute():
+        calls.append(1)
+        return 1
+
+    async def scenario():
+        clock = [1000.0]
+        monkeypatch.setattr(SC, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+        await SC.remember("http:summary", "SLASKIE", (2026, 10), compute)
+        clock[0] += SC.HOT_SECONDS + 1
+        return await SC.warm_once()
+
+    assert run(scenario()) == 0
+    assert len(calls) == 1
+
+
+def test_siatka_jednego_sedziego_nie_jest_rozgrzewana():
+    async def compute():
+        return 1
+
+    async def scenario():
+        await SC.remember("http:months", "SLASKIE", ("12345", False, False, True), compute)
+        await SC.remember("http:months", "SLASKIE", ("", False, False, False), compute)
+        await SC.remember("month", "SLASKIE", (2026, 10), compute)
+
+    run(scenario())
+    assert [key[0] for key in SC._hot] == ["http:months"]
+    assert list(SC._hot)[0][2][0] == ""

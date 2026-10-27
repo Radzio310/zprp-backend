@@ -34,6 +34,7 @@ from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import settlement_origin as O
+from app import settlement_progress as SP
 from app import settlement_rates as R
 from app.db import (
     app_migrations,
@@ -360,6 +361,7 @@ async def _collect_outside(
     beat: Any,
     own_prefixes: Optional[set[str]] = None,
     lists_sink: Optional[dict[str, list]] = None,
+    on_judge: Optional[Any] = None,
 ) -> tuple[list[dict], dict[str, bool]]:
     """
     Mecze z prywatnych list sedziow - sezon po sezonie, sedzia po sedzi.
@@ -386,7 +388,10 @@ async def _collect_outside(
     collected: list[dict] = []
     season_ok = {label: True for label in seasons}
 
-    for judge_id, judge in judges.items():
+    for position, (judge_id, judge) in enumerate(judges.items()):
+        if on_judge is not None:
+            # Licznik dla zasłony w panelu („sędzia 12 z 80").
+            on_judge(position + 1, len(judges))
         name = _s(judge.get("full_name"))
         if not name:
             continue
@@ -1155,7 +1160,11 @@ async def refresh_province(
 
     pulse_task = asyncio.create_task(pulse())
 
+    def step(stage: str, done: Optional[int] = None, total: Optional[int] = None) -> None:
+        SP.run_step(run_id, stage, done=done, total=total)
+
     try:
+        step("login")
         # Nasze przedrostki numerow i poprawka historii zapisanej stara regula -
         # sama baza, bez ZPRP (patrz `fix_history`).
         own = await _own_prefixes(province)
@@ -1169,6 +1178,7 @@ async def refresh_province(
         ) as client, AsyncClient(follow_redirects=True, timeout=30.0) as public:
             cookies = await _login_zprp_and_get_cookies(client, credentials[0], credentials[1])
 
+            step("judges")
             judges = await _load_judges(client, cookies, province)
             if not judges:
                 return await finish(False, error="Nie udało się odczytać listy sędziów okręgu")
@@ -1206,6 +1216,7 @@ async def refresh_province(
 
             # Terminarz okregu tylko z sezonow tego przebiegu - reszta zostaje,
             # jak jest (patrz `_store`).
+            step("matches", 0, len(judges))
             district = [
                 row for row in await _collect_district(province, judges, own)
                 if in_scope(row.get("match_at"), scope, current=current)
@@ -1230,6 +1241,7 @@ async def refresh_province(
                     beat=beat,
                     own_prefixes=own,
                     lists_sink=archive_lists,
+                    on_judge=lambda done, total: step("matches", done, total),
                 )
 
             rows = district + outside
@@ -1242,6 +1254,7 @@ async def refresh_province(
                 match_id = _s(str(row["match_key"]).split(":", 1)[-1])
                 if match_id and match_id not in wanted_ids:
                     wanted_ids[match_id] = row.get("match_at")
+            step("venues", 0, len(wanted_ids))
             venues = await _resolve_venues(public, wanted_ids)
             for row in rows:
                 match_id = _s(str(row["match_key"]).split(":", 1)[-1])
@@ -1268,6 +1281,7 @@ async def refresh_province(
                     judges[judge_id]["city"] = city
 
             # --- odleglosci ---
+            step("distances")
             distance_row = await database.fetch_one(
                 select(okreg_distances.c.content).where(okreg_distances.c.province.in_(spellings(province)))
             )
@@ -1336,6 +1350,7 @@ async def refresh_province(
                 row["distance_km"] = hit[0] if hit else None
                 row["distance_source"] = hit[1] if hit else "none"
 
+            step("store")
             await _store(province, rows, judges, scope=scope, current=current)
 
             # Nazwiska dla sedziow, ktorych lista okregu nie nazwala (w zestawieniu
@@ -1397,6 +1412,7 @@ async def refresh_province(
         return await finish(False, error=str(exc)[:500])
     finally:
         pulse_task.cancel()
+        SP.run_end(run_id)
 
 
 

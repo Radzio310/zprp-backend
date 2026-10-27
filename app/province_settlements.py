@@ -23,6 +23,7 @@ from sqlalchemy import and_, func, select
 from app import bomb_penalties as BPEN
 from app import settlement_bombs as SB
 from app import settlement_cache as SC
+from app import settlement_progress as SP
 from app import settlement_engine as E
 from app import settlement_buckets as B
 from app import settlement_rates as R
@@ -80,6 +81,50 @@ MODULES = ("stats", "settlements", "tables", "proel_table_write")
 #: Tyle najdluzej zestawienie czeka na nazwiska z obsad meczow (patrz
 #: `settlement_names`). Co nie zdazy, dojdzie przy nastepnym otwarciu.
 NAME_FILL_SECONDS = 6.0
+
+#: Tyle najdluzej czeka zestawienie CALEGO okregu (27.10.2026). Pytanie do API
+#: nie jest przy tym przerywane - konczy sie w tle (`_fill_names_shielded`).
+#: Wczesniej limit przerywal pytanie, zanim zapamietalo probe, wiec wolne API
+#: kosztowalo PELNE 6 s przy kazdym przeliczeniu miesiaca z bezimiennym sedzia.
+NAME_WAIT_SECONDS = 2.0
+
+#: Dociaganie nazwisk w toku: (okreg, numery) -> zadanie.
+_name_fills: dict[tuple, "asyncio.Task[int]"] = {}
+
+
+async def _fill_names_job(province: str, only: frozenset) -> int:
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        found = await fill_missing_names(province, only=set(only), limit=20)
+    except Exception as exc:
+        logger.warning("[settlement] %s: nazwiska z obsad meczow: %s", province, exc)
+        return 0
+    if found and loop.time() - started >= NAME_WAIT_SECONDS:
+        # Zestawienie nie doczekalo - policzone bez tych nazwisk, wiec liczymy
+        # je jeszcze raz. Fakty okregu zostaja: nazwiska dociagnie liczenie.
+        SC.bump(province, base=False, reason="nazwiska z API ZPRP po czasie")
+    return found
+
+
+async def _fill_names_shielded(province: str, only: set[str]) -> None:
+    """
+    Nazwiska z obsad meczow, czekajac najwyzej `NAME_WAIT_SECONDS`.
+
+    Pytanie do API idzie w osobnym zadaniu i limit go NIE przerywa: dokonczy
+    sie w tle, zapamieta probe i nazwiska, a nastepne liczenie ma je od reki.
+    Dwa liczenia o ten sam zestaw numerow czekaja na jedno pytanie.
+    """
+    slot = (province, frozenset(only))
+    task = _name_fills.get(slot)
+    if task is None or task.done():
+        task = asyncio.create_task(_fill_names_job(province, slot[1]))
+        _name_fills[slot] = task
+        task.add_done_callback(lambda _done, slot=slot: _name_fills.pop(slot, None))
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=NAME_WAIT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.info("[settlement] %s: nazwiska z obsad koncza sie w tle", province)
 
 
 def require_province(province: str) -> str:
@@ -305,6 +350,7 @@ async def _base(province: str) -> dict:
     province = require_province(province)
 
     async def compute() -> dict:
+        SP.stage("facts")
         central_versions, province_versions = await _versions(province)
         names = await _judge_names(province)
         everything = await _assignments(province)
@@ -375,6 +421,7 @@ async def load_settlement(
         if tuple(span) != (date_from, date_to):
             split_period = f"g:{span[0].isoformat()}"
         date_from, date_to = span
+    SP.stage("facts")
     base = await _base(province)
     central_versions = base["central_versions"]
     province_versions = base["province_versions"]
@@ -402,26 +449,21 @@ async def load_settlement(
         and (item.match_at is None or date_from <= item.match_at.date() <= date_to)
     }
     if unnamed:
-        try:
-            await asyncio.wait_for(
-                fill_missing_names(province, only=unnamed, limit=20),
-                timeout=NAME_FILL_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            logger.info("[settlement] %s: nazwiska z obsad nie zdazyly w limicie", province)
-        except Exception as exc:
-            logger.warning("[settlement] %s: nazwiska z obsad meczow: %s", province, exc)
+        SP.stage("names")
+        await _fill_names_shielded(province, unnamed)
         fresh = await _judge_names(province)
         # Dociągnięte nazwiska trafiają też do wspólnych faktów okręgu - inny
         # miesiąc nie będzie o nie pytał API drugi raz.
         base["names"].update(fresh)
         names = {**names, **fresh}
 
+    SP.stage("rates")
     entries = await asyncio.to_thread(E.settle_judges, assignments, province=province, central_versions=central_versions, province_versions=province_versions, now=now, date_from=date_from, date_to=date_to, include_future=include_future, include_zprp=include_zprp, names=names)
     # Klub moze byc prowadzony w panelu, ale rozliczac obsade poza okregiem.
     # Najpierw rozpoznajemy takie mecze na pelnym wyliczeniu, potem liczymy obie
     # grupy ponownie. To wazne dla podatku miesiecznego i wspolnych dojazdow.
     probe = [match for entry in entries for match in entry.matches]
+    SP.stage("clubs")
     if scope is None:
         if judge_ids:
             # Platnika TURNIEJU rozstrzyga caly dzien w hali, nie mecze jednego
@@ -472,6 +514,7 @@ async def load_settlement(
             outside_entries = E.settle_judges(
                 [item for item in assignments if item.match_key in outside_keys], **common
             )
+    SP.stage("extras")
     # Obsady ZPRP liczymy ZAWSZE, niezaleznie od przelacznika: wylaczone musza
     # sie wytlumaczyc („1 mecz poza rozliczeniem okregu"), zamiast znikac bez
     # slowa, a przelacznik pokazuje, ile ich dojdzie.
@@ -989,6 +1032,9 @@ async def status(province: str = Query(...)):
             # Jakie sezony objal przebieg - pierwszy i reczny potrafia ich
             # miec kilkanascie, zwykly tylko biezacy.
             "seasons": [s for s in str(run.get("seasons") or "").split(",") if s],
+            # Etap trwajacego przebiegu („sedzia 12 z 80") - dla zaslony w panelu.
+            # None po zakonczeniu albo gdy przebieg biegnie w innym procesie.
+            "progress": SP.run_snapshot(run.get("id")) if not run.get("finished_at") else None,
         } if run else None,
     }
 
@@ -1015,45 +1061,109 @@ async def summary(
     hint = (await suggestion(key, "zestawienie", await season_of_period(key, year, month, period_id)))["number"]
 
     async def build() -> dict:
-        data = await cached_settlement(
-            key, year=year, month=month, include_future=include_future, include_zprp=include_zprp,
-            period_id=period_id,
-        )
-        return {
-            "province": data["province"],
-            "period": data["period"],
-            "include_future": include_future,
-            "include_zprp": include_zprp,
-            "totals": data["totals"],
-            "entries": [_entry_json(e, with_matches=False) for e in data["entries"]],
-            "outside_district": {
-                "clubs": data["outside_district"]["clubs"],
-                "totals": data["outside_district"]["totals"],
-                "entries": [
-                    _entry_json(e, with_matches=False)
-                    for e in data["outside_district"]["entries"]
-                ],
-            },
-            "zprp": _zprp_summary(data["zprp"], included=include_zprp),
-            # Poza wyplata z innych powodow niz ZPRP (06.10.2026).
-            "not_paid": {
-                "excluded": len(data.get("excluded") or []),
-                "bombs": len(data.get("bombs") or []),
-                "penalty": round(sum(p["applied"] for p in (data.get("penalties") or {}).values()), 2),
-                "penalty_left": round(sum(p["left"] for p in (data.get("penalties") or {}).values()), 2),
-            },
-            "document_number_hint": hint,
-            # Mecze z podpowiedzią „zdjąć?" w całym okresie (06.10.2026).
-            "to_decide": sum(1 for e in data["entries"] for m in e.matches if m.exclude_hint),
-            # Kontrola nazwisk (07.10.2026): numer, pod ktorym panel okregu ma
-            # kogos innego niz ZPRP, i to samo nazwisko pod kilkoma numerami.
-            "name_check": await _name_check(key, data),
-        }
+        # Postęp liczenia dla zasłony w panelu - `GET /progress` z tym samym kluczem.
+        async with SP.tracking(
+            _summary_progress_key(key, year, month, period_id, include_future, include_zprp),
+            label=f"{key} {year}-{int(month):02d} {period_id or ''}".strip(),
+        ):
+            return await _summary_payload(
+                key, year, month, period_id, include_future, include_zprp, hint
+            )
 
     pack = await SC.packed(
         "summary", key, (int(year), int(month), str(period_id or ""), bool(include_future), bool(include_zprp), hint), build
     )
     return SC.respond(request, pack)
+
+
+def _summary_progress_key(
+    key: str,
+    year: int,
+    month: int,
+    period_id: Optional[str],
+    include_future: bool,
+    include_zprp: bool,
+) -> tuple:
+    return (
+        "summary",
+        key,
+        int(year),
+        int(month),
+        str(period_id or ""),
+        bool(include_future),
+        bool(include_zprp),
+    )
+
+
+@router.get("/progress", summary="Na jakim etapie jest liczenie rozliczenia miesiąca")
+async def summary_progress(
+    province: str = Query(...),
+    year: int = Query(...),
+    month: int = Query(...),
+    include_future: bool = Query(False),
+    include_zprp: bool = Query(False),
+    period_id: Optional[str] = Query(None),
+    _access: None = Depends(panel_read_gate(PANEL_SETTLEMENTS, "Odczyt rozliczen okregu")),
+):
+    """
+    Etap liczenia `/summary` z tymi samymi parametrami - dla zasłony w panelu.
+
+    `active: false` i pusty `stage`, gdy nikt nie liczy: wynik jest w pamięci
+    albo liczenie jeszcze nie ruszyło. Panel pyta o to co chwilę, więc to sama
+    pamięć procesu - bez bazy.
+    """
+    key = require_province(province)
+    found = SP.snapshot(
+        _summary_progress_key(key, year, month, period_id, include_future, include_zprp)
+    )
+    return found or {"active": False, "stage": None, "detail": None, "done": [], "elapsed_ms": 0}
+
+
+async def _summary_payload(
+    key: str,
+    year: int,
+    month: int,
+    period_id: Optional[str],
+    include_future: bool,
+    include_zprp: bool,
+    hint,
+) -> dict:
+    """Treść `/summary` - liczona przy pustej pamięci (endpoint i rozgrzewanie)."""
+    data = await cached_settlement(
+        key, year=year, month=month, include_future=include_future, include_zprp=include_zprp,
+        period_id=period_id,
+    )
+    SP.stage("checks")
+    return {
+        "province": data["province"],
+        "period": data["period"],
+        "include_future": include_future,
+        "include_zprp": include_zprp,
+        "totals": data["totals"],
+        "entries": [_entry_json(e, with_matches=False) for e in data["entries"]],
+        "outside_district": {
+            "clubs": data["outside_district"]["clubs"],
+            "totals": data["outside_district"]["totals"],
+            "entries": [
+                _entry_json(e, with_matches=False)
+                for e in data["outside_district"]["entries"]
+            ],
+        },
+        "zprp": _zprp_summary(data["zprp"], included=include_zprp),
+        # Poza wyplata z innych powodow niz ZPRP (06.10.2026).
+        "not_paid": {
+            "excluded": len(data.get("excluded") or []),
+            "bombs": len(data.get("bombs") or []),
+            "penalty": round(sum(p["applied"] for p in (data.get("penalties") or {}).values()), 2),
+            "penalty_left": round(sum(p["left"] for p in (data.get("penalties") or {}).values()), 2),
+        },
+        "document_number_hint": hint,
+        # Mecze z podpowiedzią „zdjąć?" w całym okresie (06.10.2026).
+        "to_decide": sum(1 for e in data["entries"] for m in e.matches if m.exclude_hint),
+        # Kontrola nazwisk (07.10.2026): numer, pod ktorym panel okregu ma
+        # kogos innego niz ZPRP, i to samo nazwisko pod kilkoma numerami.
+        "name_check": await _name_check(key, data),
+    }
 
 
 async def _name_check(key: str, data: dict) -> dict:
