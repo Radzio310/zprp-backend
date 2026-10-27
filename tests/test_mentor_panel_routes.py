@@ -150,9 +150,9 @@ def test_kategorie_kolejnosc_licznik_scalanie_i_cofniecie(env):
         no_rights = await raises(L.order_categories(PAIR, L.OrderBody(ids=[a]), committee))
         same = await raises(L.merge_category(a, L.MergeBody(into=a), pair))
         merged = await L.merge_category(a, L.MergeBody(into=b), pair)
-        after = {x["id"]: x["category_ids"] for x in (await L.list_clips(PAIR, "", "", "", "", pair))["clips"]}
+        after = {x["id"]: x["category_ids"] for x in (await L.list_clips(PAIR, "", "", "", "", markers=False, actor=pair))["clips"]}
         undone = await L.unmerge_category(a, L.UnmergeBody(into=b, clips=merged["merged"]["clips"]), pair)
-        back = {x["id"]: x["category_ids"] for x in (await L.list_clips(PAIR, "", "", "", "", pair))["clips"]}
+        back = {x["id"]: x["category_ids"] for x in (await L.list_clips(PAIR, "", "", "", "", markers=False, actor=pair))["clips"]}
         return a, b, c, only_a, both, counted, ordered, no_rights, same, merged, after, undone, back
 
     a, b, c, only_a, both, counted, ordered, no_rights, same, merged, after, undone, back = env.run(go)
@@ -178,12 +178,12 @@ def test_klipy_wlasnosc_i_walidacja(env):
         beyond = await raises(L.create_clip(PAIR, clip_body(env, start_s=3990, end_s=4100), pair))
         wrong_video = await raises(L.create_clip(PAIR, clip_body(env, match_id="m3"), pair))
         not_owner = await raises(L.update_clip(clip["id"], L.ClipPatch(title="Moje"), mentor))
-        as_mentor = await L.list_clips(PAIR, "", "", "", "", mentor)
+        as_mentor = await L.list_clips(PAIR, "", "", "", "", markers=False, actor=mentor)
         edited = await L.update_clip(clip["id"], L.ClipPatch(end_s=125, note="Opis"), pair)
-        by_category = await L.list_clips(PAIR, cats[0]["id"], "", "", "", pair)
-        search = await L.list_clips(PAIR, "", "", "", "opis", pair)
+        by_category = await L.list_clips(PAIR, cats[0]["id"], "", "", "", markers=False, actor=pair)
+        search = await L.list_clips(PAIR, "", "", "", "opis", markers=False, actor=pair)
         deleted = await L.delete_clip(clip["id"], admin)
-        after = await L.list_clips(PAIR, "", "", "", "", pair)
+        after = await L.list_clips(PAIR, "", "", "", "", markers=False, actor=pair)
         return clip, too_long, beyond, wrong_video, not_owner, as_mentor, edited, by_category, search, deleted, after
 
     clip, too_long, beyond, wrong_video, not_owner, as_mentor, edited, by_category, search, deleted, after = env.run(go)
@@ -298,7 +298,7 @@ def test_watki_komentarze_wzmianki(env):
         edited = await L.update_comment(reply["id"], L.CommentPatch(body="Bardzo dobra decyzja."), mentor)
         resolved = await L.update_thread(thread["id"], L.ThreadPatch(status="resolved"), pair)
         bad_target = await raises(L.create_thread(PAIR, L.ThreadBody(target_kind="match", target_id="m5", kind="note", body="x"), pair))
-        clip_view = (await L.list_clips(PAIR, "", "", "", "", pair))["clips"][0]
+        clip_view = (await L.list_clips(PAIR, "", "", "", "", markers=False, actor=pair))["clips"][0]
         listing = await L.list_threads(PAIR, "clip", clip["id"], "", mentor)
         room = await env.panel.match_room(PAIR, "m1", mentor)
         await L.delete_comment(reply["id"], mentor)
@@ -582,6 +582,16 @@ def test_arkusze_pary_z_wersjami_mentora(env):
     assert {p["text"] for p in out["trends"]["priorities"]} == {"Współpraca przy linii 6 m", "Ruch"}
 
 
+
+def _weasyprint_ok():
+    try:
+        import weasyprint  # noqa: F401
+    except Exception:  # noqa: BLE001 - brak biblioteki systemowej (gobject/pango), np. Windows
+        return False
+    return True
+
+
+@pytest.mark.skipif(not _weasyprint_ok(), reason="weasyprint/gobject niedostępne na tej maszynie (PDF raportu)")
 def test_raport_podglad_pdf_i_publiczny(env, monkeypatch):
     monkeypatch.setattr(env.reports, "THUMB_HOSTS", ())  # bez sieci w testach
 

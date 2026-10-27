@@ -129,8 +129,11 @@ async def _set_connection(row: Dict[str, Any], **values: Any) -> Dict[str, Any]:
     """Zapis stanu połączenia; przejście w stan bez sesji wstrzymuje aktywne zadania klipów (to samo konto wznowi)."""
     values["updated_at"] = C.now()
     await database.execute(update(CONN).where(CONN.c.id == row["id"]).values(**values))
+    _STATUS_CACHE.pop((row.get("scope"), row.get("owner_judge_id")), None)
     new = values.get("status")
-    if new == "ready":
+    became_ready = new == "ready" and (row.get("status") != "ready" or int(values.get("session_generation") or 0)
+                                       != int(row.get("session_generation") or 0))
+    if became_ready:
         from app.mentor_bastion_jobs import release_waiting_jobs
 
         try:
@@ -147,33 +150,79 @@ async def _set_connection(row: Dict[str, Any], **values: Any) -> Dict[str, Any]:
     return {**row, **values}
 
 
-async def sync_connection(client: CL.ConnectorClient, scope: str, owner: Optional[str]) -> Optional[Dict[str, Any]]:
+#: Krótki cache odpowiedzi connectora (proces): częsty odczyt `GET /bastion/status` nie męczy connectora ani bazy.
+STATUS_CACHE_S = 15.0
+WRITE_EVERY_S = 60.0
+_STATUS_CACHE: Dict[Tuple[Optional[str], Optional[str]], Tuple[float, Dict[str, Any]]] = {}
+
+
+def _cache_ttl() -> float:
+    import os
+
+    try:
+        return float(os.environ.get("BASTION_STATUS_CACHE_S", STATUS_CACHE_S))
+    except ValueError:
+        return STATUS_CACHE_S
+
+
+def _cached_status(scope: str, owner: Optional[str]) -> Optional[Dict[str, Any]]:
+    import time
+
+    hit = _STATUS_CACHE.get((scope, owner))
+    if hit and time.monotonic() - hit[0] < _cache_ttl():
+        return hit[1]
+    return None
+
+
+def _utc(value: Any) -> Optional[datetime]:
+    if not isinstance(value, datetime):
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _age_s(value: Any) -> float:
+    stamp = _utc(value)
+    return float("inf") if stamp is None else (datetime.now(timezone.utc) - stamp).total_seconds()
+
+
+async def sync_connection(client: CL.ConnectorClient, scope: str, owner: Optional[str], *, fresh: bool = False
+                          ) -> Optional[Dict[str, Any]]:
     """Odczyt stanu z connectora do metadanych w bazie. Zwraca wiersz albo None (nigdy nie istniało).
-    `ConnectorUnavailable` wychodzi do wołającego: awaria to NIE zmiana stanu sesji."""
-    reply = await client.connection_status(scope, owner)
-    if reply.status != 200:
-        raise CL.ConnectorUnavailable(f"status_{reply.status}")
-    body = reply.body
+    `ConnectorUnavailable` wychodzi do wołającego: awaria to NIE zmiana stanu sesji.
+    Odpowiedź connectora jest krótko cache'owana (`fresh=True` omija cache); zapis do bazy tylko przy zmianie
+    stanu albo gdy zapisany `last_validated_at` jest starszy niż 60 s."""
+    import time
+
+    body = None if fresh else _cached_status(scope, owner)
+    if body is None:
+        reply = await client.connection_status(scope, owner)
+        if reply.status != 200:
+            raise CL.ConnectorUnavailable(f"status_{reply.status}")
+        body = reply.body
     state = BR.connector_status_to_state(body)
     row = await get_connection(BR.connection_key(scope, owner))
     if state == "unconfigured":
-        if not row:
-            return None
-        if row["status"] in ("unconfigured", "revoked"):
-            return row
-        return await _set_connection(row, status="unconfigured", last_error_code=None)
-    row = row or await _ensure_connection(scope, owner)
-    identity = R.s(body.get("external_identity_id")) or None
-    values: Dict[str, Any] = {
-        "status": state, "session_generation": int(body.get("generation") or row.get("session_generation") or 0),
-        "last_validated_at": _parse_time(body.get("last_validated_at")) or row.get("last_validated_at"),
-        "last_error_code": R.s(body.get("last_error_code")) or None, "revoked_at": None, "expires_at": None,
-    }
-    label = R.s(body.get("external_identity_label"))[:80] or None
-    if identity or label:
-        values["external_identity_id"] = identity or row.get("external_identity_id")
-        values["external_identity_label"] = label
-    return await _set_connection(row, **values)
+        result = row
+        if row and row["status"] not in ("unconfigured", "revoked"):
+            result = await _set_connection(row, status="unconfigured", last_error_code=None)
+    else:
+        row = row or await _ensure_connection(scope, owner)
+        identity = R.s(body.get("external_identity_id")) or None
+        values: Dict[str, Any] = {
+            "status": state, "session_generation": int(body.get("generation") or row.get("session_generation") or 0),
+            "last_validated_at": _parse_time(body.get("last_validated_at")) or row.get("last_validated_at"),
+            "last_error_code": R.s(body.get("last_error_code")) or None, "revoked_at": None, "expires_at": None,
+        }
+        label = R.s(body.get("external_identity_label"))[:80] or None
+        if identity or label:
+            values["external_identity_id"] = identity or row.get("external_identity_id")
+            values["external_identity_label"] = label
+        changed = any(row.get(k) != values[k] for k in ("status", "session_generation", "last_error_code")) or any(
+            row.get(k) != values[k] for k in ("external_identity_id", "external_identity_label") if k in values)
+        stale = _utc(values["last_validated_at"]) != _utc(row.get("last_validated_at")) and _age_s(row.get("last_validated_at")) > WRITE_EVERY_S
+        result = await _set_connection(row, **values) if (changed or stale or row.get("status") != state) else row
+    _STATUS_CACHE[(scope, owner)] = (time.monotonic(), body)
+    return result
 
 
 def connection_shape(scope: str, row: Optional[Dict[str, Any]], real: Actor, flags: BR.Flags,
@@ -217,7 +266,7 @@ async def build_status(real: Actor, flags: BR.Flags, *, refresh: bool = True) ->
         rows[scope] = await get_connection(BR.connection_key(scope, owner))
         if refresh and client is not None and flags.scope_on(scope) and service == "ok":
             try:
-                if not await client.healthy():
+                if _cached_status(scope, owner) is None and not await client.healthy():
                     service = "unavailable"
                 else:
                     rows[scope] = await sync_connection(client, scope, owner)
@@ -262,7 +311,7 @@ async def _check(scope: str, real: Actor, response: Response) -> Dict[str, Any]:
         if verdict.kind in ("unavailable", "rate_limited"):
             raise (berr(429, "BASTION_RATE_LIMITED", BR.MSG_RATE_LIMITED) if verdict.kind == "rate_limited" else _unavailable())
     try:
-        row = await sync_connection(client, scope, owner)
+        row = await sync_connection(client, scope, owner, fresh=True)
     except CL.ConnectorUnavailable as exc:
         raise _unavailable(exc.reason) from exc
     response.headers["Cache-Control"] = "no-store"
@@ -377,7 +426,7 @@ async def login_attempt(attempt_id: str, response: Response, real: Actor = Depen
         values["consumed_at"] = C.now()
         flags = _flags()
         try:
-            conn = await sync_connection(CL.get_client(), row["scope"], real.judge_id if row["scope"] == "personal" else None)
+            conn = await sync_connection(CL.get_client(), row["scope"], real.judge_id if row["scope"] == "personal" else None, fresh=True)
             values["verified_identity_id"] = (conn or {}).get("external_identity_id")
             extra["connection"] = connection_shape(row["scope"], conn, real, flags)
         except CL.ConnectorUnavailable:
@@ -736,3 +785,25 @@ async def bastion_jobs(response: Response, limit: int = 30, real: Actor = Depend
     for j in jobs:
         counts[j["state"]] = counts.get(j["state"], 0) + 1
     return {"jobs": jobs, "counts": counts}
+
+
+# ─── Lekki licznik „wywołuje się” dla pulpitu (zamiast całej listy klipów) ───
+
+DEVELOPING_STATES = ("queued", "submitting", "submitted", "waiting_for_remote", "downloading", "uploading", "retryable_failed")
+
+
+@router.get("/pairs/{pair_id}/bastion/developing")
+async def pair_developing(pair_id: str, response: Response, actor: Actor = Depends(mentor_actor)):
+    """Klipy pary, których MP4 jest teraz w ciemni (etapy `saved`/`bastion_cutting`/`storing` bieżącej rewizji).
+    Ten sam podział co `darkroomOf` po stronie klientów; zamiast pobierać całą listę klipów (do 1000 wierszy)."""
+    from app.db import mentor_bastion_clip_jobs as JOBS, mentor_clips
+
+    response.headers["Cache-Control"] = "no-store"
+    _need_enabled(_flags())
+    ctx = await C.pair_context(pair_id, actor)
+    rows = await database.fetch_all(
+        select(JOBS.c.clip_id).select_from(JOBS.join(mentor_clips, mentor_clips.c.id == JOBS.c.clip_id))
+        .where(mentor_clips.c.pair_id == ctx["pair_id"]).where(mentor_clips.c.deleted_at.is_(None))
+        .where(JOBS.c.clip_revision == mentor_clips.c.media_rev).where(JOBS.c.state.in_(DEVELOPING_STATES)).limit(200))
+    ids = [r["clip_id"] for r in rows]
+    return {"count": len(ids), "clip_ids": ids}

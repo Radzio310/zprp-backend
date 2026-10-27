@@ -420,6 +420,30 @@ async def resume_clip_media(clip: Dict[str, Any], video: Optional[Dict[str, Any]
     return await current_job(clip)
 
 
+async def _pin_unbound_jobs(connection_id: Optional[str] = None) -> int:
+    """Zamówienie MP4 bez połączenia (offline) czeka bez `connection_id`. Gdy połączenie staje się gotowe, przypinamy je
+    do pierwszego połączenia, którego ZLECAJĄCY może użyć (`pick_connection`: domyślne, potem jego własne; cudzego
+    osobistego nigdy). Zadania z wysłanym klipem mają już połączenie, więc zasady konta (BASTION_WRONG_ACCOUNT) zostają."""
+    from sqlalchemy import select, update
+
+    from app import mentor_panel_core as C
+    from app.db import database, mentor_bastion_clip_jobs as J
+
+    query = (select(J).where(J.c.state == "waiting_for_auth").where(J.c.connection_id.is_(None))
+             .where(J.c.remote_clip_id.is_(None)).where(J.c.submitted_at.is_(None)))
+    pinned = 0
+    for job in await C.rows(query.limit(200)):
+        conn = await pick_connection(job["requested_by_real_judge_id"])
+        if not conn or (connection_id and conn["id"] != connection_id):
+            continue
+        await database.execute(update(J).where(J.c.id == job["id"]).where(J.c.state == "waiting_for_auth")
+                               .where(J.c.connection_id.is_(None))
+                               .values(connection_id=conn["id"], external_identity_id=conn.get("external_identity_id"),
+                                       updated_at=C.now()))
+        pinned += 1
+    return pinned
+
+
 async def release_waiting_jobs(connection_id: Optional[str] = None) -> int:
     """Zadania `waiting_for_auth` wracają do kolejki, gdy ich połączenie znów działa NA TYM SAMYM KONCIE. Inne konto
     zostawia je w oczekiwaniu (`BASTION_WRONG_ACCOUNT`)."""
@@ -428,6 +452,7 @@ async def release_waiting_jobs(connection_id: Optional[str] = None) -> int:
     from app import mentor_panel_core as C
     from app.db import database, mentor_bastion_clip_jobs as J, mentor_bastion_connections as CONN
 
+    await _pin_unbound_jobs(connection_id)
     query = select(J).where(J.c.state == "waiting_for_auth").where(J.c.connection_id.isnot(None))
     if connection_id:
         query = query.where(J.c.connection_id == connection_id)

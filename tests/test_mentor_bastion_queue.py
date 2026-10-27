@@ -6,11 +6,11 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from sqlalchemy import select
 from starlette.requests import Request
 
-from tests.mentor_panel_support import JUDGES, MENTOR, PAIR, Env
+from tests.mentor_panel_support import ADMIN, JUDGES, MENTOR, PAIR, Env
 
 A, B = JUDGES
 URL = "https://portal.handball-bastion.pl/game?bunny_item_id=5632"
@@ -57,6 +57,7 @@ class FakeConnector:
 def q(monkeypatch, tmp_path):
     e = Env(monkeypatch, tmp_path)
     monkeypatch.setenv("BASTION_ENABLED", "true")
+    monkeypatch.setenv("BASTION_STATUS_CACHE_S", "0")
     monkeypatch.setenv("BASTION_CONNECTOR_URL", "http://connector")
     monkeypatch.setenv("BASTION_CONNECTOR_TOKEN", "t" * 40)
     monkeypatch.setenv("BASTION_FAST_RETRY", "1")
@@ -600,3 +601,96 @@ def test_tekst_pushu_klipu_gotowego():
 
     assert clip_ready_text("Faul w ataku", 10.02, 720) == ("Klip gotowy", "„Faul w ataku” wywołał się: MP4 · 10,0 s · 720p. Gra z pliku BAZY, także w zwolnieniu.")
     assert clip_ready_text(None, None, None)[1].startswith("„Klip” wywołał się: MP4.")
+
+
+# ─── Zamówienie offline, przypięcie do połączenia, act_as ───────────────────
+
+
+async def actor_as(e, judge, act_as=None):
+    async def decode(_request, _token):
+        return {"judge_id": judge}
+
+    e.mp.setattr(e.auth, "_decode_bearer", decode)
+    query = f"act_as={act_as}".encode() if act_as else b""
+    r = Request({"type": "http", "method": "POST", "headers": [(b"authorization", b"Bearer x")], "query_string": query, "path": "/"})
+    return await e.auth.mentor_actor(r)
+
+
+def test_zamowienie_offline_potem_logowanie_uruchamia_zadanie(q):
+    async def go():
+        conn = await seed(q, conn_status="reauth_required")
+        actor = await actor_as(q, A)
+        ctx = await q.core.pair_context(PAIR, actor)
+        out = await q.bastion.order_mp4(ctx, await clip_of(q), await video_of(q), actor)
+        waiting = await job_of(q)
+        # cudze osobiste połączenie B nie przejmuje zadania A
+        other = await q.bastion._ensure_connection("personal", B)
+        await q.bastion._set_connection(other, status="ready", external_identity_id="u-B")
+        still = await job_of(q)
+        # logowanie A: zadanie przypięte do jego połączenia i rusza
+        await q.bastion._set_connection(await q.bastion.get_connection("personal-" + A), status="ready", external_identity_id="u-1")
+        pinned = await job_of(q)
+        await drive(q)
+        return out, waiting, still, pinned, await job_of(q), conn
+
+    out, waiting, still, pinned, done, conn = q.run(go)
+    assert out["media"]["job"]["state"] == "waiting_for_auth"
+    assert waiting["connection_id"] is None and still["connection_id"] is None and still["state"] == "waiting_for_auth"
+    assert pinned["connection_id"] == conn["id"] and pinned["state"] == "queued" and pinned["external_identity_id"] == "u-1"
+    assert done["state"] == "ready" and len(q.fake.creates) == 1
+
+
+def test_act_as_zamowienie_wznowienie_i_odtwarzanie_dotycza_prawdziwego_aktora(q):
+    async def go():
+        await seed(q)
+        mentor_conn = await q.bastion._ensure_connection("personal", MENTOR)  # gotowe osobiste połączenie odgrywanego mentora
+        await q.bastion._set_connection(mentor_conn, status="ready", external_identity_id="u-M")
+        actor = await actor_as(q, ADMIN, act_as=MENTOR)
+        ctx = await q.core.pair_context(PAIR, actor)
+        clip, video = await clip_of(q), await video_of(q)
+        out = await q.bastion.order_mp4(ctx, clip, video, actor)
+        job = await job_of(q)
+        resume_err = None
+        try:
+            await q.bastion_jobs.resume_clip_media(clip, video, actor)
+        except HTTPException as exc:
+            resume_err = exc.detail["code"]
+        play = await q.bastion.clip_playback("clip1", Response(), actor)
+        return out, job, resume_err, play
+
+    out, job, resume_err, play = q.run(go)
+    # zlecającym jest admin, połączenie odgrywanego mentora nie jest pożyczane; zadanie czeka na jego własne
+    assert job["requested_by_real_judge_id"] == ADMIN and job["acted_as_judge_id"] == MENTOR and job["connection_id"] is None
+    assert out["media"]["job"]["state"] == "waiting_for_auth" and out["mp4_offer"]["connection"]["ok"] is False
+    assert resume_err == "BASTION_AUTH_REQUIRED" and q.fake.creates == []
+    assert play["clip_id"] == "clip1" and play["mode"] != "asset" and play["play_url"] is None
+
+
+def test_licznik_developing_liczy_biezaca_rewizje_w_toku_bez_usunietych_i_gotowych(q):
+    async def go():
+        conn = await seed(q)
+        now = datetime.now(timezone.utc)
+        for cid, rev in (("c2", 2), ("c3", 1), ("c4", 1), ("c5", 1)):
+            await q.ins("mentor_clips", id=cid, pair_id=PAIR, match_id="m1", video_id="vb", start_s=100, end_s=110, author_id=A,
+                        category_ids="[]", source="manual", created_at=now, updated_at=now, mp4_status="none", media_rev=rev)
+        await q.core.database.execute(q.T["mentor_clips"].update().where(q.T["mentor_clips"].c.id == "c4").values(deleted_at=now))
+        T = q.T["mentor_bastion_clip_jobs"]
+        for cid, rev, state in (("clip1", 1, "queued"), ("c2", 1, "queued"), ("c3", 1, "ready"), ("c4", 1, "queued"),
+                                ("c5", 1, "downloading")):
+            row = {"id": cid, "pair_id": PAIR, "match_id": "m1", "video_id": "vb", "start_s": 100, "end_s": 110, "media_rev": rev}
+            await q.bastion_jobs.enqueue_clip_job(clip=row, bunny_item_id=5632, revision=rev, requested_by=A, connection=conn)
+            await q.core.database.execute(T.update().where(T.c.clip_id == cid).values(state=state))
+        actor = await actor_as(q, A)
+        on = await q.bastion.pair_developing(PAIR, Response(), actor)
+        q.mp.setenv("BASTION_ENABLED", "false")
+        try:
+            await q.bastion.pair_developing(PAIR, Response(), actor)
+            off = None
+        except HTTPException as exc:
+            off = exc.status_code
+        return on, off
+
+    on, off = q.run(go)
+    # c2: stare zadanie (rewizja 1 przy media_rev 2), c3: gotowy, c4: usunięty
+    assert sorted(on["clip_ids"]) == ["c5", "clip1"] and on["count"] == 2
+    assert off == 404
