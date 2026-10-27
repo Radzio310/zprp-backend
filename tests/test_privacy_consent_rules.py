@@ -9,6 +9,7 @@ import pytest
 
 from app.privacy_consent_rules import (
     CURRENT_CLAUSE_VERSION,
+    LEGACY_CLIENT_VERSION,
     accepted_version,
     is_fresh_install,
     needs_consent,
@@ -16,6 +17,7 @@ from app.privacy_consent_rules import (
     normalize_subject_id,
     normalize_subject_type,
     normalize_version,
+    required_version,
 )
 
 
@@ -33,6 +35,26 @@ class TestPotrzebaZgody:
     def test_nowsza_wersja_tez_wystarcza(self):
         """Telefon z nowszą aplikacją niż serwer nie jest niczyim zaniedbaniem."""
         assert needs_consent(3, current=2) is False
+
+
+class TestWymaganaWersja:
+    """Wersja 3 (27.10.2026): telefon i serwer wdrażają się osobno."""
+
+    def test_stare_wydanie_bez_client_version_mierzone_swoja_miara(self):
+        """Inaczej pokazałoby treść v2, zapisało "2" i wracało z arkuszem w kółko."""
+        assert required_version(None) == LEGACY_CLIENT_VERSION
+        assert needs_consent(LEGACY_CLIENT_VERSION, current=required_version(None)) is False
+
+    def test_nowe_wydanie_musi_znac_biezaca_wersje(self):
+        assert required_version(CURRENT_CLAUSE_VERSION) == CURRENT_CLAUSE_VERSION
+        assert needs_consent(2, current=required_version(3)) is True
+
+    def test_telefon_nowszy_od_serwera_nie_wymaga_wiecej_niz_serwer(self):
+        assert required_version(CURRENT_CLAUSE_VERSION + 5) == CURRENT_CLAUSE_VERSION
+
+    def test_smieciowa_wersja_telefonu_to_stare_wydanie(self):
+        assert required_version("abc") == LEGACY_CLIENT_VERSION
+        assert required_version(0) == LEGACY_CLIENT_VERSION
 
 
 class TestPierwszyRaz:

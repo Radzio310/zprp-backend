@@ -32,6 +32,7 @@ from app.privacy_consent_rules import (
     normalize_subject_id,
     normalize_subject_type,
     normalize_version,
+    required_version,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,9 @@ async def get_controller() -> ControllerInfo:
     )
 
 
-async def consent_state(subject_type: str, subject_id: str) -> Dict[str, Any]:
+async def consent_state(
+    subject_type: str, subject_id: str, client_version: Optional[int] = None
+) -> Dict[str, Any]:
     """Stan zgody jednego podmiotu. Import bazy w ciele - `app/db.py` łączy
     się z bazą już przy imporcie, więc reguły nie mogą go ciągnąć."""
     from app.db import database, privacy_consents
@@ -117,16 +120,18 @@ async def consent_state(subject_type: str, subject_id: str) -> Dict[str, Any]:
         "subject_id": sid,
         "current_version": CURRENT_CLAUSE_VERSION,
         "accepted_version": best,
-        "needs_consent": needs_consent(best),
+        "needs_consent": needs_consent(best, current=required_version(client_version)),
         "accepted_at": newest,
         "phone_consent": phone,
     }
 
 
 @router.get("/consent", response_model=ConsentState, summary="Czy podmiot zna klauzulę")
-async def get_consent(subject_type: str, subject_id: str) -> ConsentState:
+async def get_consent(
+    subject_type: str, subject_id: str, client_version: Optional[int] = None
+) -> ConsentState:
     try:
-        state = await consent_state(subject_type, subject_id)
+        state = await consent_state(subject_type, subject_id, client_version)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return ConsentState(**state)
@@ -216,4 +221,5 @@ async def post_consent(req: ConsentRequest) -> ConsentState:
     )
     await database.execute(statement)
 
-    return ConsentState(**await consent_state(stype, sid))
+    # Telefon potwierdził tę wersję, którą zna - nią też mierzymy odpowiedź.
+    return ConsentState(**await consent_state(stype, sid, version))

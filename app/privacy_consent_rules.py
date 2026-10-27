@@ -27,7 +27,13 @@ from typing import Any, Iterable, Optional
 #:
 #: ⚠ Ta sama liczba stoi w `BAZA/utils/privacyConsent.ts`. Rozjazd oznacza, że
 #: telefon i serwer liczą różne wersje tej samej zgody - pilnuje tego test.
-CURRENT_CLAUSE_VERSION = 2
+CURRENT_CLAUSE_VERSION = 3
+
+#: Wersja, którą potrafią pokazać wydania aplikacji sprzed wersji 3 - te nie
+#: wysyłają `client_version`. Mierzymy je ich własną miarą: gdyby serwer żądał
+#: od nich wersji 3, pokazałyby treść wersji 2, zapisały "2" i przy każdym
+#: uruchomieniu wracałyby z tym samym arkuszem (dla konta ProEl - bez wyjścia).
+LEGACY_CLIENT_VERSION = 2
 
 #: Kto jest administratorem danych. Zmiana tych danych to zmiana klauzuli,
 #: więc idzie w parze z podniesieniem wersji wyżej.
@@ -100,6 +106,17 @@ def needs_consent(version: Optional[int], *, current: int = CURRENT_CLAUSE_VERSI
     że ktoś czegoś nie przeczytał.
     """
     return normalize_version(version) < current
+
+
+def required_version(client_version: Any = None) -> int:
+    """Którą wersję klauzuli musi znać podmiot pytający z danego telefonu.
+
+    Nie wyższą niż ta, którą telefon umie pokazać - nowej treści nie da się
+    potwierdzić na aplikacji, która jej nie zna. Brak `client_version` to
+    starsze wydanie, czyli `LEGACY_CLIENT_VERSION`.
+    """
+    client = normalize_version(client_version) or LEGACY_CLIENT_VERSION
+    return min(client, CURRENT_CLAUSE_VERSION)
 
 
 def is_fresh_install(version: Optional[int]) -> bool:
