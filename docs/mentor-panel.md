@@ -264,3 +264,36 @@ Każdy zapis podbija `mentor_panels.rev` i zwraca świeży obiekt (klient podmie
 - Push `kind=mentor_panel`: `pairId, matchId, threadId, messageId, sheetId, target (sheet|thread|message), tag, notificationTag, notificationColor=#FF7A59` (+ `notificationSilent/Priority` przy cichej aktualizacji, `notificationImage` herb gospodarza). Tag: `mentor-thread-<threadId>`, `mentor-sheet-<matchId>`.
 - Wątek: `my_follow` (`auto|follow|mute`), `unread`; `PUT /threads/{id}/follow {mode}`; `POST /threads/{id}/seen`.
 - Kropki: `unread_threads`, `new_sheets` na liście par i w pulpicie; `unseen: {threads, sheet}` na karcie meczu (oś i pokój); `POST /pairs/{id}/matches/{mid}/sheet/seen`.
+
+## 8. Handball Bastion (etap 1, 27.10.2026, za flagą `BASTION_ENABLED`)
+
+Specyfikacja: handoff Bastion; wyniki bramki: `docs/bastion-integration.md`. Kod: `app/mentor_bastion*.py`.
+`BASTION_ENABLED=false` (domyślnie) wyłącza wszystko: trasy niżej odpowiadają 404 `BASTION_DISABLED` (poza `GET /bastion/status`),
+link do portalu jest zwykłym linkiem (`provider:"video"`), YouTube/Vimeo/uploady działają jak dotąd.
+
+### 8.1 Zasady
+- Trzy różne rzeczy: sesja BAZY, sesja Bastionu (tylko w connectorze), czasowy adres Bunny (tylko w odpowiedzi `playback`, `Cache-Control: no-store`, nigdy w bazie ani logach).
+- Zarządzanie połączeniami używa PRAWDZIWEGO aktora (`base_actor`); `?act_as=` jest ignorowane (zapisywane tylko jako `acted_as_judge_id` próby). Połączenie domyślne tworzy/odnawia/rozłącza tylko prawdziwy admin (inaczej 403 `BASTION_CONNECTION_FORBIDDEN`).
+- Dostęp do pokoju w `playback` sprawdzają zwykłe reguły Mentora (także `act_as`), ale połączenie wybiera prawdziwy użytkownik: domyślne, potem jego własne. Osobista sesja nigdy nie jest pożyczana.
+- Błędy Bastionu nigdy nie są 401 (nie wylogowują): 409 `BASTION_AUTH_REQUIRED`, 403 `BASTION_RESOURCE_FORBIDDEN`, 503 `BASTION_UNAVAILABLE`, 429 `BASTION_RATE_LIMITED`. Awaria sieci lub portalu nie zmienia stanu sesji.
+- `expires_at` połączenia = zawsze `null` (TTL sesji Bastionu nieznany).
+- Odpowiedzi tras `/bastion/*` i `playback`: `Cache-Control: no-store`.
+
+### 8.2 Wideo
+`POST .../videos {url}` dla adresu `https://portal.handball-bastion.pl/game?bunny_item_id=N` (dokładny host, bez userinfo i portu) daje `Video` z `provider:"bastion"`, `url` kanonicznym (bez `at`), `external_id:"N"`, `playable:true`, bez `play_url`. Bez pobierania podglądu. Ten sam film = jeden wiersz. Pole `external_id` jest null u innych źródeł.
+
+### 8.3 API
+`ConnectionState = {enabled, status:"unconfigured|checking|ready|reauth_required|unavailable|revoked", last_known_status?, can_reconnect, account_label|null, last_validated_at|null, expires_at:null, last_error_code|null, generation}`
+
+- `GET /bastion/status` -> `{enabled, service:"ok|unavailable|unconfigured|disabled", default: ConnectionState|null, personal: ConnectionState|null, effective_scope:"default|personal"|null, last_validated_at, expires_at:null, is_admin}`. `effective_scope` to podpowiedź, nie gwarancja dostępu do meczu. Przy awarii connectora `status:"unavailable"` + `last_known_status`.
+- `POST /bastion/default/check` (admin), `POST /bastion/personal/check` -> `{checked:bool, connection: ConnectionState}` (`checked` tylko gdy ustawiono `BASTION_PROBE_BUNNY_ITEM_ID` i odczyt się udał).
+- `POST /bastion/login-attempts {scope:"default|personal", return_context?:{pair_id,match_id,video_id,clip_id,video_s,start_s,end_s}, probe_bunny_item_id?}` -> `{id, scope, status, expires_at, error, return_context, ticket, ticket_ttl_s, ws_url, resumed}`. `ticket` jednorazowy (60 s), idzie w 1. wiadomości WSS `{"type":"auth","ticket":...}`, nie w URL. `return_context` przyjmuje tylko identyfikatory i liczby (nigdy URL). 409 `BASTION_LOGIN_BUSY`, gdy trwa próba innej osoby.
+- `GET /bastion/login-attempts/{id}` -> `{id, scope, status:"creating|waiting_for_user|verifying|succeeded|failed|cancelled|expired", expires_at, error, return_context, connection?, service?}`. Sukces (`succeeded`, z `connection`) wyłącznie ze statusu connectora; zamknięcie okna to nie sukces. Cudza próba osobista (także dla admina) = 404 `BASTION_ATTEMPT_NOT_FOUND`.
+- `POST /bastion/login-attempts/{id}/ticket` -> `{id, ticket, ticket_ttl_s, ws_url}` (odświeżenie karty); `POST .../cancel` -> stan próby.
+- `DELETE /bastion/default` (admin), `DELETE /bastion/personal` -> `{ok:true, status:"revoked", scope}`. Zaimportowane klipy zostają; aktywne zadania klipów przechodzą w `waiting_for_auth`.
+- `POST /pairs/{p}/matches/{m}/videos/{v}/playback` (no-store) -> `{provider:"bastion", mode:"bunny_embed", embed_url, expires_at|null, connection_scope:"default|personal", capabilities:{seek:true, rate:false, mute:true}, duration_s|null, video_state, bunny_item_id}`.
+  Kolejność: domyślne, potem osobiste (odmowa 403 na domyślnym też próbuje własne konto). Błędy mają kopertę `{error, code, message, connections:{scope:"auth_required|forbidden|..."}, can_connect_personal, can_renew_default}`:
+  409 `BASTION_AUTH_REQUIRED` ("Połączenie domyślne jest niedostępne. Możesz użyć własnego konta."), 403 `BASTION_RESOURCE_FORBIDDEN` ("To konto nie ma dostępu do tego nagrania."), 503 `BASTION_UNAVAILABLE` ("Bastion chwilowo nie odpowiada. Spróbuj ponownie za chwilę."), 429 `BASTION_RATE_LIMITED`, 422 `VIDEO_NOT_BASTION`, 404 `VIDEO_NOT_FOUND`, 403 `NO_ACCESS`.
+
+### 8.4 Dane (`app/mentor_bastion_tables.py`)
+`mentor_bastion_connections` (unikalny `connection_key` = `default` albo `personal-<judge_id>`, CHECK scope/owner), `mentor_bastion_login_attempts`, `mentor_bastion_clip_jobs` (unikalne `clip_id`+`clip_revision`, stany z `mentor_bastion_rules.JOB_STATES`, lease, przypięcie do `connection_id` i `external_identity_id`), `mentor_clip_assets` (`origin_provider`, `source_start_s`/`source_end_s` osobno; `mentor_clips.source` bez zmian), kolumna `mentor_match_videos.external_id`. Eksport do Bastionu (etap 4): całe sekundy zaokrąglone na zewnątrz, 2-300 s (`bastion_clip_range`). Worker kolejki MP4 to etap 4.

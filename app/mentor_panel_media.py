@@ -153,16 +153,22 @@ async def _uploads_by_id(ids: List[str]) -> Dict[str, Dict[str, Any]]:
 def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: Optional[Dict[str, Any]] = None,
                 ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from app.mentor_evaluation_request_rules import video_provider, youtube_thumbnail
+    from app import mentor_bastion_rules as bastion
     from app.mentor_video_rules import clean_sync
 
     kind = row.get("kind") or "link"
     sync_raw = R.json_value(row.get("sync_json"), {})
+    provider = row.get("provider") or video_provider(R.s(row.get("url")))
+    if provider == bastion.PROVIDER and not bastion.enabled():
+        provider = "video"  # flaga wyłączona: nagranie zostaje zwykłym linkiem, stare źródła działają bez zmian
     out = {
-        "id": row["id"], "kind": kind, "provider": row.get("provider") or video_provider(R.s(row.get("url"))),
+        "id": row["id"], "kind": kind, "provider": provider,
         "url": row.get("url"), "title": row.get("title") or "", "thumbnail_url": row.get("thumbnail_url") or youtube_thumbnail(R.s(row.get("url"))),
         "duration_s": row.get("duration_s"), "sync": clean_sync(sync_raw) if sync_raw else None,
         "added_by": C.person(names, row.get("added_by")), "created_at": row.get("created_at"),
-        "playable": (row.get("provider") or video_provider(R.s(row.get("url")))) in ("youtube", "vimeo"),
+        "playable": provider in ("youtube", "vimeo", bastion.PROVIDER),
+        #: Bastion: adres odtwarzania daje dopiero `POST .../videos/{id}/playback` (czasowy, wrażliwy, nie leży w nagraniu).
+        "external_id": row.get("external_id") if provider == bastion.PROVIDER else None,
         "play_url": None, "poster_url": None, "upload_status": None,
     }
     if kind == "upload":

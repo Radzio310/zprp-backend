@@ -538,20 +538,30 @@ async def insert_link_video(match_id: str, pair_key_value: str, url: str, added_
     )
     if existing:
         return dict(existing), False
-    from app.link_preview import preview_or_instant
+    provider = video_provider(url)
+    if provider == "bastion":
+        # Bastion wymaga sesji: backend nie pobiera podglądu ani nie odpytuje portalu przy dodaniu linku.
+        from app import mentor_bastion_rules as bastion
 
-    preview = await preview_or_instant(url)
+        preview, stream_start = {}, None
+        external_id = str(bastion.parse_game_url(url) or "") or None
+    else:
+        from app.link_preview import preview_or_instant
+
+        preview = await preview_or_instant(url)
+        stream_start = await _stream_start_or_none(url)
+        external_id = None
     duration = preview.get("duration_s")
-    stream_start = await _stream_start_or_none(url)
     row = {
         "id": uuid4().hex,
         "match_id": str(match_id),
         "pair_key": pair_key_value,
         "url": url,
         "normalized_url": url,
-        "provider": video_provider(url),
+        "provider": provider,
         "added_by": str(added_by),
         "kind": "link",
+        "external_id": external_id,
         "created_at": now(),
         "title": str(preview.get("title") or "")[:200] or None,
         "thumbnail_url": str(preview.get("thumbnail_url") or "")[:2048] or None,

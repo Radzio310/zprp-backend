@@ -24,10 +24,23 @@ def normalized_video_url(value: Optional[str]) -> str:
     # Host i schemat nie są semantycznie czułe na wielkość liter. Usuwamy też
     # samotny końcowy slash, żeby ten sam film nie powstawał dwa razy.
     path = parsed.path.rstrip("/") or ""
+    # Handball Bastion (za flagą BASTION_ENABLED): adres meczu sprowadzamy do postaci kanonicznej
+    # (bez `at` i śmieci w zapytaniu), by ten sam film nie powstawał dwa razy.
+    from app import mentor_bastion_rules as bastion
+
+    if bastion.enabled():
+        canonical = bastion.canonicalize(value)
+        if canonical:
+            return canonical
     return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.params, parsed.query, parsed.fragment))
 
 
 def video_provider(value: str) -> str:
+    from app import mentor_bastion_rules as bastion
+
+    # Dokładny host portalu + /game + bunny_item_id; domeny podszywające się trafiają niżej jako zwykły link.
+    if bastion.enabled() and bastion.is_bastion_url(value):
+        return bastion.PROVIDER
     host = (urlparse(value).hostname or "").lower()
     if host in {"youtu.be", "youtube.com"} or host.endswith(".youtube.com"):
         return "youtube"

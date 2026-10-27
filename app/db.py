@@ -4553,6 +4553,15 @@ from app.mentor_panel_tables import define_tables as _define_mentor_panel_tables
     mentor_sheet_seen,
 ) = _define_mentor_panel_tables(metadata)
 
+# Handball Bastion w Mentorze (etap 1, za flagą BASTION_ENABLED) - schemat w osobnym module.
+from app.mentor_bastion_tables import define_tables as _define_mentor_bastion_tables
+(
+    mentor_bastion_connections,
+    mentor_bastion_login_attempts,
+    mentor_bastion_clip_jobs,
+    mentor_clip_assets,
+) = _define_mentor_bastion_tables(metadata)
+
 # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.
 from app.province_alert_tables import define_tables as _define_alert_tables
 province_alert_settings, province_alert_state = _define_alert_tables(metadata)
@@ -5176,6 +5185,19 @@ for _statement in _MENTOR_PANEL_MIGRATIONS:
         import logging as _logging
 
         _logging.getLogger("app.db").warning("Indeks panelu Mentor nie powstał: %s", _statement, exc_info=True)
+
+# Bastion: kolumna `external_id` nagrań (`app/mentor_bastion_tables.py`) - kazda migracja osobno.
+from app.mentor_bastion_tables import MIGRATIONS as _MENTOR_BASTION_MIGRATIONS
+
+for _statement in _MENTOR_BASTION_MIGRATIONS:
+    try:
+        with engine.connect() as _conn:
+            _conn.execute(text(_statement))
+            _conn.commit()
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("app.db").warning("Migracja Bastion nie przeszla: %s", _statement, exc_info=True)
 
 # Transmisje meczow: indeksy (`app/stream_tables.py`) - kazdy osobno, brak jednego nie zatrzymuje startu.
 from app.stream_tables import MIGRATIONS as _STREAM_MIGRATIONS

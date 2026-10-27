@@ -15,6 +15,7 @@ import sqlalchemy
 from databases import Database
 from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, String, Table, insert
 
+from app.mentor_bastion_tables import define_tables as define_bastion
 from app.mentor_evaluation_tables import define_tables as define_evaluations
 from app.mentor_panel_tables import define_tables as define_panel
 from app.mentoring_tables import define_tables as define_mentoring
@@ -24,7 +25,7 @@ from app.zprp_public_tables import define_tables as define_public
 MODULES = (
     "app.mentor_panel", "app.mentor_panel_core", "app.mentor_panel_auth", "app.mentor_panel_library",
     "app.mentor_panel_media", "app.mentor_panel_reports", "app.mentor_panel_notify", "app.mentor_evaluations",
-    "app.mentor_panel_handoff",
+    "app.mentor_panel_handoff", "app.mentor_bastion", "app.mentor_bastion_jobs", "app.mentor_bastion_client",
     "app.mentoring", "app.proel_auth", "app.streams.store", "app.streams.worker", "app.mentor_panel_streams",
 )
 
@@ -72,6 +73,8 @@ class Env:
                           define_evaluations(metadata)))
         for table in define_panel(metadata):
             tables[table.name] = table
+        for table in define_bastion(metadata):
+            tables[table.name] = table
         for table in define_public(metadata):
             tables[table.name] = table
         for table in define_streams(metadata):
@@ -109,6 +112,9 @@ class Env:
         self.media = importlib.import_module("app.mentor_panel_media")
         self.reports = importlib.import_module("app.mentor_panel_reports")
         self.notify = importlib.import_module("app.mentor_panel_notify")
+        self.bastion = importlib.import_module("app.mentor_bastion")
+        self.bastion_client = importlib.import_module("app.mentor_bastion_client")
+        self.bastion_jobs = importlib.import_module("app.mentor_bastion_jobs")
         self.sent = []
 
         async def fake_notify(ctx, actor_id, title, body, **kwargs):

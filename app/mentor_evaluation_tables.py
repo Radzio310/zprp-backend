@@ -101,6 +101,8 @@ def define_tables(metadata):
         #: (własne nagranie w R2, `mentor_uploads.id` w `upload_id`).
         Column("kind", String, nullable=True),
         Column("upload_id", String, nullable=True),
+        #: Identyfikator źródła u dostawcy (Bastion: `bunny_item_id`); migracja w `mentor_bastion_tables`.
+        Column("external_id", String, nullable=True),
         UniqueConstraint("match_id", "normalized_url", name="uq_mentor_match_video_url"),
     )
     return evaluations, versions, requests, videos
