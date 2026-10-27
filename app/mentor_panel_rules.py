@@ -385,9 +385,27 @@ def clip_filename(title: Any, match_code: Any, start_s: float) -> str:
 
 
 #: Znacznik bez końca (bez REC) pokazujemy jako klip wokół punktu: tyle sekund
-#: przed i po. Jedno miejsce prawdy dla panelu Mentora.
-POINT_LEAD_S = 6
-POINT_TAIL_S = 4
+#: przed i po (decyzja 27.10.2026: -5 s / +3 s). Jedno miejsce prawdy dla
+#: panelu Mentora - web i aplikacja dostają gotowy zakres.
+POINT_LEAD_S = 5
+POINT_TAIL_S = 3
+
+
+def marker_is_clip(m: Mapping[str, Any]) -> bool:
+    """Czy znacznik z aplikacji jest klipem (decyzja 27.10.2026).
+
+    Klipem jest KAŻDY ręczny znacznik: zakres REC, znacznik z kategorią,
+    komentarzem albo oznaczony („ważne") oraz zwykły punkt postawiony ręcznie
+    (rodzaj `manual`, bez klucza zdarzenia). Nie jest klipem nieoznaczony punkt
+    z importu osi ProEla (ma `source_key` zdarzenia albo jego typ) - te
+    zdarzenia panel i tak pokazuje na osi meczu.
+    """
+    if m.get("end_s") is not None:
+        return True
+    if m.get("important") or m.get("category") or m.get("comment"):
+        return True
+    imported = bool(m.get("source_key")) or bool(m.get("type")) or s(m.get("kind") or "manual") != "manual"
+    return not imported
 
 
 def _marker_video_second(video: Mapping[str, Any], m: Mapping[str, Any]) -> Optional[float]:
@@ -426,10 +444,9 @@ def markers_as_clips(video: Mapping[str, Any], markers: Iterable[Mapping[str, An
             continue
         end = m.get("end_s")
         point = end is None
-        # Punkt bez oznaczenia to zwykły spis zdarzeń zaciągnięty z osi ProEla
-        # (import w aplikacji) - zdarzenia panel już ma, klipem jest dopiero
-        # świadome oznaczenie (kategoria, ważne, komentarz) albo zakres REC.
-        if point and not (m.get("important") or m.get("category") or m.get("comment")):
+        # Nieoznaczony punkt z importu osi ProEla to tylko spis zdarzeń - panel
+        # ma je na osi; klipem jest każdy ręczny znacznik (`marker_is_clip`).
+        if not marker_is_clip(m):
             continue
         if point:
             start, end = max(0.0, at - POINT_LEAD_S), at + POINT_TAIL_S
@@ -466,6 +483,39 @@ def markers_as_clips(video: Mapping[str, Any], markers: Iterable[Mapping[str, An
             "read_only": True,
         })
     return out
+
+
+def marker_clip_key(video_id: Any, marker_id: Any) -> Tuple[str, str]:
+    """Klucz znacznika: klip z niego ma `source="marker"`, `video_id` i `source_key` = id znacznika."""
+    return s(video_id), s(marker_id)
+
+
+def clip_row_from_marker(marker_clip: Mapping[str, Any], category_by_key: Mapping[Any, str]) -> Dict[str, Any]:
+    """Wiersz klipu ze znacznika-klipu (`markers_as_clips`): zakres, tytuł, komentarz jako notatka,
+    kategoria pary o tym samym kluczu. Bez id, autora i stempli - dokłada je trasa."""
+    key = s(marker_clip.get("category_key"))
+    ms = marker_clip.get("match_ms")
+    return {
+        "match_id": marker_clip.get("match_id"), "video_id": marker_clip.get("video_id"),
+        "start_s": float(marker_clip["start_s"]), "end_s": float(marker_clip["end_s"]),
+        "title": plain(marker_clip.get("title"), MAX_CLIP_TITLE) or None,
+        "note": plain(marker_clip.get("note"), MAX_CLIP_NOTE) or None,
+        "category_ids": [category_by_key[key]] if key and key in category_by_key else [],
+        "source": "marker", "source_key": s(marker_clip.get("marker_id")) or None,
+        "match_ms": ms if isinstance(ms, (int, float)) and 0 <= ms <= 3 * 3600 * 1000 else None,
+        "half": marker_clip.get("half") if marker_clip.get("half") in (1, 2) else None,
+    }
+
+
+def unclaimed_marker_clips(marker_clips: Iterable[Mapping[str, Any]], claimed: Iterable[Tuple[str, str]]) -> List[Dict[str, Any]]:
+    """Znaczniki-klipy bez własnego wiersza klipu.
+
+    `claimed` to klucze (`marker_clip_key`) klipów zrobionych ze znacznika -
+    także USUNIĘTYCH: usunięcie klipu jest nagrobkiem, znacznik nie wraca
+    do Biblioteki jako drugi, „wirtualny" klip.
+    """
+    taken = set(claimed)
+    return [dict(c) for c in marker_clips if marker_clip_key(c.get("video_id"), c.get("marker_id")) not in taken]
 
 
 # ─── Zestawienia ────────────────────────────────────────────────────────────

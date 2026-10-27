@@ -402,10 +402,53 @@ async def delete_clip(clip_id: str, actor: Actor = Depends(mentor_actor)):
     return {"ok": True}
 
 
+async def _marker_videos(ctx: Dict[str, Any], match_id: str = "") -> List[Dict[str, Any]]:
+    query = select(mentor_match_videos).where(mentor_match_videos.c.pair_key == ctx["pair_key"])
+    if match_id:
+        query = query.where(mentor_match_videos.c.match_id == match_id)
+    return await C.rows(query)
+
+
+async def _claimed_markers(ctx: Dict[str, Any]) -> List[tuple]:
+    """Znaczniki, z których już jest klip (także usunięty - nagrobek)."""
+    found = await C.rows(select(mentor_clips.c.video_id, mentor_clips.c.source_key).where(mentor_clips.c.pair_id == ctx["pair_id"])
+                         .where(mentor_clips.c.source == "marker"))
+    return [R.marker_clip_key(r.get("video_id"), r.get("source_key")) for r in found if r.get("source_key")]
+
+
+async def marker_library_clips(ctx: Dict[str, Any], match_id: str = "") -> List[Dict[str, Any]]:
+    """Znaczniki z aplikacji jako klipy Biblioteki (decyzja 27.10.2026).
+
+    Każdy ręczny znacznik jest klipem (`R.marker_is_clip`); punktowy dostaje
+    zakres -5 s / +3 s. Tylko do odczytu (`read_only`) - pierwsza zmiana
+    (flaga, kategoria, zestawienie, rozmowa) robi z niego klip przez
+    `POST /clips/from-marker`. Znacznik, który ma już klip, nie wraca drugi raz.
+    """
+    from app.mentor_video_rules import clean_markers
+
+    videos = await _marker_videos(ctx, match_id)
+    raw: List[Dict[str, Any]] = []
+    for video in videos:
+        raw += R.markers_as_clips(video, clean_markers(R.json_value(video.get("markers_json"), [])))
+    if not raw:
+        return []
+    out = R.unclaimed_marker_clips(raw, await _claimed_markers(ctx))
+    by_key = {R.s(r.get("key")): r["id"] for r in await C.categories(ctx, seed=False) if r.get("key") and not r.get("archived")}
+    names = await C.people({c.get("author_id") for c in out})
+    added = {v["id"]: v.get("created_at") for v in videos}
+    for clip in out:
+        key = R.s(clip.get("category_key"))
+        clip["category_ids"] = [by_key[key]] if key in by_key else []
+        clip["author"] = C.person(names, clip.get("author_id"))
+        clip["can_edit"] = False
+        clip["created_at"] = added.get(clip.get("video_id"))
+    return out
+
+
 @router.get("/pairs/{pair_id}/clips")
 async def list_clips(pair_id: str, category: str = Query("", max_length=80), match_id: str = Query("", max_length=80),
                      author: str = Query("", max_length=40), q: str = Query("", max_length=80),
-                     actor: Actor = Depends(mentor_actor)):
+                     markers: bool = Query(False), actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(pair_id, actor)
     query = select(mentor_clips).where(mentor_clips.c.pair_id == ctx["pair_id"]).where(mentor_clips.c.deleted_at.is_(None))
     if match_id:
@@ -418,7 +461,60 @@ async def list_clips(pair_id: str, category: str = Query("", max_length=80), mat
     needle = q.strip().casefold()
     if needle:
         found = [r for r in found if needle in f"{R.s(r.get('title'))} {R.s(r.get('note'))}".casefold()]
-    return {"clips": await C.clips_payload(ctx, found), "rev": ctx["rev"]}
+    clips = await C.clips_payload(ctx, found)
+    # `markers=1` (nowi klienci): znaczniki z aplikacji też są klipami Biblioteki.
+    # Starzy klienci dokładają je sami z pokoi meczów - bez flagi nic się nie zmienia.
+    if markers:
+        extra = await marker_library_clips(ctx, match_id)
+        if author:
+            extra = [c for c in extra if R.s(c.get("author_id")) == author]
+        if category:
+            extra = [c for c in extra if category in c["category_ids"]]
+        if needle:
+            extra = [c for c in extra if needle in f"{R.s(c.get('title'))} {R.s(c.get('note'))}".casefold()]
+        clips += extra
+    return {"clips": clips, "rev": ctx["rev"]}
+
+
+class FromMarkerBody(BaseModel):
+    video_id: str = Field(min_length=1, max_length=80)
+    marker_id: str = Field(min_length=1, max_length=80)
+
+
+@router.post("/pairs/{pair_id}/clips/from-marker")
+async def clip_from_marker(pair_id: str, body: FromMarkerBody, actor: Actor = Depends(mentor_actor)):
+    """Klip ze znacznika z aplikacji - idempotentnie: drugi raz zwraca ten sam klip.
+
+    Woła go klient przy pierwszej zmianie znacznika-klipu (Istotny, kategoria,
+    zestawienie, rozmowa). Zakres, komentarz (notatka), tytuł i kategoria
+    (po kluczu kategorii pary) przechodzą ze znacznika.
+    """
+    from app.mentor_video_rules import clean_markers
+
+    ctx = await C.pair_context(pair_id, actor, action="create")
+    video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == body.video_id))
+    if not video or R.s(video.get("pair_key")) != ctx["pair_key"]:
+        raise C.err(404, "VIDEO_NOT_FOUND", "Nie ma takiego nagrania przy tej parze.")
+    existing = await C.one(select(mentor_clips).where(mentor_clips.c.pair_id == ctx["pair_id"]).where(mentor_clips.c.video_id == video["id"])
+                           .where(mentor_clips.c.source == "marker").where(mentor_clips.c.source_key == body.marker_id)
+                           .where(mentor_clips.c.deleted_at.is_(None)))
+    if existing:
+        return await clip_payload(ctx, existing["id"])
+    marks = [m for m in clean_markers(R.json_value(video.get("markers_json"), [])) if m["id"] == body.marker_id]
+    shaped = R.markers_as_clips(video, marks)
+    if not shaped:
+        raise C.err(404, "MARKER_NOT_FOUND", "Tego znacznika już nie ma w nagraniu - mógł zostać usunięty w aplikacji.")
+    row = R.clip_row_from_marker(shaped[0], {r.get("key"): r["id"] for r in await C.categories(ctx) if r.get("key") and not r.get("archived")})
+    try:
+        row["start_s"], row["end_s"] = R.validate_clip(row["start_s"], row["end_s"], await _video_duration(video))
+    except R.RuleError as exc:
+        raise C.rule_error(exc) from exc
+    stamp = C.now()
+    row.update({"id": R.new_id(), "pair_id": ctx["pair_id"], "category_ids": C.dumps(row["category_ids"]), "author_id": actor.judge_id,
+                "acted_by": actor.acted_by, "created_at": stamp, "updated_at": stamp, "mp4_status": "none"})
+    await database.execute(mentor_clips.insert().values(**row))
+    await C.touch(ctx, actor.judge_id, "clip_created", "clips", row["match_id"], {"id": row["id"], "marker_id": body.marker_id})
+    return await clip_payload(ctx, row["id"])
 
 
 # ─── Zestawienia ────────────────────────────────────────────────────────────

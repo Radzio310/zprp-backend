@@ -294,9 +294,9 @@ def test_znacznik_bez_end_s_jest_widoczny_jako_klip():
         {"id": "r", "label": "Zakres", "video_s": 5, "end_s": 905},
     ])
     clips = {c["marker_id"]: c for c in R.markers_as_clips(video, marks)}
-    assert clips["p"]["start_s"] == 0 and clips["p"]["end_s"] == 7 and clips["p"]["point"]
+    assert clips["p"]["start_s"] == 0 and clips["p"]["end_s"] == 6 and clips["p"]["point"]
     assert clips["p"]["type"] == "goal" and clips["p"]["event_key"] == "ev1" and clips["p"]["kind"] == "goal"
-    assert clips["q"]["start_s"] == 64 and clips["q"]["end_s"] == 74
+    assert clips["q"]["start_s"] == 65 and clips["q"]["end_s"] == 73
     assert clips["r"]["end_s"] == 905 and not clips["r"]["point"]
     assert "s" not in clips
 
