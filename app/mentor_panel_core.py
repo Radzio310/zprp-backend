@@ -718,9 +718,10 @@ def category_shape(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def clip_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dict[str, Any]],
-               thread: Optional[Dict[str, Any]] = None, threads: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+               thread: Optional[Dict[str, Any]] = None, threads: Optional[Dict[str, Any]] = None,
+               media: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     owner = R.s(row.get("author_id")) == ctx["actor"].judge_id
-    return {
+    out = {
         "id": row["id"], "match_id": row.get("match_id"), "video_id": row.get("video_id"),
         "start_s": row.get("start_s"), "end_s": row.get("end_s"), "title": row.get("title"), "note": row.get("note"),
         "category_ids": R.json_value(row.get("category_ids"), []), "source": row.get("source"),
@@ -735,6 +736,20 @@ def clip_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dict[s
         "thread": thread,
         "threads": threads or {"total": 0, "open": 0, "comments": 0, "unread": 0, "last_at": None, "pins": []},
     }
+    if media is not None:
+        # Nagranie Bastion: stan pliku MP4 klipu i wspólny resolver odtwarzania (`docs/mentor-panel.md` 8.6).
+        # Inne źródła nie mają `media` (null): klient gra zakres oryginału jak dotąd.
+        out["media"] = media
+        out["mp4_status"] = _mp4_status(media, out["mp4_status"])
+    else:
+        out["media"] = None
+    return out
+
+
+def _mp4_status(media: Dict[str, Any], stored: str) -> str:
+    from app.mentor_bastion_jobs import mp4_status_of
+
+    return mp4_status_of(media, stored)
 
 
 async def clip_threads(pair_id: str, clips: List[Dict[str, Any]], judge_id: str = "") -> Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]]:
@@ -771,10 +786,17 @@ async def clip_threads(pair_id: str, clips: List[Dict[str, Any]], judge_id: str 
 async def clips_payload(ctx: Dict[str, Any], clip_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     names = await people({r.get("author_id") for r in clip_rows} | {r.get("acted_by") for r in clip_rows})
     threads = await clip_threads(ctx["pair_id"], clip_rows, ctx["actor"].judge_id)
+    try:
+        from app.mentor_bastion_jobs import media_for_clips
+
+        media = await media_for_clips(clip_rows)
+    except Exception:  # noqa: BLE001 - stan MP4 nigdy nie psuje listy klipów
+        logger.warning("mentor: stan MP4 klipów nieodczytany", exc_info=True)
+        media = {}
     out = []
     for r in clip_rows:
         legacy, summary = threads.get(r["id"], (None, None))
-        out.append(clip_shape(ctx, r, names, legacy, summary))
+        out.append(clip_shape(ctx, r, names, legacy, summary, media.get(r["id"])))
     return out
 
 

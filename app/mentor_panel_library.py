@@ -269,6 +269,8 @@ class ClipBody(BaseModel):
     source_key: Optional[str] = Field(default=None, max_length=200)
     match_ms: Optional[int] = None
     half: Optional[int] = None
+    #: Nagranie Bastion: true = zapisz też jako MP4 (zadanie w tej samej operacji); false/brak = klip wirtualny.
+    mp4: bool = False
 
 
 class ClipPatch(BaseModel):
@@ -279,6 +281,8 @@ class ClipPatch(BaseModel):
     category_ids: Optional[List[str]] = Field(default=None, max_length=20)
     important: Optional[bool] = None
     to_discuss: Optional[bool] = None
+    #: true = zamów MP4 (Bastion); zmiana zakresu klipu, który ma MP4, sama zakłada nowe zadanie.
+    mp4: Optional[bool] = None
 
 
 async def _video_of(ctx: Dict[str, Any], match_id: str, video_id: str) -> Dict[str, Any]:
@@ -307,6 +311,17 @@ async def clip_payload(ctx: Dict[str, Any], clip_id: str) -> Dict[str, Any]:
     return (await C.clips_payload(ctx, [row]))[0]
 
 
+async def _with_offer(payload: Dict[str, Any], row: Dict[str, Any], video: Optional[Dict[str, Any]], actor: Actor) -> Dict[str, Any]:
+    """Dla dialogu „Zapisz też jako MP4”: czas, limit, połączenie i konto (tylko nagrania Bastion przy włączonej fladze)."""
+    from app import mentor_bastion_jobs as J
+
+    try:
+        offer = await J.mp4_offer(row, video, actor)
+    except Exception:  # noqa: BLE001 - podpowiedź dialogu nigdy nie psuje zapisu
+        offer = None
+    return {**payload, "mp4_offer": offer} if offer else payload
+
+
 @router.post("/pairs/{pair_id}/clips")
 async def create_clip(pair_id: str, body: ClipBody, actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(pair_id, actor, action="create")
@@ -326,11 +341,15 @@ async def create_clip(pair_id: str, body: ClipBody, actor: Actor = Depends(mento
         "source": source, "source_key": R.plain(body.source_key, 120) or None,
         "match_ms": body.match_ms if body.match_ms is None or 0 <= body.match_ms <= 3 * 3600 * 1000 else None,
         "half": body.half if body.half in (1, 2) else None, "author_id": actor.judge_id,
-        "acted_by": actor.acted_by, "created_at": stamp, "updated_at": stamp, "mp4_status": "none",
+        "acted_by": actor.acted_by, "created_at": stamp, "updated_at": stamp, "mp4_status": "none", "media_rev": 1,
     }
     await database.execute(mentor_clips.insert().values(**row))
     await C.touch(ctx, actor.judge_id, "clip_created", "clips", card["match_id"], {"id": row["id"]})
-    return await clip_payload(ctx, row["id"])
+    from app import mentor_bastion_jobs as J
+
+    # Bastion: MP4 powstaje tylko na wybór użytkownika (`mp4: true`), w tej samej operacji. Domyślnie klip jest wirtualny.
+    await J.after_clip_saved(row, video, actor, want_mp4=bool(body.mp4))
+    return await _with_offer(await clip_payload(ctx, row["id"]), row, video, actor)
 
 
 @router.patch("/clips/{clip_id}")
@@ -339,16 +358,25 @@ async def update_clip(clip_id: str, body: ClipPatch, actor: Actor = Depends(ment
     C.check(ctx, "edit", owner=R.s(row.get("author_id")) == actor.judge_id)
     patch = body.model_dump(exclude_unset=True)
     values: Dict[str, Any] = {"updated_at": C.now()}
+    from app import mentor_bastion_jobs as J
+
+    video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == row["video_id"])) or {}
+    bastion = bool(J.bastion_item_of(video))
+    range_changed = False
+    had_mp4 = await J.had_mp4(row) if bastion else False
     if "start_s" in patch or "end_s" in patch:
-        video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == row["video_id"])) or {}
         try:
             start, end = R.validate_clip(patch.get("start_s", row["start_s"]), patch.get("end_s", row["end_s"]),
                                          await _video_duration(video) if video else None)
         except R.RuleError as exc:
             raise C.rule_error(exc) from exc
         if (start, end) != (row["start_s"], row["end_s"]):
-            values.update(start_s=start, end_s=end)
-            if row.get("mp4_status") not in (None, "none"):
+            range_changed = True
+            # Nowa rewizja pliku: wynik starej nigdy nie zastąpi nowej. Stary plik Bastionu zostaje do sukcesu nowego.
+            values.update(start_s=start, end_s=end, media_rev=int(row.get("media_rev") or 1) + 1)
+            if bastion:
+                values.update(mp4_status="none", mp4_key=None, mp4_size=None)
+            elif row.get("mp4_status") not in (None, "none"):
                 from app.mentor_panel_media import forget_object
 
                 forget_object(row.get("mp4_key"))
@@ -370,7 +398,10 @@ async def update_clip(clip_id: str, body: ClipPatch, actor: Actor = Depends(ment
     await C.touch(ctx, actor.judge_id, "clip_updated", "clips", row["match_id"], audit)
     if newly_discuss:
         await _notify_clip_to_discuss(ctx, actor, row)
-    return await clip_payload(ctx, clip_id)
+    if bastion and (range_changed or patch.get("mp4")):
+        # Klip wirtualny zostaje wirtualny; zadanie powstaje, gdy klip miał MP4 albo użytkownik go zamawia.
+        await J.after_clip_saved({**row, **values}, video, actor, want_mp4=bool(patch.get("mp4")) or had_mp4)
+    return await _with_offer(await clip_payload(ctx, clip_id), {**row, **values}, video, actor)
 
 
 async def _notify_clip_to_discuss(ctx: Dict[str, Any], actor: Actor, row: Dict[str, Any]) -> None:
@@ -398,6 +429,12 @@ async def delete_clip(clip_id: str, actor: Actor = Depends(mentor_actor)):
         from app.mentor_panel_media import forget_object
 
         forget_object(row.get("mp4_key"))
+    try:
+        from app import mentor_bastion_jobs as J
+
+        await J.discard_clip_media(clip_id)  # zadania anulowane, pliki wszystkich rewizji skasowane
+    except Exception:  # noqa: BLE001
+        pass
     await C.touch(ctx, actor.judge_id, "clip_deleted", "clips", row["match_id"], {"id": clip_id})
     return {"ok": True}
 
@@ -1122,8 +1159,16 @@ async def _public_clip(clip: Dict[str, Any], cards: Dict[str, Dict[str, Any]], c
     from app.mentor_panel_media import public_video
 
     video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == clip["video_id"]))
-    return R.public_clip(clip, video=await public_video(video) if video else None, match=cards.get(clip["match_id"]),
-                         categories=categories)
+    out = R.public_clip(clip, video=await public_video(video) if video else None, match=cards.get(clip["match_id"]),
+                        categories=categories)
+    from app import mentor_bastion_jobs as J
+
+    if J.bastion_item_of(video):
+        # Publiczny odbiorca dostaje wyłącznie gotowy plik tego klipu: bez adresu portalu, embedu i sesji Bastionu.
+        if out.get("source"):
+            out["source"].update(url=None, playable=False)
+        out["media"] = await J.public_media(clip)
+    return out
 
 
 @router.get("/public/{token}")

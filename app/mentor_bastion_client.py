@@ -94,11 +94,12 @@ class ConnectorClient:
             self._http = None
 
     async def request(self, method: str, path: str, *, params: Optional[Dict[str, Any]] = None,
-                      json: Optional[Dict[str, Any]] = None) -> Reply:
+                      json: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None) -> Reply:
         if not self.breaker.allow():
             raise ConnectorUnavailable("circuit_open")
         try:
-            res = await self._client().request(method, path, params=params, json=json)
+            extra = {"timeout": httpx.Timeout(timeout, connect=min(3.0, timeout))} if timeout else {}
+            res = await self._client().request(method, path, params=params, json=json, **extra)
         except httpx.HTTPError as exc:
             self.breaker.failure()
             logger.warning("bastion connector: %s %s -> %s", method, path, type(exc).__name__)
@@ -175,6 +176,24 @@ class ConnectorClient:
         if not include_embed:
             params["include_embed"] = "false"
         return await self.request("GET", "/playback", params=params)
+
+    # ─── Klipy MP4 (etap 4) ─────────────────────────────────────────────
+
+    async def create_clip(self, scope: str, judge_id: Optional[str], bunny_item_id: int, start_s: int, end_s: int,
+                          fingerprint: str, correlation: str) -> Reply:
+        """`POST /clips`: idempotentne po odcisku. 200 = zlecono (`remote_id`), 202 = needs_reconciliation (zero ponowien)."""
+        body: Dict[str, Any] = {"scope": scope, "judge_id": judge_id, "bunny_item_id": int(bunny_item_id),
+                                "start_s": int(start_s), "end_s": int(end_s), "fingerprint": fingerprint,
+                                "correlation": correlation}
+        return await self.request("POST", "/clips", json=body, timeout=40.0)
+
+    async def clip_state(self, scope: str, judge_id: Optional[str], remote_id: str) -> Reply:
+        return await self.request("GET", f"/clips/{remote_id}", params=_scope_params(scope, judge_id), timeout=25.0)
+
+    async def clip_download_url(self, scope: str, judge_id: Optional[str], remote_id: str) -> Reply:
+        """Krótko żyjący podpisany adres (sekret: ani do logów, ani do bazy). Pobiera go BAZA bez ciasteczek."""
+        return await self.request("POST", f"/clips/{remote_id}/download-url", params=_scope_params(scope, judge_id),
+                                  timeout=30.0)
 
 
 def _scope_params(scope: str, judge_id: Optional[str]) -> Dict[str, Any]:

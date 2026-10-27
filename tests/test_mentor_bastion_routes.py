@@ -149,7 +149,7 @@ def test_domyslne_dziala_osobiste_nie_jest_pytane(env):
 
     out, calls = env.run(go)
     assert out["connection_scope"] == "default" and out["embed_url"] == EMBED and out["provider"] == "bastion"
-    assert out["mode"] == "bunny_embed" and out["capabilities"] == {"seek": True, "rate": False, "mute": True}
+    assert out["mode"] == "bunny_embed" and out["capabilities"] == {"seek": True, "rate": False, "mute": False}
     assert out["duration_s"] == 6795 and out["expires_at"] == 1893456000
     assert len(calls) == 1 and "judge_id" not in calls[0][2]
 

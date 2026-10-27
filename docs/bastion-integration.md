@@ -62,6 +62,9 @@ Wszystkie z `Authorization: Bearer BASTION_CONNECTOR_TOKEN`, poza WSS.
 | `POST /probe/clip` `{scope, judge_id, bunny_item_id, start_s, end_s}` | P8: jedno zlecenie cięcia (prywatny klip), zwraca zdalne `remote_id` i kod; 202 = `needs_reconciliation` |
 | `GET /probe/clip/{id}?scope&judge_id` | P8: `clip-context` (m.in. `download_available`) |
 | `POST /probe/clip/{id}/download?scope&judge_id` | P8: pobranie do katalogu tymczasowego, ffprobe, SHA-256, skasowanie pliku; zwraca metadane |
+| `POST /clips` `{scope, judge_id, bunny_item_id, start_s, end_s, fingerprint, correlation}` | Etap 4: produkcyjne zlecenie, idempotentne po odcisku (ksiega `clip_jobs.json`), 202 = `needs_reconciliation` bez ponowien |
+| `GET /clips/{remote_id}?scope&judge_id` | Etap 4: stan (`ready` = `download_available`), tylko dla klipu tego polaczenia |
+| `POST /clips/{remote_id}/download-url?scope&judge_id` | Etap 4: krotko zyjacy podpisany adres po walidacji hostow; plik pobiera BAZA bez ciasteczek |
 | `GET /test` | techniczna strona testowa (tylko gdy `BASTION_TEST_PAGE=true`) |
 
 `judge_id` ustala backend BAZY z prawdziwej sesji (`base_actor`), nigdy z `act_as` (Etap 1).

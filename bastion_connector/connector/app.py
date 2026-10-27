@@ -216,7 +216,7 @@ async def playback(scope: str, bunny_item_id: int | None = None, game_url: str |
     http = {"OK": 200, "BASTION_AUTH_REQUIRED": 409, "BASTION_RESOURCE_FORBIDDEN": 403,
             "BASTION_RATE_LIMITED": 429}.get(res.code, 503 if res.code != "BASTION_BAD_RESPONSE" else 502)
     body = {"code": res.code, "bunny_item_id": item, "video_state": res.video_state, "expires_at": res.expires_at,
-            "game_context_keys": res.top_keys, "detail": res.detail, **info}
+            "game_context_keys": res.top_keys, "detail": res.detail, "match": res.match, **info}
     if res.embed_url and include_embed:
         body["embed_url"] = res.embed_url
     return JSONResponse(body, status_code=http, headers={"Cache-Control": "no-store"})

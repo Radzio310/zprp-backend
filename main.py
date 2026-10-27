@@ -1620,6 +1620,13 @@ async def startup():
     asyncio.create_task(run_media_worker())
     asyncio.create_task(run_retention())
     asyncio.create_task(run_email_digest())
+    # Handball Bastion: trwały worker klipów MP4 (stan i dzierżawa w bazie, restart go wznawia). Tylko za BASTION_ENABLED.
+    from app.mentor_bastion_rules import enabled as _bastion_enabled
+    if _bastion_enabled():
+        from app.mentor_bastion_jobs import run_bastion_worker
+        for _n in (1, 2):
+            asyncio.create_task(run_bastion_worker(_n))
+        logger.info("✅ Mentor Bastion: worker klipów MP4 wystartował (2 pętle)")
     logger.info("✅ Mentor panel: media worker, retencja i e-maile wystartowały")
     logger.info("✅ Publiczna hurtownia ZPRP wystartowała (lekki cykl 2/15 min + katalog 24 h)")
     logger.info("✅ MP protocol snapshot scheduler started")

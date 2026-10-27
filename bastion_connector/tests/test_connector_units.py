@@ -781,3 +781,15 @@ async def test_download_url_validates_host_and_other_connection_cannot_use_clip(
             await s.clip_context("personal", "102", "55", strict=True)
     finally:
         clips.resolve_public_ips = orig
+
+
+def test_summarize_match_whitelist_and_shapes():
+    from connector.bastion import classify, summarize_match
+    m = summarize_match({"match": {"home_team": {"name": "SPR Gliwice"}, "away": "KS Opole", "date": "2026-10-20", "Mecz": 123,
+                                   "Sezon": 9, "Rozgrywki": "K1", "secret_url": "https://x", "referees": [1, 2]}})
+    assert m["home"] == "SPR Gliwice" and m["away"] == "KS Opole" and m["zprp_match_id"] == "123"
+    assert m["zprp_season_id"] == "9" and m["zprp_competition_id"] == "K1" and "secret_url" in m["match_keys"]
+    assert "https" not in str({k: v for k, v in m.items() if k != "match_keys"})
+    assert summarize_match({}) == {} and summarize_match({"match": "x"}) == {}
+    r = classify(200, {"video": {"state": "READY"}, "match": {"home": "A"}}, ["mediadelivery.net"])
+    assert r.match["home"] == "A" and r.embed_url is None

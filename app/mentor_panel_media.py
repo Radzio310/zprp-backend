@@ -434,6 +434,13 @@ async def request_mp4(clip_id: str, actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(clip["pair_id"], actor, action="create")
     upload = await _clip_upload(clip)
     if not upload:
+        from app import mentor_bastion_jobs as J
+
+        video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == clip["video_id"])) or {}
+        if J.bastion_item_of(video):
+            from app.mentor_bastion import order_mp4
+
+            return await order_mp4(ctx, clip, video, actor)  # Bastion: zamówienie MP4 przez kolejkę (etap 4)
         raise C.err(409, "MP4_LINK_VIDEO", "Plik MP4 robimy tylko z własnych nagrań. Klip z YouTube/Vimeo odtwarzasz w panelu.")
     if upload.get("status") != "ready" or not upload.get("play_key"):
         raise C.err(409, "MP4_NOT_READY", "Nagranie jeszcze się przetwarza - spróbuj za chwilę.")

@@ -20,6 +20,7 @@ class GameResult:
     top_keys: list[str] = field(default_factory=list)
     detail: str | None = None
     identity: dict = field(default_factory=dict)  # {id, label, source, viewer_keys}; puste, gdy brak klucza viewer
+    match: dict = field(default_factory=dict)  # krotkie podsumowanie meczu z game-context (bilet meczu), bez embedu
 
 
 _EXPIRY_PARAMS = ("expires", "expire", "token_expires", "exp")
@@ -71,6 +72,49 @@ def extract_identity(body: Any) -> dict:
     return {"id": None, "label": None, "source": None, "viewer_keys": []}
 
 
+def _norm(k: Any) -> str:
+    return "".join(ch for ch in str(k).lower() if ch.isalnum())
+
+
+def _scalar(v: Any, limit: int = 120) -> str | None:
+    if isinstance(v, dict):  # np. {"name": "...", "id": ...}
+        for k in ("name", "nazwa", "title", "label", "short_name"):
+            if k in v and (x := _scalar(v[k], limit)):
+                return x
+        return None
+    return _clean(v, limit)
+
+
+def _pick(m: dict, names: tuple) -> str | None:
+    by = {_norm(k): v for k, v in m.items()}
+    for n in names:
+        if n in by and (x := _scalar(by[n])):
+            return x
+    return None
+
+
+def summarize_match(body: Any) -> dict:
+    """Krotkie podsumowanie klucza `match` z game-context: druzyny, data, kod rozgrywek i identyfikatory ZPRP (Mecz,
+    Sezon, Rozgrywki). Ksztalt `match` nie jest potwierdzony publicznie, wiec pola szukamy po kilku nazwach i bierzemy
+    tylko skalary (zadnych URL-i, osob ani opisow). `match_keys` = NAZWY pol (bez wartosci), do sprawdzenia ksztaltu na zywo."""
+    m = body.get("match") if isinstance(body, dict) else None
+    if not isinstance(m, dict):
+        return {}
+    out = {
+        "home": _pick(m, ("home", "hometeam", "hometeamname", "teamhome", "host", "gospodarz", "gospodarze", "zespolgosp", "team1")),
+        "away": _pick(m, ("away", "awayteam", "awayteamname", "teamaway", "guest", "gosc", "goscie", "zespolgosc", "team2")),
+        "date": _pick(m, ("date", "matchdate", "startsat", "starttime", "scheduledat", "playedat", "datetime", "kickoff", "datafakt", "data")),
+        "competition": _pick(m, ("competition", "competitionname", "league", "rozgrywki", "rozgrywkinazwa", "tournament")),
+        "code": _pick(m, ("code", "matchcode", "competitioncode", "rozgrywkicode", "numer", "numermeczu", "matchnumber", "kod")),
+        "zprp_match_id": _pick(m, ("mecz", "idmecz", "meczid", "zprpmatchid", "zprpid", "matchid")),
+        "zprp_season_id": _pick(m, ("sezon", "idsezon", "sezonid", "seasonid", "season")),
+        "zprp_competition_id": _pick(m, ("rozgrywki", "idrozgrywki", "rozgrywkiid", "competitionid")),
+    }
+    out = {k: v for k, v in out.items() if v}
+    out["match_keys"] = sorted(str(k) for k in m)[:30]
+    return out
+
+
 def classify(http_status: int, body: Any, embed_suffixes: list[str]) -> GameResult:
     if http_status == 401:
         return GameResult("BASTION_AUTH_REQUIRED", 401)
@@ -85,7 +129,7 @@ def classify(http_status: int, body: Any, embed_suffixes: list[str]) -> GameResu
     video = body.get("video") if isinstance(body.get("video"), dict) else {}
     embed = video.get("embed_url") if isinstance(video.get("embed_url"), str) else None
     res = GameResult("OK", 200, video_state=video.get("state") if isinstance(video.get("state"), str) else None,
-                     top_keys=sorted(body.keys())[:20], identity=extract_identity(body))
+                     top_keys=sorted(body.keys())[:20], identity=extract_identity(body), match=summarize_match(body))
     if embed:
         if not embed_url_ok(embed, embed_suffixes):
             host = urlsplit(embed).hostname

@@ -36,12 +36,13 @@ JOB_STATES = ("queued", "submitting", "submitted", "waiting_for_remote", "downlo
 JOB_TERMINAL = ("ready", "failed", "cancelled")
 JOB_ACTIVE = tuple(s for s in JOB_STATES if s not in JOB_TERMINAL)
 JOB_TRANSITIONS: Dict[str, Tuple[str, ...]] = {
-    "queued": ("submitting", "waiting_for_auth", "cancelled", "failed"),
+    "queued": ("submitting", "submitted", "waiting_for_remote", "downloading", "waiting_for_auth", "retryable_failed",
+               "needs_reconciliation", "cancelled", "failed"),
     "submitting": ("submitted", "needs_reconciliation", "waiting_for_auth", "retryable_failed", "failed", "cancelled"),
     "submitted": ("waiting_for_remote", "downloading", "waiting_for_auth", "retryable_failed", "failed", "cancelled"),
     "waiting_for_remote": ("downloading", "waiting_for_auth", "retryable_failed", "failed", "cancelled"),
-    "downloading": ("uploading", "waiting_for_auth", "retryable_failed", "failed", "cancelled"),
-    "uploading": ("ready", "retryable_failed", "failed", "cancelled"),
+    "downloading": ("uploading", "waiting_for_remote", "waiting_for_auth", "retryable_failed", "failed", "cancelled"),
+    "uploading": ("ready", "downloading", "waiting_for_remote", "retryable_failed", "failed", "cancelled"),
     "waiting_for_auth": ("queued", "submitting", "submitted", "waiting_for_remote", "downloading", "cancelled", "failed"),
     "needs_reconciliation": ("submitted", "queued", "failed", "cancelled"),
     "retryable_failed": ("queued", "submitted", "waiting_for_remote", "downloading", "uploading", "failed", "cancelled"),
@@ -313,3 +314,249 @@ def may_resume_with(job_identity: Optional[str], connection_identity: Optional[s
     if job_identity and connection_identity:
         return job_identity == connection_identity
     return True
+
+
+# ─── Etap 4: kolejka klipów MP4 (czyste reguły) ─────────────────────────────
+
+#: Dzierżawa zadania w bazie: po jej upływie inny worker (albo ten sam po restarcie) może je przejąć.
+LEASE_S = 300
+MAX_ATTEMPTS = 8
+#: Ile razy pytamy Bastion o gotowość (odstępy 10-45 s, razem ok. 20-25 min), zanim uznamy zlecenie za zawieszone.
+MAX_POLLS = 40
+#: Przewidywany czas przygotowania pliku po stronie Bastionu (P8: ok. 90 s) - tylko podpowiedź do dialogu.
+ESTIMATED_CUT_S = 90
+BACKOFF_BASE_S = 15.0
+BACKOFF_CAP_S = 15 * 60.0
+#: Tolerancja długości pliku względem zakresu (P8: różnica 0,02 s).
+DURATION_TOLERANCE_S = 2.0
+MIN_FILE_BYTES = 2048
+
+#: Stany, które worker podejmuje sam (reszta czeka na człowieka albo na połączenie).
+JOB_RUNNABLE = ("queued", "submitting", "submitted", "waiting_for_remote", "downloading", "uploading", "retryable_failed")
+#: Etapy widoczne dla klienta (`media.stage`).
+STAGES = ("saved", "bastion_cutting", "storing", "ready", "waiting_for_auth", "failed")
+
+MSG_STAGE = {
+    "saved": "Klip zapisany. Przygotowuję plik MP4.",
+    "bastion_cutting": "Bastion przygotowuje klip.",
+    "storing": "Zapisuję klip w BAZIE.",
+    "ready": "Klip zapisany w BAZIE",
+    "waiting_for_auth": "Połącz się z Bastionem tym samym kontem, aby dokończyć klip.",
+    "failed": "Nie udało się przygotować pliku MP4.",
+}
+MSG_WRONG_ACCOUNT = "Zaloguj się do Bastionu kontem, na którym zlecono ten klip."
+MSG_RECONCILE = ("Nie wiadomo, czy Bastion przyjął klip. Sprawdź listę klipów w Bastionie. "
+                 "Wznowienie może utworzyć drugi, prywatny klip.")
+MSG_TOO_LONG = "Bastion przyjmuje klipy od %d do %d s. Plik MP4 nie zostanie przygotowany." % (MIN_CLIP_S, MAX_CLIP_S)
+ERROR_MESSAGES = {
+    "BASTION_RESOURCE_FORBIDDEN": MSG_FORBIDDEN,
+    "BASTION_SUBMIT_REJECTED": "Bastion odrzucił zlecenie klipu.",
+    "BASTION_CLIP_NOT_FOUND": "Klip zniknął z Bastionu. Wznów, aby zlecić go ponownie.",
+    "BASTION_REMOTE_TIMEOUT": "Bastion nie przygotował klipu w rozsądnym czasie. Możesz wznowić.",
+    "BASTION_RETRIES_EXHAUSTED": "Nie udało się po kilku próbach. Możesz wznowić.",
+    "BASTION_FILE_INVALID": "Pobrany plik nie jest poprawnym filmem MP4.",
+    "BASTION_FILE_MISMATCH": "Pobrany plik ma inną długość niż zaznaczony zakres.",
+    "DOWNLOAD_TOO_LARGE": "Plik klipu jest większy niż dopuszczalny limit.",
+    "DOWNLOAD_HOST_NOT_ALLOWED": "Adres pobrania z Bastionu nie jest na liście dozwolonych.",
+    "DOWNLOAD_ADDRESS_NOT_PUBLIC": "Adres pobrania z Bastionu wskazuje na sieć nieobsługiwaną.",
+    "STORAGE_OFF": "Magazyn nagrań nie jest skonfigurowany.",
+    "STORAGE_UPLOAD_FAILED": "Nie udało się zapisać pliku w magazynie BAZY. Spróbuję ponownie.",
+    "BASTION_WRONG_ACCOUNT": MSG_WRONG_ACCOUNT,
+    "BASTION_UNAVAILABLE": MSG_UNAVAILABLE,
+    "BASTION_RATE_LIMITED": MSG_RATE_LIMITED,
+    "NEEDS_RECONCILIATION": MSG_RECONCILE,
+}
+#: Błędy bez sensu ponawiania (konfiguracja, odmowa, zły plik): zadanie od razu `failed`.
+FATAL_CODES = ("BASTION_RESOURCE_FORBIDDEN", "BASTION_SUBMIT_REJECTED", "BASTION_FILE_INVALID", "BASTION_FILE_MISMATCH",
+               "DOWNLOAD_TOO_LARGE", "DOWNLOAD_HOST_NOT_ALLOWED", "DOWNLOAD_ADDRESS_NOT_PUBLIC", "BASTION_CLIP_NOT_FOUND",
+               "BASTION_REMOTE_TIMEOUT")
+
+
+def backoff_s(attempts: int, rng=None) -> float:
+    """Opóźnienie przed kolejną próbą po błędzie: 15 s, 30 s, 60 s... do 15 min, z jitterem +-25%."""
+    import random
+
+    r = (rng or random.random)()
+    base = min(BACKOFF_CAP_S, BACKOFF_BASE_S * (2 ** max(0, int(attempts) - 1)))
+    return round(base * (0.75 + 0.5 * r), 2)
+
+
+def poll_delay_s(poll_count: int, rng=None) -> float:
+    """Odstęp między pytaniami o gotowość pliku: ok. 10 s na początku, rośnie do 45 s, z jitterem +-20%."""
+    import random
+
+    r = (rng or random.random)()
+    base = min(45.0, 10.0 * (1.35 ** max(0, int(poll_count))))
+    return round(base * (0.8 + 0.4 * r), 2)
+
+
+def job_stage(state: str, has_remote: bool) -> Optional[str]:
+    """Stan zadania -> etap dla klienta. `cancelled` nie ma etapu (klip nie ma już zadania na tej rewizji)."""
+    if state == "queued":
+        return "saved"
+    if state == "ready":
+        return "ready"
+    if state == "waiting_for_auth":
+        return "waiting_for_auth"
+    if state in ("failed", "needs_reconciliation"):
+        return "failed"
+    if state in ("downloading", "uploading"):
+        return "storing"
+    if state in ("submitting", "submitted", "waiting_for_remote"):
+        return "bastion_cutting"
+    if state == "retryable_failed":
+        return "storing" if has_remote else "bastion_cutting"
+    return None
+
+
+def job_message(state: str, error_code: Optional[str], stored: Optional[str] = None) -> str:
+    if state == "needs_reconciliation":
+        return MSG_RECONCILE
+    if state == "waiting_for_auth" and error_code == "BASTION_WRONG_ACCOUNT":
+        return MSG_WRONG_ACCOUNT
+    if state in ("failed", "retryable_failed") and error_code:
+        return ERROR_MESSAGES.get(error_code) or stored or MSG_STAGE["failed"]
+    return MSG_STAGE.get(job_stage(state, True) or "", "")
+
+
+def can_resume_job(state: str) -> bool:
+    """Ręczne „Wznów”: tylko tam, gdzie człowiek coś zmienia (połączenie, awaria, niepewny wynik)."""
+    return state in ("waiting_for_auth", "failed", "needs_reconciliation", "retryable_failed")
+
+
+def can_cancel_job(job: Optional[Mapping[str, Any]]) -> bool:
+    """Anulować można przed wysłaniem do Bastionu (nic nie wyszło) albo gdy zadanie leży w błędzie / niepewnym wyniku."""
+    if not job:
+        return False
+    state = job.get("state")
+    if state in ("failed", "needs_reconciliation"):
+        return True
+    if state in ("queued", "waiting_for_auth", "retryable_failed"):
+        return job.get("submitted_at") is None and not job.get("remote_clip_id")
+    return False
+
+
+def verify_media(probe: Mapping[str, Any], size: int, expected_s: float) -> Optional[str]:
+    """Kontrola pobranego pliku: mały rozmiar, brak obrazu, zły kontener albo zła długość = kod błędu (inaczej None).
+    Strona HTML logowania zapisana jako .mp4 nie przechodzi: nie ma strumienia wideo."""
+    if size < MIN_FILE_BYTES or not probe.get("has_video"):
+        return "BASTION_FILE_INVALID"
+    fmt = str(probe.get("format") or "")
+    if "mp4" not in fmt and "mov" not in fmt:
+        return "BASTION_FILE_INVALID"
+    dur = probe.get("duration_s")
+    if dur is None or dur <= 0:
+        return "BASTION_FILE_INVALID"
+    if abs(float(dur) - float(expected_s)) > DURATION_TOLERANCE_S:
+        return "BASTION_FILE_MISMATCH"
+    return None
+
+
+def asset_key(prefix: str, pair_id: str, clip_id: str, revision: int, ext: str) -> str:
+    """Klucz w magazynie Mentora: z rewizją, więc plik starej rewizji nigdy nie nadpisze nowej."""
+    return "/".join([prefix.strip("/"), str(pair_id), "clips", str(clip_id), f"r{int(revision)}.{ext}"])
+
+
+def file_time(playback: Mapping[str, Any], source_s: Optional[float]) -> Optional[float]:
+    """Sekunda oryginału -> sekunda lokalnego pliku (0..duration). Poza plikiem = przycięte, nigdy dalej niż plik."""
+    if source_s is None or playback.get("mode") != "asset":
+        return None
+    asset = playback.get("asset") or {}
+    try:
+        t = float(source_s) - float(asset.get("source_start_s") or 0)
+    except (TypeError, ValueError):
+        return None
+    dur = asset.get("duration_s")
+    t = max(0.0, t)
+    return round(min(t, float(dur)) if dur else t, 2)
+
+
+def resolve_clip_playback(*, clip: Mapping[str, Any], asset: Optional[Mapping[str, Any]] = None,
+                          job: Optional[Mapping[str, Any]] = None, video_provider: Optional[str] = None,
+                          video_present: bool = True, eligible: Optional[bool] = None) -> Dict[str, Any]:
+    """JEDEN resolver odtwarzania klipu (pokój, biblioteka, kino, kolejki, zestawienia, publiczny klip). Bez URL-i
+    (te powstają na żądanie po kontroli dostępu).
+
+      mode "asset"        - gotowy plik BAZY dla BIEŻĄCEJ rewizji; gra 0..duration, `file_offset_s` mapuje czas oryginału
+                            (`file_s = video_s - asset.source_start_s`, patrz `file_time`),
+      mode "source_range" - wirtualny zakres oryginału `range` (plik w przygotowaniu / niepowodzenie) + `status`,
+      mode "waiting"      - brak źródła i brak pliku: stan oczekiwania, nie gotowy pusty klip.
+    `status`: "ready" albo etap zadania (`STAGES`), "virtual" (klip bez MP4, można zamówić) albo "not_exported" (zakres poza 2-300 s).
+    Plik starej rewizji NIGDY nie jest oznaczany jako gotowy plik nowego zakresu."""
+    rev = int(clip.get("media_rev") or 1)
+    base: Dict[str, Any] = {
+        "revision": rev, "video_id": clip.get("video_id"),
+        "range": {"start_s": clip.get("start_s"), "end_s": clip.get("end_s")}, "asset": None, "file_offset_s": 0.0,
+        "stage": None, "message": "", "eligible": eligible, "can_resume": False, "job": None,
+        #: "mp4" = klip ma (lub zamówiony ma) plik w BAZIE; "virtual" = tylko znaczniki czasu, gra z pełnego meczu.
+        "kind": "virtual", "can_order_mp4": False, "can_cancel": False,
+    }
+    if job:
+        has_remote = bool(job.get("remote_clip_id"))
+        base["stage"] = job_stage(job.get("state"), has_remote)
+        base["message"] = job_message(job.get("state"), job.get("last_error_code"), job.get("last_error_message"))
+        base["can_resume"] = can_resume_job(job.get("state"))
+        base["kind"] = "mp4"
+        base["can_cancel"] = can_cancel_job(job)
+        base["job"] = {"state": job.get("state"), "attempts": int(job.get("attempts") or 0), "error_code": job.get("last_error_code"),
+                       "next_attempt_at": job.get("next_attempt_at"), "updated_at": job.get("updated_at"),
+                       "sent_range": {"start_s": job.get("start_s"), "end_s": job.get("end_s")}}
+    ready_asset = asset if asset and asset.get("status") == "ready" and int(asset.get("revision") or 0) == rev else None
+    if ready_asset:
+        start = clip.get("start_s") or 0
+        src_start = float(ready_asset["source_start_s"] if ready_asset.get("source_start_s") is not None else start)
+        src_end = float(ready_asset["source_end_s"] if ready_asset.get("source_end_s") is not None else clip.get("end_s") or 0)
+        base.update(mode="asset", status="ready", stage="ready", message=MSG_STAGE["ready"], can_resume=False, kind="mp4",
+                    can_cancel=False,
+                    file_offset_s=round(max(0.0, float(start) - src_start), 3),
+                    asset={"id": ready_asset.get("id"), "revision": rev, "duration_s": ready_asset.get("duration_s"),
+                           "width": ready_asset.get("width"), "height": ready_asset.get("height"), "size": ready_asset.get("size"),
+                           "has_poster": bool(ready_asset.get("poster_key")), "source_start_s": src_start, "source_end_s": src_end,
+                           "origin_provider": ready_asset.get("origin_provider")})
+        return base
+    if not video_present:
+        base.update(mode="waiting", status="waiting_for_source", message=base["message"] or "Brak źródła tego klipu.")
+        return base
+    if video_provider == PROVIDER:
+        if job:
+            base.update(mode="source_range", status=base["stage"] or "saved")
+        elif eligible is False:
+            base.update(mode="source_range", status="not_exported", message=MSG_TOO_LONG)
+        else:
+            base.update(mode="source_range", status="virtual", can_order_mp4=True)
+        return base
+    base.update(mode="source_range", status="source")
+    return base
+
+
+# ─── Bilet meczu: czy link z Bastionu to mecz tego pokoju ───────────────────
+
+
+def _fold(v: Any) -> str:
+    return "".join(ch for ch in str(v or "").casefold() if ch.isalnum())
+
+
+def same_match(summary: Optional[Mapping[str, Any]], card: Mapping[str, Any]) -> Optional[bool]:
+    """True/False/None (brak danych do porównania). Najpierw identyfikator ZPRP meczu, potem para drużyn (w obu
+    kolejnościach, bez wielkości liter i znaków specjalnych), potem kod rozgrywek. Nigdy nie zgadujemy przy braku danych."""
+    if not summary:
+        return None
+    mid = _fold(summary.get("zprp_match_id"))
+    if mid and _fold(card.get("match_id")):
+        return mid == _fold(card.get("match_id"))
+    h, a = _fold(summary.get("home")), _fold(summary.get("away"))
+    ch, ca = _fold((card.get("home") or {}).get("name")), _fold((card.get("away") or {}).get("name"))
+    if h and a and ch and ca:
+        return (h == ch and a == ca) or (h == ca and a == ch)
+    code, ccode = _fold(summary.get("code")), _fold(card.get("match_code"))
+    if code and ccode:
+        return code == ccode
+    return None
+
+
+def public_match_summary(summary: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not summary:
+        return None
+    keep = ("home", "away", "date", "competition", "code", "zprp_match_id", "zprp_season_id", "zprp_competition_id")
+    out = {k: summary.get(k) for k in keep if summary.get(k)}
+    return out or None

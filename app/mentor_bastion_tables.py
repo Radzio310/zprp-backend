@@ -97,6 +97,11 @@ def define_tables(metadata):
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("finished_at", DateTime(timezone=True), nullable=True),
         Column("asset_id", String, nullable=True),
+        #: Etap 4: kiedy zlecenie poszlo do Bastionu (limit oczekiwania) i ile razy pytano o gotowosc (backoff).
+        Column("submitted_at", DateTime(timezone=True), nullable=True),
+        Column("poll_count", Integer, nullable=False, server_default=text("0")),
+        #: Ostatni komunikat dla czlowieka (po polsku, bez adresow i sekretow).
+        Column("last_error_message", String, nullable=True),
         #: Jedna operacja na daną rewizję klipu.
         UniqueConstraint("clip_id", "clip_revision", name="uq_mentor_bastion_job_clip_rev"),
     )
@@ -133,4 +138,9 @@ def define_tables(metadata):
 MIGRATIONS = (
     #: Identyfikator źródła u dostawcy (Bastion: `bunny_item_id`). Stare wiersze: NULL.
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS external_id VARCHAR",
+    #: Etap 4: rewizja pliku klipu (media_rev rośnie przy zmianie zakresu) i nowe pola kolejki.
+    "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS media_rev INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE mentor_bastion_clip_jobs ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ",
+    "ALTER TABLE mentor_bastion_clip_jobs ADD COLUMN IF NOT EXISTS poll_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE mentor_bastion_clip_jobs ADD COLUMN IF NOT EXISTS last_error_message VARCHAR",
 )

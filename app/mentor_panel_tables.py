@@ -102,6 +102,8 @@ def define_tables(metadata):
         # Znaki klipu (26.10.2026), jak „Istotny” i „Do omówienia” na meczu; NULL = false.
         Column("important", Boolean, nullable=True, server_default=text("false")),
         Column("to_discuss", Boolean, nullable=True, server_default=text("false")),
+        #: Rewizja pliku klipu (Bastion, etap 4): rośnie przy zmianie zakresu; wynik starej rewizji nie liczy się dla nowej.
+        Column("media_rev", Integer, nullable=False, server_default=text("1")),
     )
     Index("ix_mentor_clips_pair_match", clips.c.pair_id, clips.c.match_id)
     Index("ix_mentor_clips_pair_created", clips.c.pair_id, clips.c.created_at)
