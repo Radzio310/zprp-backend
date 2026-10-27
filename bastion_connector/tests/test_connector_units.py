@@ -296,3 +296,44 @@ async def test_new_viewer_takes_over_and_old_closes_cleanly(tmp_path):
     assert a.cdp.sent[-2:] == ["Page.stopScreencast", "Page.startScreencast"]
     await svc.detach_viewer(a, old)  # zamkniecie starego widoku nie odpina nowego
     assert a.viewer is new
+
+
+# ---------- przekaznik klawiatury: tekst tylko przez insertText ----------
+def _typed(events):
+    from connector.service import key_to_cdp
+    calls = [c for m in events for c in key_to_cdp(m)]
+    assert not any(p.get("text") for meth, p in calls if meth == "Input.dispatchKeyEvent" and p["key"] != "Enter"), "znak wpisany zdarzeniem klawisza"
+    return "".join(p["text"] for meth, p in calls if meth == "Input.insertText"), calls
+
+
+def _press(key, code, mod=0, **kw):
+    # tak jak wysyla widok: down + up, modyfikatory jako osobne klawisze
+    return [{"t": "key", "a": "down", "key": key, "code": code, "mod": mod, **kw},
+            {"t": "key", "a": "up", "key": key, "code": code, "mod": mod, **kw}]
+
+
+def test_keyboard_polish_and_special_chars_exact():
+    ev = []
+    ev += _press("Shift", "ShiftLeft", 8)
+    ev += _press("A", "KeyA", 8)                      # Shift + a
+    ev += _press("ą", "KeyA", 3)                      # AltGr (Windows: Ctrl+Alt) + a
+    ev += _press("!", "Digit1", 8)
+    ev += _press("@", "Digit2", 8)
+    ev += _press("#", "Digit3", 8)
+    ev += _press("Ł", "KeyL", 11)                     # Shift + AltGr + l
+    ev += _press("_", "Minus", 8)
+    ev += _press("ź", "KeyX", 0, altgr=True)          # AltGr zgloszony jawnie
+    text, _ = _typed(ev)
+    assert text == "Aą!@#Ł_ź"
+
+
+def test_keyboard_text_message_and_specials():
+    text, calls = _typed([{"t": "text", "text": "Aą!@#Ł_ź"}] + _press("Backspace", "Backspace") + _press("Enter", "Enter"))
+    assert text == "Aą!@#Ł_ź"
+    kinds = [(p["type"], p["key"]) for m, p in calls if m == "Input.dispatchKeyEvent"]
+    assert kinds == [("rawKeyDown", "Backspace"), ("keyUp", "Backspace"), ("keyDown", "Enter"), ("keyUp", "Enter")]
+
+
+def test_keyboard_ctrl_shortcut_is_key_event_not_text():
+    text, calls = _typed(_press("a", "KeyA", 2))
+    assert text == "" and calls[0][1]["type"] == "rawKeyDown" and calls[0][1]["windowsVirtualKeyCode"] == 65

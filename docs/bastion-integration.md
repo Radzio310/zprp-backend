@@ -70,6 +70,8 @@ Wszystkie z `Authorization: Bearer BASTION_CONNECTOR_TOKEN`, poza WSS.
 `BASTION_MAX_ACTIVE_LOGINS`, `BASTION_EMBED_HOST_SUFFIXES`, `BASTION_PROBE_BUNNY_ITEM_ID`, `BASTION_DATA_DIR`,
 `BASTION_TEST_PAGE`, `BASTION_HEADFUL`, `BASTION_CHROMIUM_PATH` (tylko lokalnie). Connector nie startuje, gdy token
 lub sekret biletów ma < 32 znaki; bez poprawnego `BASTION_SECRETS_KEY` nie da się utworzyć magazynu.
+Obraz Docker uruchamia Chromium z oknem pod Xvfb (`xvfb-run`, `BASTION_HEADFUL=true` domyślnie): headless ma w UA
+"HeadlessChrome" i hCaptcha Discorda się na nim zapętla. Bez wtyczek stealth; captchę rozwiązuje człowiek w oknie.
 
 ## 4. Uruchomienie lokalne
 

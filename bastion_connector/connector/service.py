@@ -6,6 +6,8 @@ import base64
 import json
 import secrets
 import logging
+import os
+import sys
 import time
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -49,6 +51,45 @@ NO_WEBAUTHN_JS = r"""
   } catch (e) {}
 })();
 """
+
+
+# Klawisze specjalne przekazywane jako zdarzenia klawisza (reszta = tekst przez Input.insertText).
+SPECIAL_KEYS = {
+    "Enter": 13, "Backspace": 8, "Tab": 9, "Escape": 27, "Delete": 46, "Home": 36, "End": 35,
+    "PageUp": 33, "PageDown": 34, "ArrowLeft": 37, "ArrowUp": 38, "ArrowRight": 39, "ArrowDown": 40,
+}
+
+
+def key_to_cdp(m: dict) -> list[tuple[str, dict]]:
+    """Wiadomosc wejscia z widoku -> wywolania CDP.
+
+    Znaki drukowalne ida WYLACZNIE przez Input.insertText: niezaleznie od ukladu klawiatury
+    po obu stronach (AltGr + a = "ą", Shift + 2 = "@"), bez dublowania (keyDown z polem text
+    plus insertText wpisalyby znak dwa razy). Wczesniej AltGr (= Ctrl+Alt) gubil polskie litery.
+    dispatchKeyEvent tylko dla klawiszy specjalnych i skrotow z Ctrl (bez AltGr).
+    Bity mod: Alt=1, Ctrl=2, Meta=4, Shift=8."""
+    t = m.get("t")
+    if t in ("text", "paste"):
+        text = str(m.get("text", ""))[:MAX_TEXT]
+        return [("Input.insertText", {"text": text})] if text else []
+    if t != "key":
+        return []
+    key = str(m.get("key", ""))[:32]
+    mod = int(m.get("mod", 0)) & 15
+    down = m.get("a") == "down"
+    altgr = bool(m.get("altgr")) or (mod & 3) == 3  # Windows zglasza AltGr jako Ctrl+Alt
+    shortcut = bool(mod & 6) and not altgr  # Ctrl/Meta bez AltGr = skrot (Ctrl+A, Ctrl+Z)
+    if len(key) == 1 and not shortcut:
+        return [("Input.insertText", {"text": key})] if down else []  # keyUp znaku: nic
+    if key not in SPECIAL_KEYS and not (shortcut and len(key) == 1):
+        return []  # Shift, Alt, CapsLock, F1... - nic do przekazania
+    kc = SPECIAL_KEYS.get(key) or (ord(key.upper()) if len(key) == 1 and key.isascii() else 0)
+    # jak Playwright: keyDown tylko z tekstem (Enter), inaczej rawKeyDown - bez wstawiania znaku
+    p = {"type": "rawKeyDown" if down else "keyUp", "key": key, "code": str(m.get("code", ""))[:32],
+         "windowsVirtualKeyCode": kc, "modifiers": mod}
+    if down and key == "Enter" and not shortcut:
+        p.update(type="keyDown", text=chr(13))
+    return [("Input.dispatchKeyEvent", p)]
 
 
 class ConnectorError(Exception):
@@ -107,6 +148,10 @@ class Service:
     async def _get_browser(self):
         async with self._browser_lock:
             if self._browser is None or not self._browser.is_connected():
+                if self.s.headful and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+                    raise ConnectorError("BROWSER_NO_DISPLAY", 503,
+                                         "BASTION_HEADFUL=true, ale brak DISPLAY - uruchom pod xvfb-run (Dockerfile)")
+                # headful = zwykly Chromium (UA bez "HeadlessChrome"); locale i strefa ustawiane na kontekscie
                 self._browser = await self._pw.chromium.launch(
                     headless=not self.s.headful,
                     executable_path=self.s.chromium_path or None,
@@ -307,18 +352,9 @@ class Service:
             if act == "mouseWheel":
                 p.update(deltaX=max(-2000, min(int(m.get("dx", 0)), 2000)), deltaY=max(-2000, min(int(m.get("dy", 0)), 2000)))
             await a.cdp.send("Input.dispatchMouseEvent", p)
-        elif t == "key":
-            key = str(m.get("key", ""))[:32]
-            down = m.get("a") == "down"
-            p = {"type": "keyDown" if down else "keyUp", "key": key, "code": str(m.get("code", ""))[:32],
-                 "windowsVirtualKeyCode": int(m.get("kc", 0)), "modifiers": int(m.get("mod", 0)) & 15}
-            if down and len(key) == 1 and not (int(m.get("mod", 0)) & 3):  # bez Ctrl/Alt: znak drukowalny
-                p["text"] = key
-            elif down and key == "Enter":
-                p["text"] = "\r"
-            await a.cdp.send("Input.dispatchKeyEvent", p)
-        elif t == "paste":
-            await a.cdp.send("Input.insertText", {"text": str(m.get("text", ""))[:MAX_TEXT]})
+        else:
+            for method, params in key_to_cdp(m):
+                await a.cdp.send(method, params)
 
     # ---------- obserwator proby ----------
     async def _watch(self, a: Attempt) -> None:
