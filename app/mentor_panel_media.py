@@ -308,6 +308,22 @@ async def restore_video(pair_id: str, match_id: str, video_id: str, actor: Actor
     return {"ok": True, **back, "video": await _video_payload(ctx, video_id)}
 
 
+@router.delete("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}/permanent")
+async def purge_video(pair_id: str, match_id: str, video_id: str, actor: Actor = Depends(mentor_actor)):
+    """„Usuń na zawsze” z kosza: to samo, co sprzątanie po 30 dniach (nagrobek, gdy są klipy z MP4). Bez cofania."""
+    from app import mentor_video_trash as T
+
+    ctx = await C.pair_context(pair_id, actor, action="video")
+    row = await _pair_video(ctx, match_id, video_id, include_trashed=True)
+    if not T.in_trash(row):
+        raise C.err(409, "VIDEO_NOT_IN_TRASH", "To nagranie nie leży w koszu - nie ma czego usuwać na zawsze.")
+    gone = T.trash_shape(row, {})
+    result = await T.purge_row(row)
+    await C.touch(ctx, actor.judge_id, "video_purged", "videos", row["match_id"], {"id": video_id})
+    return {"ok": True, "purged": True, "tombstone": result == "tombstone", "virtual_clips": gone["virtual_clips"],
+            "kept_clips": gone["kept_clips"], "threads": gone["threads"], "comments": gone["comments"]}
+
+
 # ─── Wgrywanie (R2, wieloczęściowe) ─────────────────────────────────────────
 
 

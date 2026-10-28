@@ -196,6 +196,19 @@ async def trash_payload(ctx: Dict[str, Any], match_id: str) -> List[Dict[str, An
     return [trash_shape(r, names) for r in found]
 
 
+async def purge_row(row: Dict[str, Any]) -> str:
+    """Zamyka kosz jednej pozycji: wiersz znika, chyba że trzyma klipy z MP4 (wtedy ukryty nagrobek).
+    Wspólne dla sprzątania po 30 dniach i ręcznego „Usuń na zawsze”. Zwraca "deleted" albo "tombstone"."""
+    holders = await C.one(select(mentor_clips.c.id).where(mentor_clips.c.video_id == row["id"])
+                          .where(mentor_clips.c.deleted_at.is_(None)).limit(1))
+    if holders:
+        await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == row["id"])
+                               .values(trash_json=_dump({"purged": True})))
+        return "tombstone"
+    await database.execute(mentor_match_videos.delete().where(mentor_match_videos.c.id == row["id"]))
+    return "deleted"
+
+
 async def purge_expired(now: datetime) -> int:
     """Zadanie dzienne: po 30 dniach kosz się zamyka. Wiersz znika, chyba że trzyma klipy z MP4 (wtedy nagrobek)."""
     limit = now - timedelta(days=TRASH_DAYS)
@@ -204,12 +217,6 @@ async def purge_expired(now: datetime) -> int:
                             .where(mentor_match_videos.c.deleted_at < limit)):
         if not in_trash(row):
             continue
-        holders = await C.one(select(mentor_clips.c.id).where(mentor_clips.c.video_id == row["id"])
-                              .where(mentor_clips.c.deleted_at.is_(None)).limit(1))
-        if holders:
-            await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == row["id"])
-                                   .values(trash_json=_dump({"purged": True})))
-        else:
-            await database.execute(mentor_match_videos.delete().where(mentor_match_videos.c.id == row["id"]))
+        await purge_row(row)
         done += 1
     return done

@@ -168,3 +168,20 @@ def test_okno_wyszukiwania():
     late = S.search_window(kickoff, True, kickoff + timedelta(hours=5))
     assert late["event"] is None and late["published_after"] == "2026-10-24T14:00:00Z"
     assert S.search_window(kickoff, False, kickoff)["event"] is None  # bez godziny: zwykłe filmy
+
+
+def test_mecz_z_filmem_pokazuje_go_jako_juz_w_meczu_bez_zuzycia_puli(env):
+    async def go():
+        now = datetime.now(timezone.utc)
+        await search(env, JUDGES[0])  # pierwsze szukanie znajduje GOOD (jedno wyszukiwanie)
+        env.calls.clear()
+        await env.ins("mentor_match_videos", id="vy", match_id="m1", pair_key="|".join(sorted(JUDGES)),
+                      url=f"https://www.youtube.com/watch?v={GOOD}", normalized_url=f"https://www.youtube.com/watch?v={GOOD}",
+                      provider="youtube", added_by=JUDGES[0], created_at=now, kind="link", title="LCM: AZS AGH - Gwardia")
+        return await search(env, JUDGES[0])
+
+    out = env.run(go)
+    assert out["streams"] == [] and out["cached"] is True
+    assert GOOD in [v["video_id"] for v in out["in_match"]]
+    assert env.calls == []  # pula YouTube nietknięta
+    assert out["search"]["left"] == 2

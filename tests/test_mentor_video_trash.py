@@ -137,6 +137,25 @@ def test_sprzatanie_po_30_dniach(env):
     assert room["trashed_videos"] == [] and code == 409
 
 
+def test_usun_na_zawsze_z_kosza(env):
+    async def go():
+        await seed_trash_case(env)
+        pair = await env.actor(JUDGES[0])
+        not_in_trash = await code_of(env.media.purge_video(PAIR, "m1", "v1", pair))  # jeszcze nie w koszu
+        await env.media.delete_video(PAIR, "m1", "v1", pair)
+        komisja = await code_of(env.media.purge_video(PAIR, "m1", "v1", await env.actor(COMMITTEE)))
+        out = await env.media.purge_video(PAIR, "m1", "v1", pair)
+        tomb = await env.db.fetch_one(select(env.T["mentor_match_videos"]).where(env.T["mentor_match_videos"].c.id == "v1"))
+        room = await env.panel.match_room(PAIR, "m1", pair)
+        again = await code_of(env.media.purge_video(PAIR, "m1", "v1", pair))
+        return not_in_trash, komisja, out, tomb, room, again
+
+    not_in_trash, komisja, out, tomb, room, again = env.run(go)
+    assert not_in_trash == 409 and komisja == 403 and again == 409
+    assert out["purged"] and out["tombstone"] and (out["virtual_clips"], out["kept_clips"], out["comments"]) == (1, 1, 3)
+    assert tomb is not None and room["trashed_videos"] == []  # nagrobek trzyma klip z MP4, kosz pusty
+
+
 def test_discord_to_nie_nagranie():
     for url in ("https://discord.com/channels/1/2/3", "https://discordapp.com/channels/1/2", "https://discord.gg/abc"):
         with pytest.raises(ValueError, match="Discordzie"):

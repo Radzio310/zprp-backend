@@ -183,6 +183,20 @@ def _added_ids(raw_videos: Iterable[Dict[str, Any]]) -> List[str]:
     return [youtube_id(PR.s(v.get("url"))) for v in raw_videos]
 
 
+def _in_match(raw_videos: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filmy YouTube, które mecz już ma - ekran szukania pokazuje je jako „Już w meczu", nie jako pustkę."""
+    from app.link_preview_rules import youtube_id
+    from app.mentor_evaluation_request_rules import youtube_thumbnail
+
+    out: List[Dict[str, Any]] = []
+    for v in raw_videos:
+        url = PR.s(v.get("url"))
+        vid = youtube_id(url) if url else None
+        if vid:
+            out.append({"video_id": vid, "url": url, "title": v.get("title") or "", "thumbnail_url": v.get("thumbnail_url") or youtube_thumbnail(url)})
+    return out
+
+
 async def _raw_videos(ctx: Dict[str, Any], match_id: str) -> List[Dict[str, Any]]:
     from app.mentor_panel_media import video_list
 
@@ -251,7 +265,7 @@ async def stream_state(ctx: Dict[str, Any], card: Dict[str, Any], raw_videos: Li
                        match_day=warsaw_day(mctx.get("kickoff")), today=warsaw_day(now), row=row, visible=len(streams),
                        quota_ok=await _quota_ok())
     gate["channels"] = await _radar_channels(mctx)
-    return {"streams": streams, "search": gate}
+    return {"streams": streams, "search": gate, "in_match": _in_match(raw_videos)}
 
 
 async def room_streams(ctx: Dict[str, Any], card: Dict[str, Any], raw_videos: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -280,6 +294,12 @@ async def _search(ctx: Dict[str, Any], card: Dict[str, Any], actor: Actor) -> Di
     now = clock()
     state = await stream_state(ctx, card, raw_videos, row, row_loaded=True)
     reason = state["search"]["reason"]
+    if not state["streams"] and state["in_match"]:
+        # Film, który mecz już ma, to ten sam, który znaleźliśmy wcześniej (portal albo szukanie pary) - drugi raz
+        # nie szukamy i nie zużywamy puli; ekran pokaże go jako „Już w meczu", nie jako pustkę.
+        known = {r.get("video_id") for r in await store.streams_for([match_id])} | set(_json_list((row or {}).get("found_json")))
+        if any(v["video_id"] in known for v in state["in_match"]):
+            return {**state, "cached": True}
     if state["streams"] and (reason == "FOUND" or fresh_hit(row, now)):
         # Jest co pokazać (portal albo wynik sprzed < 6 h) - bez limitu i bez YouTube.
         return {**state, "cached": True}
