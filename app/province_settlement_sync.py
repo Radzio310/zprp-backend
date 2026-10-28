@@ -1313,18 +1313,25 @@ async def refresh_province(
             if google_rows:
                 region_slug = province_slug(province)
                 memory = await _google_memory(region_slug)
-                before = set(memory)
+                # Para zmierzona bez geometrii dociąga ją przy tym odświeżeniu
+                # (jedno ponowne pomiary); km zostają, jeśli wynik ten sam.
+                have_shapes = await _google_shape_keys(region_slug)
+                cache = {k: v for k, v in memory.items() if k in have_shapes}
+                before = set(cache)
+                shapes: dict = {}
                 resolved = await resolve_distances(
                     [(home, city) for _, home, city in google_rows],
                     DistanceIndex(None),
                     client=public,
-                    cache=memory,
+                    cache=cache,
                     origin_region=province_label(region_slug),
                     locate=_route_locator(province),
+                    shapes=shapes,
                 )
                 await _google_memory_save(
                     region_slug,
-                    {k: v for k, v in memory.items() if k not in before and v is not None},
+                    {k: v for k, v in cache.items() if k not in before and v is not None},
+                    shapes,
                 )
                 for position, home, city in google_rows:
                     hit = resolved.get((home, city))
@@ -1447,8 +1454,8 @@ async def _google_memory(region_slug: str) -> dict:
     }
 
 
-async def _google_memory_save(region_slug: str, fresh: dict) -> None:
-    from app.db import city_distances
+async def _google_memory_save(region_slug: str, fresh: dict, shapes: Optional[dict] = None) -> None:
+    from app.db import city_distances, city_route_shapes
 
     for (origin, destination), km in fresh.items():
         try:
@@ -1463,6 +1470,33 @@ async def _google_memory_save(region_slug: str, fresh: dict) -> None:
             )
         except Exception as exc:
             logger.debug("[settlement] pamięć Google: %s", exc)
+    for (origin, destination), encoded in (shapes or {}).items():
+        try:
+            statement = pg_insert(city_route_shapes).values(
+                from_key=f"{origin}|{region_slug}", to_key=destination, encoded=encoded
+            )
+            await database.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[city_route_shapes.c.from_key, city_route_shapes.c.to_key],
+                    set_={"encoded": encoded},
+                )
+            )
+        except Exception as exc:
+            logger.debug("[settlement] geometria tras: %s", exc)
+
+
+async def _google_shape_keys(region_slug: str) -> set:
+    """Pary (dom, hala) okręgu, dla których mamy już zapisaną geometrię."""
+    from app.db import city_route_shapes
+
+    try:
+        rows = await database.fetch_all(select(city_route_shapes.c.from_key, city_route_shapes.c.to_key))
+    except Exception:
+        return set()
+    suffix = f"|{region_slug}"
+    return {
+        (r["from_key"][: -len(suffix)], r["to_key"]) for r in rows if r["from_key"].endswith(suffix)
+    }
 
 
 async def last_run(province: str) -> Optional[dict]:

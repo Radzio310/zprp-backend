@@ -101,3 +101,40 @@ def test_google_na_wspolrzednych_srodka_miejscowosci():
     km = asyncio.run(SD.google_distance(C(), "Tychy", "Gliwice", "śląskie", (50.12, 18.99), (50.29, 18.67)))
     assert km == 31.1
     assert seen[0]["origin"] == "50.12,18.99" and seen[0]["destination"] == "50.29,18.67"
+
+
+def test_google_route_oddaje_geometrie_najkrotszego_wariantu():
+    class R:
+        def __init__(self, km, points):
+            self.km, self.points = km, points
+
+        def json(self):
+            return {"routes": [{"overview_polyline": {"points": self.points},
+                                "legs": [{"distance": {"value": int(self.km * 1000)}}]}]}
+
+    class C:
+        async def get(self, url, params):
+            if params["avoid"] == "tolls|highways":
+                return R(31.1, "krotka")
+            return R(45.5, "domyslna")
+
+    SD.GOOGLE_MAPS_API_KEY = "x"
+    km, encoded = asyncio.run(SD.google_route(C(), "Tychy", "Gliwice", "śląskie"))
+    assert (km, encoded) == (31.1, "krotka")
+
+
+def test_resolve_distances_zbiera_geometrie():
+    class R:
+        def json(self):
+            return {"routes": [{"overview_polyline": {"points": "abc"},
+                                "legs": [{"distance": {"value": 20000}}]}]}
+
+    class C:
+        async def get(self, url, params):
+            return R()
+
+    SD.GOOGLE_MAPS_API_KEY = "x"
+    shapes = {}
+    out = asyncio.run(SD.resolve_distances([("Tychy", "Gliwice")], SD.DistanceIndex(None), client=C(), shapes=shapes))
+    assert out[("Tychy", "Gliwice")] == (20.0, "google")
+    assert shapes == {("tychy", "gliwice"): "abc"}

@@ -1704,6 +1704,7 @@ async def _route_map(key: str, rows: list[dict]) -> dict:
         result = {"home_city": "", "home": None, "points": {}}
     result["table_version"] = None
     result["table_versions"] = {}
+    result["shapes"] = await _route_shapes(key, rows)
     try:
         content = None
         stamp = time.monotonic()
@@ -1729,6 +1730,37 @@ async def _route_map(key: str, rows: list[dict]) -> dict:
     except Exception:
         pass
     return result
+
+
+
+async def _route_shapes(key: str, rows: list[dict]) -> dict:
+    """match_key -> zakodowana geometria najkrótszej trasy Google (tylko źródło Google)."""
+    from app.db import city_route_shapes
+    from app.national_place_rules import province_slug
+    from app.settlement_distances import normalize_city
+
+    slug = province_slug(key)
+    wanted: dict[tuple[str, str], list[str]] = {}
+    for row in rows:
+        if row.get("distance_source") != "google" or not row.get("home_city") or not row.get("city"):
+            continue
+        pair = (f"{normalize_city(row['home_city'])[0]}|{slug}", normalize_city(row["city"])[0])
+        wanted.setdefault(pair, []).append(row["match_key"])
+    if not wanted:
+        return {}
+    try:
+        found = await database.fetch_all(
+            select(city_route_shapes.c.from_key, city_route_shapes.c.to_key, city_route_shapes.c.encoded).where(
+                city_route_shapes.c.from_key.in_({pair[0] for pair in wanted})
+            )
+        )
+    except Exception:
+        return {}
+    out: dict[str, str] = {}
+    for item in found:
+        for match_key in wanted.get((item["from_key"], item["to_key"]), []):
+            out[match_key] = item["encoded"]
+    return out
 
 
 async def _forecast_guard(payload: "ForecastRequest") -> str:

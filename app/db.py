@@ -1271,6 +1271,19 @@ city_distances = Table(
 )
 
 
+# Geometria najkrótszej trasy Google (zakodowana polilinia) do mapy przejazdu w
+# panelu Rozliczeń. Klucze jak w `city_distances` (dom|województwo, hala). Tabela
+# okręgu i ZPRP nie mają geometrii - dla nich panel rysuje łuk.
+city_route_shapes = Table(
+    "city_route_shapes",
+    metadata,
+    Column("from_key", String, primary_key=True),
+    Column("to_key", String, primary_key=True),
+    Column("encoded", Text, nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+
 # 18.1f) Wygenerowane dokumenty - numeracja SL/01/2026/1
 #
 # Numer musi być niepowtarzalny w obrębie okręgu, miesiąca i rodzaju dokumentu,
