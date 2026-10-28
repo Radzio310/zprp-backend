@@ -79,6 +79,11 @@ def define_tables(metadata):
         Column("added_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("done_at", DateTime(timezone=True), nullable=True),
+        #: "Mentor poleca" (runda 2): kto, z jaką notką, kiedy i (opcjonalnie) który klip.
+        Column("recommended_by", String, nullable=True),
+        Column("note", String, nullable=True),
+        Column("recommended_at", DateTime(timezone=True), nullable=True),
+        Column("clip_id", String, nullable=True),
     )
 
     shelves = Table(
@@ -126,6 +131,9 @@ def define_tables(metadata):
         Column("pair_id", String, nullable=False, index=True),
         #: `agree` | `differ` | `unsure` - to NIE ocena, tylko zdanie w rozmowie o klipie.
         Column("vote", String, nullable=False),
+        #: Przy "Inaczej" (runda 2): powód (do 200 znaków) i odsyłacz do przepisu ("8:5b").
+        Column("reason", String, nullable=True),
+        Column("rule_ref", String, nullable=True),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
 
@@ -136,11 +144,47 @@ def define_tables(metadata):
         Column("bunny_item_id", Integer, primary_key=True),
         Column("notified_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
-    return watched, follows, queue, shelves, shelf_clips, clip_tags, opinions, notified
+    #: Miniatury kaset Bastionu trzymane u nas (jedna klatka na `bunny_item_id`, zadanie w tle).
+    thumbs = Table(
+        "mentor_trybuna_thumbs",
+        metadata,
+        Column("bunny_item_id", Integer, primary_key=True),
+        Column("status", String, nullable=False, server_default=text("'pending'")),
+        Column("storage_key", String, nullable=True),
+        Column("attempts", Integer, nullable=False, server_default=text("0")),
+        Column("next_attempt_at", DateTime(timezone=True), nullable=True),
+        Column("error", String, nullable=True),
+        Column("duration_s", Integer, nullable=True),
+        Column("requested_by", String, nullable=True),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    #: Kanał obserwowanych liczony w tle (co 30 min) i trzymany w bazie.
+    feed_cache = Table(
+        "mentor_trybuna_feed_cache",
+        metadata,
+        Column("judge_id", String, primary_key=True),
+        Column("payload_json", Text, nullable=False, server_default=text("'{}'")),
+        Column("computed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    #: "Dziś sędziuje": jedna wiadomość na osobę na dzień.
+    today = Table(
+        "mentor_trybuna_today",
+        metadata,
+        Column("judge_id", String, primary_key=True),
+        Column("day", String, primary_key=True),
+        Column("sent_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    return watched, follows, queue, shelves, shelf_clips, clip_tags, opinions, notified, thumbs, feed_cache, today
 
 
 #: Kolumny i indeksy dokładane po wdrożeniu (PostgreSQL), każdy osobno.
 MIGRATIONS = (
+    "ALTER TABLE mentor_trybuna_opinions ADD COLUMN IF NOT EXISTS reason VARCHAR",
+    "ALTER TABLE mentor_trybuna_opinions ADD COLUMN IF NOT EXISTS rule_ref VARCHAR",
+    "ALTER TABLE mentor_trybuna_queue ADD COLUMN IF NOT EXISTS recommended_by VARCHAR",
+    "ALTER TABLE mentor_trybuna_queue ADD COLUMN IF NOT EXISTS note VARCHAR",
+    "ALTER TABLE mentor_trybuna_queue ADD COLUMN IF NOT EXISTS recommended_at TIMESTAMPTZ",
+    "ALTER TABLE mentor_trybuna_queue ADD COLUMN IF NOT EXISTS clip_id VARCHAR",
     # Klucz idempotencji dodania nagrania (nagłówek `Idempotency-Key`): powtórka tego samego żądania = ten sam wiersz.
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_mentor_match_video_idem ON mentor_match_videos (pair_key, match_id, idempotency_key) "

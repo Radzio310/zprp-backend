@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -432,6 +433,22 @@ async def link_state(ctx: Dict[str, Any], row: Mapping[str, Any]) -> Dict[str, A
     out["zprp_match_id"] = row.get("zprp_match_id")
     out["proel_key"] = row.get("proel_key")
     out["referees"] = _refs(row)
+    # Komplet (runda 2): ZPRP i ProEl spięte (auto/manual), co najmniej jedno wideo w pokoju i nic nie czeka na wybór.
+    videos = await C.rows(select(mentor_match_videos.c.id).where(mentor_match_videos.c.match_id == row["match_id"])
+                          .where(mentor_match_videos.c.pair_key == ctx["pair_key"]).where(mentor_match_videos.c.deleted_at.is_(None)).limit(1))
+    settled = all(out[k].get("state") in ("auto", "manual") for k in ("zprp", "proel"))
+    open_choices = out["video"].get("state") == "candidates" or bool(out["video"].get("candidates"))
+    complete = bool(settled and videos and not open_choices)
+    stored = links.get("completed_at")
+    if complete and not stored:
+        stored = C.now().isoformat()
+        links["completed_at"] = stored
+        await database.execute(update(W).where(W.c.match_id == row["match_id"]).values(links_json=_dump(links)))
+    elif not complete and stored:
+        stored = None
+        links.pop("completed_at", None)
+        await database.execute(update(W).where(W.c.match_id == row["match_id"]).values(links_json=_dump(links)))
+    out["complete"], out["completed_at"] = complete, stored if complete else None
     return out
 
 
@@ -641,6 +658,9 @@ async def list_watched(pair_id: str, q: str = Query("", max_length=80), referee:
     """Mecze z Trybuny tej pary (ostatnio dodane najpierw). Filtry: `q` (drużyny/kod/tytuł), `referee`, `origin`, `season`."""
     ctx = await C.pair_context(pair_id, actor)
     cards = await watched_cards(ctx)
+    from app import mentor_bastion_search as S
+
+    await S.attach_crests(cards, (("home", "home_crest"), ("away", "away_crest")))
     needle = T.name_key(q) if q else ""
     ref_key = T.name_key(referee) if referee else ""
     out = []
@@ -847,6 +867,8 @@ class ShelfPatch(BaseModel):
 
 
 async def _shelf(ctx: Dict[str, Any], shelf_id: str) -> Dict[str, Any]:
+    if shelf_id == "disputed":
+        raise C.err(422, "SHELF_SYSTEM", "Półka \"Sporne\" jest systemowa - wypełnia się sama.")
     row = await C.one(select(SH).where(SH.c.id == shelf_id).where(SH.c.pair_id == ctx["pair_id"]))
     if not row:
         raise C.err(404, "NOT_FOUND", "Nie ma takiej półki.")
@@ -865,9 +887,18 @@ async def shelves_payload(ctx: Dict[str, Any]) -> Dict[str, Any]:
         if l["clip_id"] in live:
             by_shelf.setdefault(l["shelf_id"], []).append(l["clip_id"])
             by_clip.setdefault(l["clip_id"], []).append(l["shelf_id"])
-    return {"shelves": [{"id": s["id"], "name": s["name"], "color": s.get("color"), "sort": int(s.get("sort") or 0),
-                         "archived": bool(s.get("archived")), "clip_ids": by_shelf.get(s["id"], []),
-                         "clips_count": len(by_shelf.get(s["id"], [])), "created_by": s.get("created_by")} for s in shelves],
+    # Systemowa półka "Sporne": klipy, przy których zdania pary są podzielone (agree i differ).
+    disputed = sorted(await disputed_clip_ids(ctx), key=lambda c: c)
+    live_ids = {c["id"] for c in await C.rows(select(mentor_clips.c.id).where(mentor_clips.c.pair_id == ctx["pair_id"])
+                                              .where(mentor_clips.c.deleted_at.is_(None)).where(mentor_clips.c.id.in_(disputed)))} if disputed else set()
+    disputed = [c for c in disputed if c in live_ids]
+    for cid in disputed:
+        by_clip.setdefault(cid, []).append("disputed")
+    system = {"id": "disputed", "system": True, "name": "Sporne", "color": None, "sort": -1, "archived": False, "clip_ids": disputed,
+              "clips_count": len(disputed), "created_by": None}
+    return {"shelves": [system] + [{"id": s["id"], "system": False, "name": s["name"], "color": s.get("color"), "sort": int(s.get("sort") or 0),
+                                    "archived": bool(s.get("archived")), "clip_ids": by_shelf.get(s["id"], []),
+                                    "clips_count": len(by_shelf.get(s["id"], [])), "created_by": s.get("created_by")} for s in shelves],
             "by_clip": by_clip, "limit": T.MAX_SHELVES, "rev": ctx["rev"]}
 
 
@@ -975,6 +1006,37 @@ async def remove_shelf_clip(pair_id: str, shelf_id: str, clip_id: str, actor: Ac
     return await shelves_payload(ctx)
 
 
+class ExportBody(BaseModel):
+    target: str = Field(pattern="^(zestawienie|seans)$")
+
+
+@router.post("/pairs/{pair_id}/trybuna/shelves/{shelf_id}/export")
+async def export_shelf(pair_id: str, shelf_id: str, body: ExportBody, actor: Actor = Depends(mentor_actor)):
+    """Eksport półki do Zestawienia (istniejący mechanizm `POST /pairs/{p}/compilations`, tryb `free`, klipy w kolejności półki).
+    `target: "seans"` robi to samo z nazwą "Seans: <półka>" i opisem seansu (wspólne oglądanie). Półka systemowa `disputed` też.
+    -> `{id, kind, url_path, name, clips}`. 422 `SHELF_EMPTY`, gdy półka nie ma żywych klipów."""
+    from app import mentor_panel_library as L
+
+    ctx = await C.pair_context(pair_id, actor, action="create")
+    if shelf_id == "disputed":
+        name, clip_ids = "Sporne", sorted(await disputed_clip_ids(ctx))
+    else:
+        shelf = await _shelf(ctx, shelf_id)
+        name = shelf["name"]
+        clip_ids = [r["clip_id"] for r in await C.rows(select(SC).where(SC.c.shelf_id == shelf_id).order_by(SC.c.position.asc()))]
+    live = {c["id"] for c in await C.rows(select(mentor_clips.c.id).where(mentor_clips.c.pair_id == ctx["pair_id"])
+                                           .where(mentor_clips.c.deleted_at.is_(None)).where(mentor_clips.c.id.in_(clip_ids)))} if clip_ids else set()
+    clip_ids = [c for c in clip_ids if c in live]
+    if not clip_ids:
+        raise C.err(422, "SHELF_EMPTY", "Na tej półce nie ma jeszcze klipów do wyeksportowania.")
+    title = name if body.target == "zestawienie" else f"Seans: {name}"
+    desc = f"Z półki \"{name}\"." if body.target == "zestawienie" else f"Seans do wspólnego oglądania z półki \"{name}\"."
+    comp = await L.create_compilation(pair_id, L.CompilationBody(name=title[:60], mode="free", description=desc,
+                                                                 items=[{"clip_id": c} for c in clip_ids]), actor)
+    return {"id": comp["id"], "kind": body.target, "url_path": f"/mentor/{ctx['pair_id']}/zestawienia/{comp['id']}", "name": comp.get("name"),
+            "clips": len(clip_ids)}
+
+
 # ─── Oznaczenia sędziów na klipie ───────────────────────────────────────────
 
 TG = mentor_trybuna_clip_tags
@@ -1024,46 +1086,103 @@ async def set_clip_referees(clip_id: str, body: RefereeTags, actor: Actor = Depe
     return {"referees": tags, "rev": ctx["rev"]}
 
 
-# ─── „Twoje zdanie" w wątku klipu (to NIE jest ocena) ───────────────────────
+# ─── „Twoje zdanie" w wątku klipu (to NIE jest ocena; tylko mecze z Trybuny) ─
 
 OP = mentor_trybuna_opinions
+RULE_REF = re.compile(r"^\d{1,2}(:\d{1,2}[a-z]?)?(\.\d{1,2})?$")
 
 
 async def _clip_thread(thread_id: str, actor: Actor, action: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     thread = await C.one(select(mentor_threads).where(mentor_threads.c.id == thread_id))
     if not thread or thread.get("target_kind") != "clip":
         raise C.err(404, "NOT_FOUND", "Nie ma takiego wątku klipu.")
-    return await C.pair_context(thread["pair_id"], actor, action=action), thread
+    ctx = await C.pair_context(thread["pair_id"], actor, action=action)
+    if not T.is_watched(thread.get("match_id")):
+        raise C.err(409, "OPINION_TRYBUNA_ONLY", "Twoje zdanie jest tylko przy klipach z meczów z Trybuny.")
+    return ctx, thread
 
 
-async def opinions_payload(thread_id: str, me: str) -> Dict[str, Any]:
+def _disputed(rows: List[Mapping[str, Any]], mentor_ids: set) -> bool:
+    """Sporne = wśród głosów NIE-mentorów są i "Zgadzam się", i "Inaczej", razem co najmniej 2 (głos mentora nie zdradza sporu parze)."""
+    votes = [r.get("vote") for r in rows if R.s(r.get("judge_id")) not in mentor_ids]
+    return len(votes) >= 2 and "agree" in votes and "differ" in votes
+
+
+async def disputed_clip_ids(ctx: Dict[str, Any], clip_ids: Optional[List[str]] = None) -> set:
+    """Klipy pary ze spornymi zdaniami (w którymkolwiek wątku klipu)."""
+    query = select(mentor_threads.c.id, mentor_threads.c.target_id).where(mentor_threads.c.pair_id == ctx["pair_id"]) \
+        .where(mentor_threads.c.target_kind == "clip").where(mentor_threads.c.match_id.like("tr_%"))
+    if clip_ids is not None:
+        query = query.where(mentor_threads.c.target_id.in_(list(clip_ids)))
+    threads = await C.rows(query)
+    if not threads:
+        return set()
+    votes = await C.rows(select(OP).where(OP.c.thread_id.in_([t["id"] for t in threads])))
+    mentors = set(ctx.get("all_mentor_ids") or [])
+    by_thread: Dict[str, List[Dict[str, Any]]] = {}
+    for v in votes:
+        by_thread.setdefault(v["thread_id"], []).append(v)
+    return {t["target_id"] for t in threads if _disputed(by_thread.get(t["id"], []), mentors)}
+
+
+async def opinions_payload(ctx: Dict[str, Any], thread_id: str, me: str) -> Dict[str, Any]:
+    """Ankieta wątku klipu. Zasady: wyniki (`counts`, `voters`) widać dopiero po własnym głosie (mentor, admin i komisja widzą od razu);
+    głos mentora (`mentor_vote`) para widzi dopiero, gdy obaj sędziowie pary zagłosowali (`reveal`), a do tego czasu nie wchodzi
+    do `total`, `counts` ani `voters` pary."""
     found = await C.rows(select(OP).where(OP.c.thread_id == thread_id))
     names = await C.people({r["judge_id"] for r in found})
-    out = T.tally_votes(found, me)
-    out["voters"] = [{"judge_id": r["judge_id"], "name": C.person(names, r["judge_id"])["name"], "vote": r["vote"]} for r in found]
+    pair_ids, mentor_ids = set(ctx["judge_ids"]), set(ctx.get("all_mentor_ids") or [])
+    reveal = bool(pair_ids) and pair_ids <= {r["judge_id"] for r in found}
+    viewer_is_pair = R.s(me) in pair_ids
+    mine = next((r["vote"] for r in found if r["judge_id"] == R.s(me)), None)
+    visible = [r for r in found if not (viewer_is_pair and not reveal and r["judge_id"] in mentor_ids)]
+    mentor_row = max((r for r in found if r["judge_id"] in mentor_ids), key=lambda r: R.s(r.get("updated_at")), default=None)
+    mentor_vote = None
+    if mentor_row and (reveal or not viewer_is_pair):
+        mentor_vote = {"name": C.person(names, mentor_row["judge_id"])["name"], "vote": mentor_row["vote"],
+                       "reason": mentor_row.get("reason"), "rule_ref": mentor_row.get("rule_ref")}
+    show = (not viewer_is_pair) or mine is not None
+    my_row = next((r for r in found if r["judge_id"] == R.s(me)), None)
+    out: Dict[str, Any] = {"total": len(visible), "mine": mine, "my_reason": (my_row or {}).get("reason"),
+                           "my_rule_ref": (my_row or {}).get("rule_ref"), "counts": None, "voters": None, "mentor_vote": mentor_vote,
+                           "reveal": reveal, "labels": dict(T.VOTE_LABELS), "disputed": _disputed(found, mentor_ids)}
+    if show:
+        out["counts"] = {v: sum(1 for r in visible if r["vote"] == v) for v in T.VOTES}
+        out["voters"] = [{"judge_id": r["judge_id"], "name": C.person(names, r["judge_id"])["name"], "vote": r["vote"],
+                          "reason": r.get("reason"), "rule_ref": r.get("rule_ref"), "is_mentor": r["judge_id"] in mentor_ids} for r in visible]
     return out
 
 
 @router.get("/threads/{thread_id}/opinion")
 async def get_opinion(thread_id: str, actor: Actor = Depends(mentor_actor)):
-    await _clip_thread(thread_id, actor, "view")
-    return await opinions_payload(thread_id, actor.judge_id)
+    ctx, _ = await _clip_thread(thread_id, actor, "view")
+    return await opinions_payload(ctx, thread_id, actor.judge_id)
 
 
 class OpinionBody(BaseModel):
     vote: Optional[str] = Field(default=None, max_length=10)
+    reason: Optional[str] = Field(default=None, max_length=200)
+    #: Odsyłacz do przepisu, np. "8:5b" (tylko przy "Inaczej").
+    rule_ref: Optional[str] = Field(default=None, max_length=12)
 
 
 @router.put("/threads/{thread_id}/opinion")
 async def put_opinion(thread_id: str, body: OpinionBody, actor: Actor = Depends(mentor_actor)):
-    """„Twoje zdanie" o fragmencie: `agree` (Zgadzam się), `differ` (Inaczej), `unsure` (Nie wiem); `null` cofa głos.
-    Jeden głos na osobę; to rozmowa o klipie, nie ocena sędziów."""
+    """„Twoje zdanie": `agree` (Zgadzam się), `differ` (Inaczej), `unsure` (Nie wiem); `null` cofa głos. Przy `differ` można dodać powód
+    (do 200 znaków) i odsyłacz do przepisu (`rule_ref`, np. "8:5b"; format sprawdzany); przy pozostałych głosach powód i odsyłacz są
+    odrzucane (422 `REASON_ONLY_DIFFER`). Jeden głos na osobę; nie jest oceną. Zwraca ankietę jak `GET`."""
     ctx, thread = await _clip_thread(thread_id, actor, "create")
     vote = R.s(body.vote)
     if vote and vote not in T.VOTES:
         raise C.err(422, "BAD_VOTE", "Głos to agree, differ albo unsure.")
+    reason, rule_ref = R.plain(body.reason, 200) or None, R.s(body.rule_ref) or None
+    if (reason or rule_ref) and vote != "differ":
+        raise C.err(422, "REASON_ONLY_DIFFER", "Powód i odsyłacz do przepisu można dodać tylko do głosu \"Inaczej\".")
+    if rule_ref and not RULE_REF.match(rule_ref):
+        raise C.err(422, "BAD_RULE_REF", "Odsyłacz do przepisu ma postać np. 8:5b.")
     await database.execute(OP.delete().where(OP.c.thread_id == thread_id).where(OP.c.judge_id == actor.judge_id))
     if vote:
-        await database.execute(OP.insert().values(thread_id=thread_id, judge_id=actor.judge_id, pair_id=ctx["pair_id"], vote=vote, updated_at=C.now()))
+        await database.execute(OP.insert().values(thread_id=thread_id, judge_id=actor.judge_id, pair_id=ctx["pair_id"], vote=vote,
+                                                  reason=reason, rule_ref=rule_ref, updated_at=C.now()))
     await C.touch(ctx, actor.judge_id, "opinion", "threads", thread.get("match_id"), {"thread": thread_id})
-    return await opinions_payload(thread_id, actor.judge_id)
+    return await opinions_payload(ctx, thread_id, actor.judge_id)

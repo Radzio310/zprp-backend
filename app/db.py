@@ -4604,6 +4604,9 @@ from app.mentor_trybuna_tables import define_tables as _define_mentor_trybuna_ta
     mentor_trybuna_clip_tags,
     mentor_trybuna_opinions,
     mentor_trybuna_notified,
+    mentor_trybuna_thumbs,
+    mentor_trybuna_feed_cache,
+    mentor_trybuna_today,
 ) = _define_mentor_trybuna_tables(metadata)
 
 # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.

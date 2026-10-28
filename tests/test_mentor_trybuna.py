@@ -154,12 +154,7 @@ def test_klip_watek_i_zdanie_na_meczu_z_trybuny(env):
         mid, vid = out["match"]["match_id"], out["videos"][0]["id"]
         clip = await env.library.create_clip(PAIR, env.library.ClipBody(match_id=mid, video_id=vid, start_s=10, end_s=30, title="Faul"), actor)
         thread = await env.library.create_thread(PAIR, env.library.ThreadBody(target_kind="clip", target_id=clip["id"], body="Co sadzicie?", kind="question", video_s=15), actor)
-        mentor = await env.actor(MENTOR)
-        v1 = await env.trybuna.put_opinion(thread["id"], env.trybuna.OpinionBody(vote="agree"), actor)
-        v2 = await env.trybuna.put_opinion(thread["id"], env.trybuna.OpinionBody(vote="differ"), mentor)
-        v3 = await env.trybuna.put_opinion(thread["id"], env.trybuna.OpinionBody(vote="differ"), actor)
-        bad = await code_of(env.trybuna.put_opinion(thread["id"], env.trybuna.OpinionBody(vote="zle"), actor))
-        gone = await env.trybuna.put_opinion(thread["id"], env.trybuna.OpinionBody(vote=None), mentor)
+        v1 = v2 = v3 = bad = gone = None
         tags = await env.trybuna.set_clip_referees(clip["id"], env.trybuna.RefereeTags(referees=[{"name": "Jan Kowalski", "role": "a", "position": "bramkowy"}]), actor)
         shown = await env.trybuna.clip_referees(clip["id"], actor)
         too_many = await code_of(env.trybuna.set_clip_referees(clip["id"], env.trybuna.RefereeTags(referees=[{"name": f"S{i}"} for i in range(5)]), actor))
@@ -169,9 +164,6 @@ def test_klip_watek_i_zdanie_na_meczu_z_trybuny(env):
         return clip, v1, v2, v3, bad, gone, tags, shown, too_many, bad_role, room, lib
 
     clip, v1, v2, v3, bad, gone, tags, shown, too_many, bad_role, room, lib = env.run(go)
-    assert v1["counts"]["agree"] == 1 and v1["mine"] == "agree"
-    assert v2["total"] == 2 and v3["counts"] == {"agree": 0, "differ": 2, "unsure": 0} and v3["mine"] == "differ"
-    assert bad[1] == "BAD_VOTE" and gone["total"] == 1
     assert tags["referees"][0]["role"] == "A" and shown["referees"][0]["position"] == "bramkowy"
     assert too_many[1] == "TAG_LIMIT" and bad_role[1] == "TAG_ROLE"
     assert [c["id"] for c in room["clips"]] == [clip["id"]]
@@ -391,10 +383,10 @@ def test_polki_klip_na_wielu_polkach(env):
                                             idempotency_header=None)
         mid, vid = out["match"]["match_id"], out["videos"][0]["id"]
         clip = await env.library.create_clip(PAIR, env.library.ClipBody(match_id=mid, video_id=vid, start_s=1, end_s=9), actor)
-        s1 = (await env.trybuna.create_shelf(PAIR, env.trybuna.ShelfBody(name="Linia 6 m"), actor))["shelves"][0]
+        s1 = next(s for s in (await env.trybuna.create_shelf(PAIR, env.trybuna.ShelfBody(name="Linia 6 m"), actor))["shelves"] if not s["system"])
         dup = await code_of(env.trybuna.create_shelf(PAIR, env.trybuna.ShelfBody(name="linia 6 M"), actor))
         await env.trybuna.create_shelf(PAIR, env.trybuna.ShelfBody(name="Kontakt"), actor)
-        shelves = (await env.trybuna.list_shelves(PAIR, actor))["shelves"]
+        shelves = [s for s in (await env.trybuna.list_shelves(PAIR, actor))["shelves"] if not s["system"]]
         for s in shelves:
             await env.trybuna.add_shelf_clip(PAIR, s["id"], env.trybuna.ShelfClipOne(clip_id=clip["id"]), actor)
         both = await env.trybuna.add_shelf_clip(PAIR, s1["id"], env.trybuna.ShelfClipOne(clip_id=clip["id"]), actor)  # powtórka nic nie robi
@@ -406,7 +398,7 @@ def test_polki_klip_na_wielu_polkach(env):
     clip, dup, both, foreign, shared = env.run(go)
     assert dup[1] == "SHELF_EXISTS" and foreign[0] == 404
     assert sorted(len(v) for v in both["by_clip"].values()) == [2] and len(both["by_clip"][clip["id"]]) == 2
-    assert all(s["clips_count"] == 1 for s in shared["shelves"])
+    assert all(s["clips_count"] == 1 for s in shared["shelves"] if not s["system"])
 
 
 def test_dzienny_push_bez_powtorek_i_okno_dat(env):
@@ -480,7 +472,7 @@ def test_kalendarz_ma_przyszle_i_bez_terminu_a_kanal_ich_nie(env, monkeypatch):
         monkeypatch.setattr(env.trybuna_feed.S, "_setup", lambda real: (mz, None))
         cal = await env.trybuna_feed.calendar(30, actor)
         S.forget_search_cache()
-        feed = await env.trybuna_feed.feed(_Resp(), 14, "", actor)
+        feed = await env.trybuna_feed.feed(_Resp(), 15, "", 0, actor)
         return cal, feed
 
     cal, feed = env.run(go)
@@ -689,3 +681,162 @@ def test_stolikowi_w_obsadzie_i_tryb_q_z_data_oraz_rozegrane(env, monkeypatch):
     assert first["q"] == "2027-04-28 OR 2027-04-29" and meta["mode"] == "linear"
     assert "status=played" not in first.get("portal", "")  # zakres sięga przyszłości: bez filtra "rozegrane"
     assert len(rows) == 6
+
+
+# ─── Runda 2: ankieta, sporne, komplet, polecenia, kanał w bazie, sugestie, miniatury ─────
+
+
+async def clip_with_thread(env):
+    actor = await env.actor(JUDGES[0])
+    out = await env.trybuna.add_watched(PAIR, body(env, url="https://youtu.be/abcdefghijk", home="A", away="B"), _Resp(), actor, actor,
+                                        idempotency_header=None)
+    mid, vid = out["match"]["match_id"], out["videos"][0]["id"]
+    clip = await env.library.create_clip(PAIR, env.library.ClipBody(match_id=mid, video_id=vid, start_s=10, end_s=30, title="Faul"), actor)
+    thread = await env.library.create_thread(PAIR, env.library.ThreadBody(target_kind="clip", target_id=clip["id"], body="Co sadzicie?", kind="question", video_s=15), actor)
+    return mid, clip, thread
+
+
+def test_ankieta_wyniki_po_glosie_mentor_po_obu_glosach_sporne(env):
+    async def go():
+        mid, clip, thread = await clip_with_thread(env)
+        O, tid = env.trybuna, thread["id"]
+        a, b, m = await env.actor(JUDGES[0]), await env.actor(JUDGES[1]), await env.actor(MENTOR)
+        before = await O.get_opinion(tid, a)
+        mentor_first = await O.put_opinion(tid, O.OpinionBody(vote="differ", reason="Faul ataku", rule_ref="8:5b"), m)
+        await O.put_opinion(tid, O.OpinionBody(vote="agree"), a)
+        hidden = await O.get_opinion(tid, a)
+        bad_reason = await code_of(O.put_opinion(tid, O.OpinionBody(vote="agree", reason="x"), b))
+        bad_ref = await code_of(O.put_opinion(tid, O.OpinionBody(vote="differ", rule_ref="zle"), b))
+        await O.put_opinion(tid, O.OpinionBody(vote="differ", reason="Kontakt", rule_ref="8:5"), b)
+        revealed = await O.get_opinion(tid, a)
+        room = await env.panel.match_room(PAIR, mid, a)
+        shelves = await O.list_shelves(PAIR, a)
+        await env.ins("mentor_threads", id="tx", pair_id=PAIR, target_kind="clip", target_id="m1c", match_id="m1", created_by=JUDGES[0])
+        only = await code_of(O.get_opinion("tx", a))
+        exported = await O.export_shelf(PAIR, "disputed", O.ExportBody(target="seans"), a)
+        return before, mentor_first, hidden, bad_reason, bad_ref, revealed, room, shelves, only, exported, clip
+
+    before, mentor_first, hidden, bad_reason, bad_ref, revealed, room, shelves, only, exported, clip = env.run(go)
+    assert before["total"] == 0 and before["mine"] is None and before["counts"] is None and before["voters"] is None and before["reveal"] is False
+    assert mentor_first["mine"] == "differ" and mentor_first["counts"]["differ"] == 1 and mentor_first["voters"][0]["is_mentor"] is True
+    assert mentor_first["my_reason"] == "Faul ataku" and mentor_first["my_rule_ref"] == "8:5b" and before["my_reason"] is None
+    assert hidden["mentor_vote"] is None and hidden["reveal"] is False and hidden["total"] == 1 and hidden["counts"] == {"agree": 1, "differ": 0, "unsure": 0}
+    assert bad_reason[1] == "REASON_ONLY_DIFFER" and bad_ref[1] == "BAD_RULE_REF"
+    assert revealed["reveal"] is True and revealed["mentor_vote"]["vote"] == "differ" and revealed["mentor_vote"]["rule_ref"] == "8:5b"
+    assert revealed["total"] == 3 and revealed["counts"] == {"agree": 1, "differ": 2, "unsure": 0}
+    assert {v["name"] for v in revealed["voters"] if v["is_mentor"]} == {"Jan Mentor"}
+    assert [c["disputed"] for c in room["clips"]] == [True]
+    system = shelves["shelves"][0]
+    assert system["id"] == "disputed" and system["system"] is True and system["name"] == "Sporne" and system["clip_ids"] == [clip["id"]]
+    assert only == (409, "OPINION_TRYBUNA_ONLY")
+    assert exported["kind"] == "seans" and exported["clips"] == 1 and exported["url_path"].endswith(exported["id"])
+
+
+def test_komplet_polecenie_mentora_i_kolejka_obu_sedziow(env):
+    async def go():
+        a, m = await env.actor(JUDGES[0]), await env.actor(MENTOR)
+        when = await m1_when(env)
+        out = await env.trybuna.add_watched(
+            PAIR, body(env, url="https://youtu.be/abcdefghijk", home="SPR Gliwice", away="KS Opole", date=when, code="ISM/1"), _Resp(), a, a, idempotency_header=None)
+        mid = out["match"]["match_id"]
+        incomplete = out["links"]["complete"]
+        await env.ins("saved_matches", match_number="ISM/1", zprp_match_id="m1", data_json={}, status="finished", updated_at=datetime.now(timezone.utc))
+        await env.trybuna.relink(PAIR, mid, _Resp(), env.trybuna.RelinkBody(kinds=["proel"]), a, a)
+        done = (await env.trybuna.get_links(PAIR, mid, a))["links"]
+        F = env.trybuna_feed
+        denied = await code_of(F.recommend(PAIR, F.RecommendBody(match_id=mid), _Resp(), a, a))
+        none = await code_of(F.recommend(PAIR, F.RecommendBody(), _Resp(), m, m))
+        rec = await F.recommend(PAIR, F.RecommendBody(match_id=mid, note="Zobaczcie ten faul"), _Resp(), m, m)
+        queues = {j: (await F._queue_payload(await env.actor(j)))["items"] for j in JUDGES}
+        return incomplete, done, denied, none, rec, queues
+
+    incomplete, done, denied, none, rec, queues = env.run(go)
+    assert incomplete is False and done["complete"] is True and done["completed_at"] and done["proel"]["state"] == "auto"
+    assert denied == (403, "NOT_MENTOR") and none == (422, "RECOMMEND_TARGET")
+    assert sorted(rec["queued"]) == sorted(JUDGES) and rec["created_match"] is False
+    for j in JUDGES:
+        item = queues[j][0]
+        assert item["recommended_by"]["name"] == "Jan Mentor" and item["note"] == "Zobaczcie ten faul" and item["recommended_at"]
+    pushes = [s for s in env.sent if s["title"] == "Mentor poleca"]
+    assert len(pushes) == 1 and sorted(pushes[0]["recipients"]) == sorted(JUDGES)
+
+
+def test_kanal_w_bazie_sugestie_i_poranny_push(env, monkeypatch):
+    import sys
+    import types
+
+    async def go():
+        a = await env.actor(JUDGES[0])
+        F = env.trybuna_feed
+        await F.follow(F.FollowBody(kind="referee", name="Piotr Lis"), a)
+        first = await F.feed(_Resp(), 14, "", 0, a)
+        await F.refresh_feed(a)
+        second = await F.feed(_Resp(), 14, "", 0, a)
+        sugg = await F.follow_suggestions(_Resp(), a)
+        from app.streams.rules import WARSAW
+
+        today = datetime.now(WARSAW).date()
+        await env.ins("zprp_public_matches", match_id="today1", season_id="S1", competition_id="K1", competition_name="I liga mężczyzn", match_code="ISM/77",
+                      home_team_name="Dziś A", away_team_name="Dziś B", scheduled_at=datetime(today.year, today.month, today.day, 18, 0),
+                      referee_1_id=JUDGES[1], referee_2_id=STRANGER, source_hash="h", source_json={})
+        pushed = []
+        fake = types.ModuleType("app.push.push")
+
+        async def send(ids, title, body_, data, **kw):
+            pushed.append((ids, title, body_, data))
+
+        fake.send_push_to_judges_report = send
+        monkeypatch.setitem(sys.modules, "app.push.push", fake)
+        c1 = await F.morning_once()
+        c2 = await F.morning_once()
+        return first, second, sugg, pushed, c1, c2
+
+    first, second, sugg, pushed, c1, c2 = env.run(go)
+    assert first["items"] == [] and first["refreshing"] is True and first["computed_at"] is None
+    assert second["computed_at"] and [i["zprp_match_id"] for i in second["items"]] == ["m1"]
+    assert all(s["kind"] in ("referee", "pair") for s in sugg) and "Piotr Lis" not in [s["name"] for s in sugg]
+    assert len(pushed) == 1 and pushed[0][1] == "Dziś sędziuje" and "Dziś A - Dziś B" in pushed[0][2] and pushed[0][3]["target"] == "trybuna_calendar"
+    assert c1["pushed"] == 1 and c2["pushed"] == 0
+
+
+def test_miniatury_w_magazynie_stale_url_i_herby(env, monkeypatch):
+    import base64
+
+    async def go():
+        for k, v in {"BASTION_ENABLED": "true", "BASTION_DEFAULT_ENABLED": "true", "BASTION_PERSONAL_ENABLED": "true",
+                     "BASTION_CONNECTOR_URL": "http://connector", "BASTION_CONNECTOR_TOKEN": "t" * 40}.items():
+            monkeypatch.setenv(k, v)
+        TH = importlib.import_module("app.mentor_trybuna_thumbs")
+        S = importlib.import_module("app.mentor_bastion_search")
+        S.forget_crests()
+        monkeypatch.setattr(TH, "storage_ok", lambda: True)
+        a = await env.actor(JUDGES[0])
+        games = [{"bunny_item_id": 7, "home": "SPR Gliwice", "away": "Nieznani"}]
+        await TH.attach(a, games)
+        pending = dict(games[0])
+        from app import mentor_bastion_client as CL
+
+        class Fake:
+            async def request(self, method, path, params=None, json=None, timeout=None):
+                return CL.Reply(200, {"jpeg_b64": base64.b64encode(b"x" * 2000).decode(), "duration_s": 3600, "at_s": 300.0})
+
+        monkeypatch.setattr(env.bastion, "_client", lambda: Fake())
+        stored = {}
+        monkeypatch.setattr(env.media, "storage_ready", lambda: True)
+        monkeypatch.setattr(env.media, "object_key", lambda *parts: "mentor/" + "/".join(parts))
+
+        def fake_put(path, key, ctype):
+            stored["key"] = key
+            return 1
+
+        monkeypatch.setattr(env.media, "put_file", fake_put)
+        busy = await TH.run_once()
+        games2 = [{"bunny_item_id": 7, "home": "SPR Gliwice", "away": "Nieznani"}]
+        await TH.attach(a, games2)
+        await S.attach_crests(games2)
+        return pending, busy, stored, games2[0], TH.sign(7)
+
+    pending, busy, stored, ready, sig = env.run(go)
+    assert pending.get("thumbnail_url") is None and pending["thumb_pending"] is True and busy is True and stored["key"].endswith("trybuna/thumbs/7.jpg")
+    assert ready["thumb_pending"] is False and ready["thumbnail_url"] == f"/mentor-panel/trybuna/thumb/7.jpg?s={sig}" and ready["duration_s"] == 3600
+    assert ready["home_crest"] == "https://l/c1.png" and ready["away_crest"] is None

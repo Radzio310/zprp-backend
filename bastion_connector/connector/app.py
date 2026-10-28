@@ -132,6 +132,23 @@ async def conn_delete(scope: str, judge_id: str | None = None):
     return {"deleted": svc.disconnect(scope, judge_id)}
 
 
+class FrameIn(BaseModel):
+    scope: str
+    judge_id: str | None = None
+    bunny_item_id: int
+    at_s: float | None = None
+
+
+@app.post("/frame", dependencies=[Depends(auth)])
+async def frame(body: FrameIn):
+    """Miniatura kasety (klatka z odtwarzacza). Tylko odczyt; JPEG w base64, bez zapisu na dysku connectora."""
+    _scope(body.scope, body.judge_id)
+    if body.bunny_item_id < 1 or (body.at_s is not None and not 0 <= body.at_s <= 86400):
+        raise ConnectorError("BAD_PARAMS", 400)
+    res = await svc.frame(body.scope, body.judge_id, body.bunny_item_id, body.at_s)
+    return JSONResponse(res, headers={"Cache-Control": "no-store"})
+
+
 class ClipIn(BaseModel):
     scope: str
     judge_id: str

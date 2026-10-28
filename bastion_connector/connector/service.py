@@ -424,6 +424,50 @@ class Service:
         return {"remote_id": clip_id, "url": signed, "host": host, "cookies": False, "max_age_s": 120,
                 "max_bytes": self.s.max_download_mb * 1024 * 1024}
 
+    async def frame(self, scope: str, judge_id: str | None, item_id: int, at_s: float | None = None) -> dict:
+        """Miniatura kasety: klatka z odtwarzacza Bunny (Chromium z zapisanym stanem polaczenia). Zwraca JPEG w base64.
+        Jedna klatka naraz (semafor), limity czasu na kazdym kroku; blad = BASTION_FRAME_FAILED (BAZA ponowi pozniej)."""
+        from .bastion import frame_time
+
+        if not hasattr(self, "_frame_sem"):
+            self._frame_sem = asyncio.Semaphore(1)
+        res, _info = await self.game_context(scope, judge_id, item_id)
+        err = self._auth_err(res.code)
+        if err:
+            raise err
+        if res.code != "OK" or not res.embed_url:
+            raise ConnectorError("BASTION_NO_EMBED", 404, res.code)
+        key = conn_key_for(scope, judge_id)
+        loaded = self.store.load(key)
+        if loaded is None:
+            raise ConnectorError("BASTION_NOT_CONNECTED", 409)
+        state, _meta = loaded
+        async with self._frame_sem:
+            browser = await self._get_browser()
+            ctx = await browser.new_context(storage_state=state, viewport=VIEWPORT, locale="pl-PL", timezone_id="Europe/Warsaw")
+            try:
+                page = await ctx.new_page()
+                await page.goto(res.embed_url, wait_until="domcontentloaded", timeout=25000)
+                await page.wait_for_selector("video", timeout=20000, state="attached")
+                await page.wait_for_function(
+                    "() => { const v = document.querySelector('video'); return v && isFinite(v.duration) && v.duration > 0 }", timeout=25000)
+                duration = float(await page.evaluate("() => document.querySelector('video').duration"))
+                at = frame_time(duration, at_s)
+                await page.evaluate(
+                    "(t) => new Promise((ok) => { const v = document.querySelector('video'); v.muted = true; "
+                    "v.addEventListener('seeked', () => ok(true), {once: true}); v.currentTime = t; setTimeout(() => ok(false), 15000); })", at)
+                await page.wait_for_timeout(600)
+                jpeg = await page.locator("video").first.screenshot(type="jpeg", quality=72, timeout=15000)
+            except ConnectorError:
+                raise
+            except Exception as e:  # noqa: BLE001 - przegladarka bywa kapryśna; BAZA ponowi z odstepem
+                raise ConnectorError("BASTION_FRAME_FAILED", 502, type(e).__name__) from e
+            finally:
+                await ctx.close()
+        if not jpeg or len(jpeg) < 1000:
+            raise ConnectorError("BASTION_FRAME_FAILED", 502, "pusta klatka")
+        return {"jpeg_b64": base64.b64encode(jpeg).decode("ascii"), "at_s": round(at, 1), "duration_s": int(duration), "bytes": len(jpeg)}
+
     async def clip_download(self, scope: str, judge_id: str | None, clip_id: str) -> dict:
         """Probne (P8): connector sam pobiera podpisany adres osobnym klientem bez ciasteczek, mierzy i kasuje plik."""
         import tempfile

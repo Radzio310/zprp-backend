@@ -28,8 +28,10 @@ from app.db import (
     mentor_clips,
     mentor_match_videos,
     mentor_trybuna_clip_tags,
+    mentor_trybuna_feed_cache,
     mentor_trybuna_follows,
     mentor_trybuna_notified,
+    mentor_trybuna_today,
     mentor_trybuna_queue,
     mentor_watched_matches,
     province_judges,
@@ -454,11 +456,8 @@ async def build_feed(real: Actor, follows: List[Dict[str, Any]], days: int, *, r
     # Gdzie ten mecz już jest w Trybunie moich par.
     if mz is not None:
         await S.enrich_media(real, mz.scope, [i["bastion"] for i in items if i.get("bastion")])
-    pair_ids = [p["id"] for p in await _my_pairs(real)]
-    got = await watched_by_item(pair_ids, [i["bastion"]["bunny_item_id"] for i in items if i.get("bastion")])
-    for i in items:
-        b = i.get("bastion")
-        i["watched_in"] = [{"pair_id": pid, "match_id": mid} for (pid, item), mid in got.items() if b and item == b["bunny_item_id"]]
+    await S.attach_crests(items)
+    await fill_watched_in(real, items)
     return {"items": items, "follows": len(follows), "truncated": truncated, "window": {"from": start_day.isoformat(), "to": end_day.isoformat()},
             "zprp": bool(zrows) or bool(follows), "bastion": bastion}
 
@@ -493,18 +492,102 @@ async def _my_pairs(real: Actor) -> List[Dict[str, Any]]:
         return []
 
 
+FEED_REFRESH_S = 30 * 60
+FEED_STALE_S = 40 * 60
+FEED_FORCE_MIN_S = 120
+FC = mentor_trybuna_feed_cache
+_refreshing: set = set()
+
+
+async def load_feed_cache(judge_id: str) -> Optional[Dict[str, Any]]:
+    row = await C.one(select(FC).where(FC.c.judge_id == judge_id))
+    if not row:
+        return None
+    payload = R.json_value(row.get("payload_json"), {})
+    return {"payload": payload, "computed_at": R.aware(row.get("computed_at"))}
+
+
+async def refresh_feed(real: Actor) -> None:
+    """Liczy kanał obserwowanych (14 dni, wszyscy obserwowani) i trzyma go w bazie. Jedno liczenie na osobę naraz."""
+    if real.judge_id in _refreshing:
+        return
+    _refreshing.add(real.judge_id)
+    try:
+        follows = await my_follows(real.judge_id)
+        payload = await build_feed(real, follows, 14, retry_429=True) if follows else {
+            "items": [], "follows": 0, "truncated": 0, "window": None, "zprp": False, "bastion": bastion_block("ok")}
+        text = C.dumps(payload)
+        await database.execute(FC.delete().where(FC.c.judge_id == real.judge_id))
+        await database.execute(FC.insert().values(judge_id=real.judge_id, payload_json=text, computed_at=C.now()))
+    except Exception:  # noqa: BLE001 - kanał w tle nie może zabić pętli ani odpowiedzi
+        logger.warning("trybuna: liczenie kanału nieudane", exc_info=True)
+    finally:
+        _refreshing.discard(real.judge_id)
+
+
+def kick_refresh(real: Actor) -> bool:
+    if real.judge_id in _refreshing:
+        return False
+    asyncio.ensure_future(refresh_feed(real))
+    return True
+
+
+async def fill_watched_in(real: Actor, items: List[Dict[str, Any]]) -> None:
+    pair_ids = [p["id"] for p in await _my_pairs(real)]
+    got = await watched_by_item(pair_ids, [i["bastion"]["bunny_item_id"] for i in items if i.get("bastion")])
+    for i in items:
+        b = i.get("bastion")
+        i["watched_in"] = [{"pair_id": pid, "match_id": mid} for (pid, item), mid in got.items() if b and item == b["bunny_item_id"]]
+
+
 @router.get("/trybuna/feed")
 async def feed(response: Response, days: int = Query(14, ge=1, le=60), follow_id: str = Query("", max_length=40),
-               real: Actor = Depends(base_actor)):
-    """„Nowe od obserwowanych": ostatnie mecze obserwowanych (obsada ZPRP skrzyżowana z Meczoteką). `state`: `video` (jest nagranie)
-    albo `waiting` (czeka na nagranie). `bastion.state` mówi, czy Meczoteka odpowiedziała (inaczej tylko obsada ZPRP)."""
+               refresh: int = Query(0, ge=0, le=1), real: Actor = Depends(base_actor)):
+    """„Nowe od obserwowanych". Domyślny kanał (14 dni, wszyscy obserwowani) jest liczony w tle co 30 min i trzymany w bazie: odpowiedź
+    wraca od razu `{items, ..., computed_at, refreshing}`. Brak zapisu albo starszy niż 40 min uruchamia liczenie (`refreshing:true`,
+    przy pierwszym razie `items` puste); `?refresh=1` wymusza liczenie nie częściej niż co 2 min. Inne `days` / `follow_id` są liczone
+    na żywo. `state`: `video` (jest nagranie) albo `waiting` (czeka na nagranie). `bastion.state` mówi, czy Meczoteka odpowiedziała."""
     response.headers["Cache-Control"] = "no-store"
     follows = await my_follows(real.judge_id)
-    if follow_id:
-        follows = [f for f in follows if f["id"] == follow_id]
-    if not follows:
-        return {"items": [], "follows": 0, "truncated": 0, "window": None, "zprp": False, "bastion": bastion_block("ok")}
-    return await build_feed(real, follows, days)
+    if not follows or (follow_id and not any(f["id"] == follow_id for f in follows)):
+        return {"items": [], "follows": 0, "truncated": 0, "window": None, "zprp": False, "bastion": bastion_block("ok"),
+                "computed_at": None, "refreshing": False}
+    if follow_id or days != 14:
+        live = await build_feed(real, [f for f in follows if not follow_id or f["id"] == follow_id], days)
+        return {**live, "computed_at": C.now().isoformat(), "refreshing": False}
+    cached = await load_feed_cache(real.judge_id)
+    age = (C.now() - cached["computed_at"]).total_seconds() if cached and cached["computed_at"] else None
+    started = False
+    if cached is None or age is None or age > FEED_STALE_S or (refresh and age > FEED_FORCE_MIN_S):
+        started = kick_refresh(real)
+    if cached is None:
+        return {"items": [], "follows": len(follows), "truncated": 0, "window": None, "zprp": False, "bastion": bastion_block("ok"),
+                "computed_at": None, "refreshing": started or real.judge_id in _refreshing}
+    payload = dict(cached["payload"])
+    await fill_watched_in(real, payload.get("items") or [])
+    payload["follows"] = len(follows)
+    payload["computed_at"] = cached["computed_at"].isoformat()
+    payload["refreshing"] = started or real.judge_id in _refreshing
+    return payload
+
+
+async def run_trybuna_feed_refresher() -> None:
+    """Co 30 min liczy kanał każdemu, kto ma obserwowanych (jeden po drugim, z przerwą, żeby nie zalać Meczoteki)."""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            judges = sorted({r["judge_id"] for r in await C.rows(select(F.c.judge_id))})
+            for jid in judges:
+                try:
+                    await refresh_feed(await C.load_actor(jid, via="jwt"))
+                except Exception:  # noqa: BLE001
+                    logger.warning("trybuna: kanał w tle dla %s nieudany", jid, exc_info=True)
+                await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("trybuna: pętla kanału")
+        await asyncio.sleep(FEED_REFRESH_S)
 
 
 class HarvestBody(BaseModel):
@@ -568,10 +651,15 @@ async def harvest(follow_id: str, body: HarvestBody, response: Response, real: A
 
 @router.get("/trybuna/calendar")
 async def calendar(days: int = Query(30, ge=1, le=90), real: Actor = Depends(base_actor)):
-    """Nadchodzące mecze obserwowanych z obsady ZPRP (kto, gdzie, kiedy). `unresolved` = obserwowani bez numeru sędziego,
-    których szukamy po nazwisku w obsadzie."""
-    follows = await my_follows(real.judge_id)
+    """Nadchodzące mecze obserwowanych z obsady ZPRP i z Meczoteki (kto, gdzie, kiedy). `unresolved` = obserwowani bez numeru
+    sędziego, których szukamy po nazwisku w obsadzie. Pozycje mają `home_crest` / `away_crest`."""
+    return await calendar_for(real, await my_follows(real.judge_id), days)
+
+
+async def calendar_for(real: Actor, follows: List[Dict[str, Any]], days: int, mz_override: Any = None, whole_day: bool = False) -> Dict[str, Any]:
     now = _naive_local_now()
+    if whole_day:  # od północy: poranny push widzi też mecze, które dziś już się zaczęły
+        now = now.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = await zprp_rows_for(follows, now, now + timedelta(days=days)) if follows else []
     items = []
     cards = []
@@ -586,7 +674,7 @@ async def calendar(days: int = Query(30, ge=1, le=90), real: Actor = Depends(bas
                       "followed": [f["id"] for f in follows if T.follow_matches(f, refs)], "bunny_item_id": None})
     # Przyszłe i bez terminu mecze z Meczoteki (portal pokazuje je przed obsadą ZPRP): tylko te, których nie ma w obsadzie.
     bastion = bastion_block("ok")
-    mz, state = S._setup(real) if follows else (None, None)
+    mz, state = (mz_override, None) if mz_override is not None else (S._setup(real) if follows else (None, None))
     if follows and mz is None:
         bastion = bastion_block(state or "unconfigured")
     elif mz is not None:
@@ -617,6 +705,7 @@ async def calendar(days: int = Query(30, ge=1, le=90), real: Actor = Depends(bas
         except S._Stop as stop:
             bastion = bastion_block(await stop_state(stop), mz.scope)
     items.sort(key=lambda i: (i.get("date") is None, R.s(i.get("date"))))
+    await S.attach_crests(items)
     return {"items": items, "follows": len(follows), "days": days, "bastion": bastion,
             "unresolved": [f["name"] for f in follows if len(f.get("judge_ids") or []) < len(follow_names(f))]}
 
@@ -775,6 +864,7 @@ async def _queue_payload(real: Actor) -> Dict[str, Any]:
         ids = [r["match_id"] for r in rows if r["pair_id"] == pid]
         for card in await watched_cards(ctx, ids=ids):
             alive[(pid, card["match_id"])] = card
+    names = await C.people({r.get("recommended_by") for r in rows if r.get("recommended_by")})
     vids = [r["video_id"] for r in rows if r.get("video_id")]
     videos = {v["id"]: v for v in await C.rows(select(mentor_match_videos.c.id, mentor_match_videos.c.title, mentor_match_videos.c.thumbnail_url,
                                                       mentor_match_videos.c.duration_s, mentor_match_videos.c.provider)
@@ -786,7 +876,10 @@ async def _queue_payload(real: Actor) -> Dict[str, Any]:
             continue
         items.append({"pair_id": r["pair_id"], "match_id": r["match_id"], "position": int(r.get("position") or 0), "progress_s": int(r.get("progress_s") or 0),
                       "video_id": r.get("video_id"), "video": videos.get(r.get("video_id")), "added_at": _iso(r.get("added_at")),
-                      "done_at": _iso(r.get("done_at")), "match": R.slim_match(card) | {"origin": card.get("origin"), "referees": card.get("referees")}})
+                      "done_at": _iso(r.get("done_at")), "match": R.slim_match(card) | {"origin": card.get("origin"), "referees": card.get("referees")},
+                      "recommended_by": ({"judge_id": r["recommended_by"], "name": C.person(names, r["recommended_by"])["name"]}
+                                         if r.get("recommended_by") else None),
+                      "note": r.get("note"), "recommended_at": _iso(r.get("recommended_at")), "clip_id": r.get("clip_id")})
     return {"items": items, "pending": sum(1 for i in items if not i["done_at"]), "done": sum(1 for i in items if i["done_at"]), "limit": T.MAX_QUEUE}
 
 
@@ -876,6 +969,7 @@ async def referee_card(response: Response, name: str = Query("", max_length=80),
 
     # ZPRP: obsada i protokoły.
     zprp: Dict[str, Any] = {"judge_id": judge_id or None, "matches": 0, "seasons": [], "recent": [], "upcoming": [], "proel_protocols": 0}
+    zprp_rows: List[Dict[str, Any]] = []
     if judge_id:
         M = zprp_public_matches
         rows = await C.rows(select(M).where(or_(M.c.referee_1_id == judge_id, M.c.referee_2_id == judge_id))
@@ -885,6 +979,7 @@ async def referee_card(response: Response, name: str = Query("", max_length=80),
         for r in rows:
             card = R.card_from_public(r)
             seasons[card.get("season") or ""] = seasons.get(card.get("season") or "", 0) + 1
+        zprp_rows = rows
         zprp["matches"] = len(rows)
         zprp["seasons"] = [{"season": s, "matches": n} for s, n in sorted(seasons.items(), reverse=True) if s]
         for r in rows:
@@ -899,25 +994,68 @@ async def referee_card(response: Response, name: str = Query("", max_length=80),
             found = await C.rows(select(saved_matches.c.zprp_match_id).where(saved_matches.c.zprp_match_id.in_(ids)))
             zprp["proel_protocols"] = len({R.s(f["zprp_match_id"]) for f in found})
 
-    # Meczoteka: dostępne mecze.
+    # Meczoteka: dostępne mecze (do 5 stron po nazwisku, obsada potwierdzona w nominees).
     available: Dict[str, Any] = {"games": [], "bastion": bastion_block("ok")}
     mz, state = S._setup(real)
+    all_games: List[Dict[str, Any]] = []
     if mz is None:
         available["bastion"] = bastion_block(state or "unconfigured")
     else:
         try:
-            games = await mz.search_referee(name, video="any")
+            all_games, _meta = await mz.scan(referee=name, video="any")
             pair_ids = [p["id"] for p in await _my_pairs(real)]
-            got = await watched_by_item(pair_ids, [int(g["bunny_item_id"]) for g in games if g.get("bunny_item_id")])
+            got = await watched_by_item(pair_ids, [int(g["bunny_item_id"]) for g in all_games if g.get("bunny_item_id")])
             marks = {item: mid for (_, item), mid in got.items()}
-            available["games"] = [game_row(g, marks) for g in games if g.get("bunny_item_id")][:12]
+            available["games"] = [game_row(g, marks) for g in all_games if g.get("bunny_item_id")][:12]
+            await S.enrich_media(real, mz.scope, available["games"])
             available["bastion"] = bastion_block("ok", mz.scope)
         except S._Stop as stop:
             available["bastion"] = bastion_block(await stop_state(stop), mz.scope)
+    await S.attach_crests(zprp["recent"] + zprp["upcoming"])
+    extras = await card_extras(judge_id, name, zprp_rows if judge_id else [], all_games)
 
     # Moje klipy z udziałem sędziego.
     my_clips = await clips_with_referee(real, me, key)
-    return {"referee": me, "follow": mine, "zprp": zprp, "available": available, "my_clips": my_clips}
+    return {"referee": me, "follow": mine, "zprp": zprp, "available": available, "my_clips": my_clips, **extras}
+
+
+async def card_extras(judge_id: str, name: str, rows: List[Dict[str, Any]], games: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Dodatki karty sędziego: forma w sezonie, najczęstszy partner, rozgrywki, liczniki i okręg (herb jak na ekranach egzaminu)."""
+    me = {"name": name, "judge_id": judge_id or None}
+    season = R.season_key(datetime.now(timezone.utc))
+    partners: Dict[str, Dict[str, Any]] = {}
+    comps: Dict[str, int] = {}
+    form: List[Dict[str, Any]] = []
+    now = _naive_local_now()
+    for r in rows:
+        card = R.card_from_public(r)
+        refs = [x for x in T.referees_of_zprp_row(r) if x["role"] == "referee"]
+        mine = next((x for x in refs if T.same_referee(x, me)), None)
+        for other in refs:
+            if other is not mine and not T.same_referee(other, me):
+                entry = partners.setdefault(T.name_key(other["name"]), {"name": other["name"], "count": 0})
+                entry["count"] += 1
+        if card.get("competition_name"):
+            comps[card["competition_name"]] = comps.get(card["competition_name"], 0) + 1
+        if card.get("season") == season and r.get("scheduled_at") and r["scheduled_at"] < now and len(form) < 40:
+            twin = next((g for g in games if g.get("bunny_item_id") and T.feed_state(g.get("video_state")) == "video"
+                         and S.score_game(g, card)["confidence"] >= T.AUTO_MIN), None)
+            form.append({"date": _iso(card.get("scheduled_at")), "code": card.get("match_code"), "home": (card.get("home") or {}).get("name"),
+                         "away": (card.get("away") or {}).get("name"), "has_video": twin is not None, "role": "referee",
+                         "position": (mine or {}).get("position")})
+    await S.attach_crests(form)
+    top = max(partners.values(), key=lambda p: p["count"], default=None)
+    province = None
+    if judge_id:
+        who = await C.one(select(province_judges.c.province).where(province_judges.c.judge_id == judge_id))
+        if who and who.get("province"):
+            from app import exam_live_brand as EB
+
+            palette = EB.palette_for("province", who["province"])
+            province = {"name": who["province"], "crest": f"/exam-live/assets/img/{EB.crest_name(palette)}" if palette.get("kind") == "province" else None}
+    with_video = [g for g in games if g.get("bunny_item_id") and T.feed_state(g.get("video_state")) == "video"]
+    return {"season_form": form, "top_partner": top, "competitions": [{"name": n, "count": c} for n, c in sorted(comps.items(), key=lambda x: -x[1])[:5]],
+            "videos_count": len(with_video), "matches_count": len(rows) or len(games), "province": province}
 
 
 async def clips_with_referee(real: Actor, me: Mapping[str, Any], key: str, limit: int = 30) -> List[Dict[str, Any]]:
@@ -1045,3 +1183,261 @@ async def run_trybuna_notifier() -> None:
         except Exception:  # noqa: BLE001
             logger.exception("mentor: trybuna push nieudany")
         await asyncio.sleep(NOTIFY_EVERY_S)
+
+
+# ─── Mentor poleca ──────────────────────────────────────────────────────────
+
+
+class RecommendBody(BaseModel):
+    match_id: Optional[str] = Field(default=None, max_length=64)
+    bunny_item_id: Optional[int] = Field(default=None, ge=1)
+    url: Optional[str] = Field(default=None, max_length=2048)
+    clip_id: Optional[str] = Field(default=None, max_length=64)
+    note: str = Field(default="", max_length=280)
+
+
+@router.post("/pairs/{pair_id}/trybuna/recommend")
+async def recommend(pair_id: str, body: RecommendBody, response: Response, real: Actor = Depends(base_actor),
+                    actor: Actor = Depends(mentor_actor)):
+    """Mentor poleca parze mecz (albo klip) z Trybuny: `{match_id? | bunny_item_id? | url? | clip_id?, note <= 280}`. Tylko mentor
+    pary (403 `NOT_MENTOR`). Gdy podano kasetę albo adres, mecz z Trybuny powstaje, jeśli go nie ma (jak `POST .../trybuna/matches`).
+    Pozycja trafia NA POCZĄTEK kolejki „Do obejrzenia" obu sędziów pary z `recommended_by`, `note`, `recommended_at` (i `clip_id`),
+    a oni dostają push „Mentor poleca" (deep link do meczu / klipu). -> `{ok, match_id, clip_id, created_match, queued: [judge_id]}`."""
+    from app.mentor_panel_notify import notify
+    from app.mentor_trybuna import WatchBody, create_watched, watched_card, watched_row
+
+    response.headers["Cache-Control"] = "no-store"
+    ctx = await C.pair_context(pair_id, actor, action="create")
+    if ctx["role"] != "mentor":
+        raise C.err(403, "NOT_MENTOR", "Polecać mecze z Trybuny może tylko mentor tej pary.")
+    clip = None
+    created = False
+    if body.clip_id:
+        clip = await C.one(select(mentor_clips).where(mentor_clips.c.id == body.clip_id).where(mentor_clips.c.pair_id == ctx["pair_id"])
+                           .where(mentor_clips.c.deleted_at.is_(None)))
+        if not clip:
+            raise C.err(404, "NOT_FOUND", "Nie ma takiego klipu.")
+        if not T.is_watched(clip["match_id"]):
+            raise C.err(422, "NOT_TRYBUNA", "Polecać można klipy z meczów z Trybuny.")
+        match_id = clip["match_id"]
+    elif body.match_id:
+        row = await watched_row(ctx["pair_id"], body.match_id)
+        if not row:
+            raise C.err(404, "MATCH_NOT_FOUND", "To nie jest mecz z Trybuny tej pary.")
+        match_id = row["match_id"]
+    elif body.bunny_item_id or body.url:
+        row, created = await create_watched(ctx, actor, real, WatchBody(url=body.url, bunny_item_id=body.bunny_item_id), link=True)
+        match_id = row["match_id"]
+    else:
+        raise C.err(422, "RECOMMEND_TARGET", "Podaj mecz, kasetę, adres albo klip do polecenia.")
+    video = await C.one(select(mentor_match_videos.c.id).where(mentor_match_videos.c.match_id == match_id)
+                        .where(mentor_match_videos.c.pair_key == ctx["pair_key"]).where(mentor_match_videos.c.deleted_at.is_(None))
+                        .order_by(mentor_match_videos.c.created_at.asc()).limit(1))
+    note, stamp = R.plain(body.note, 280) or None, C.now()
+    queued = []
+    for jid in ctx["judge_ids"]:
+        mine = await C.rows(select(Q.c.match_id, Q.c.position).where(Q.c.judge_id == jid))
+        top = min([int(m.get("position") or 0) for m in mine], default=0) - 1
+        values = dict(position=top, video_id=(video or {}).get("id"), recommended_by=actor.judge_id, note=note, recommended_at=stamp,
+                      clip_id=body.clip_id or None, done_at=None, progress_s=0, updated_at=stamp)
+        if any(m["match_id"] == match_id for m in mine):
+            await database.execute(update(Q).where(Q.c.judge_id == jid).where(Q.c.pair_id == ctx["pair_id"]).where(Q.c.match_id == match_id).values(**values))
+        else:
+            await database.execute(Q.insert().values(judge_id=jid, pair_id=ctx["pair_id"], match_id=match_id, added_at=stamp, **values))
+        queued.append(jid)
+    card = await watched_card(ctx, match_id)
+    teams = " - ".join(x for x in ((card.get("home") or {}).get("name"), (card.get("away") or {}).get("name")) if x) or card.get("title") or "mecz"
+    await C.touch(ctx, actor.judge_id, "trybuna_recommended", "matches", match_id, {"clip": body.clip_id})
+    link = f"{C.WEB_BASE}/{ctx['pair_id']}/klipy?klip={body.clip_id}" if body.clip_id else f"{C.WEB_BASE}/{ctx['pair_id']}/mecz/{match_id}"
+    await notify(ctx, actor.judge_id, "Mentor poleca", f"{actor.display_name}: {teams}" + (f" - {note}" if note else ""),
+                 recipients=queued, match_id=match_id, clip_id=body.clip_id, link=link, target="trybuna", tag=f"mentor-poleca-{match_id}")
+    return {"ok": True, "match_id": match_id, "clip_id": body.clip_id, "created_match": created, "queued": queued}
+
+
+# ─── Sugestie: kogo obserwować ──────────────────────────────────────────────
+
+SUGGESTIONS_MAX = 12
+
+
+@router.get("/trybuna/follows/suggestions")
+async def follow_suggestions(response: Response, real: Actor = Depends(base_actor)):
+    """Podpowiedzi „kogo jeszcze obserwować" (do 12, bez już obserwowanych): częsty współsędzia obserwowanych (z obsady ZPRP), sędziowie z tej
+    samej ligi / rozgrywek co obserwowani, sędziowie z meczów dodanych przez Twoje pary; dla stałych duetów obserwowanego dochodzi
+    propozycja pary. -> tablica `[{kind: "referee"|"pair", name, judge_id|null / names+judge_ids, reason, matches_with_video|null, crest|null}]`.
+    `matches_with_video` = ile meczów z nagraniem Meczoteka pokazuje na pierwszej stronie (null, gdy Meczoteka niedostępna)."""
+    response.headers["Cache-Control"] = "no-store"
+    follows = await my_follows(real.judge_id)
+    followed_names = {T.name_key(n) for f in follows for n in follow_names(f)}
+    followed_ids = {i for f in follows for i in f.get("judge_ids") or []}
+    pair_follows = {frozenset(T.name_key(n) for n in f["names"]) for f in follows if f["kind"] == "pair"}
+    cands: Dict[str, Dict[str, Any]] = {}
+
+    def bump(name: str, jid: Any, reason: str, weight: int) -> None:
+        key = T.name_key(name)
+        if not key or key in followed_names or (R.s(jid) and R.s(jid) in followed_ids):
+            return
+        c = cands.setdefault(key, {"name": name, "judge_id": R.s(jid) or None, "score": 0, "reason": reason, "best": 0})
+        c["score"] += weight
+        if weight > c["best"]:
+            c["reason"], c["best"] = reason, weight
+        c["judge_id"] = c["judge_id"] or R.s(jid) or None
+
+    M = zprp_public_matches
+    ids = sorted(followed_ids)
+    duos: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    if ids:
+        rows = await C.rows(select(M).where(or_(M.c.referee_1_id.in_(ids), M.c.referee_2_id.in_(ids))).order_by(M.c.scheduled_at.desc()).limit(400))
+        comps: Dict[str, Tuple[str, int]] = {}
+        for r in rows:
+            refs = [x for x in T.referees_of_zprp_row(r) if x["role"] == "referee"]
+            mine = [x for x in refs if x.get("judge_id") in followed_ids]
+            for other in refs:
+                if other in mine or other.get("judge_id") in followed_ids:
+                    continue
+                for m in mine:
+                    d = duos.setdefault((T.name_key(m["name"]), T.name_key(other["name"])), {"a": m, "b": other, "count": 0})
+                    d["count"] += 1
+            if r.get("competition_id"):
+                name, n = comps.get(r["competition_id"], (r.get("competition_name") or "", 0))
+                comps[r["competition_id"]] = (name, n + 1)
+        for d in duos.values():
+            bump(d["b"]["name"], d["b"].get("judge_id"), f"Częsty współsędzia: {d['a']['name']} ({d['count']} meczów)", 10 * d["count"])
+        top = [cid for cid, _ in sorted(comps.items(), key=lambda x: -x[1][1])[:3]]
+        if top:
+            since = _naive_local_now() - timedelta(days=120)
+            others = await C.rows(select(M).where(M.c.competition_id.in_(top)).where(M.c.scheduled_at >= since).limit(600))
+            for r in others:
+                for x in T.referees_of_zprp_row(r):
+                    if x["role"] == "referee":
+                        bump(x["name"], x.get("judge_id"), f"Ta sama liga: {r.get('competition_name') or 'rozgrywki obserwowanych'}", 1)
+    pair_ids = [p["id"] for p in await _my_pairs(real)]
+    if pair_ids:
+        for w in await C.rows(select(W.c.referees_json).where(W.c.pair_id.in_(pair_ids)).where(W.c.deleted_at.is_(None)).limit(200)):
+            for x in T.clean_referees(R.json_value(w.get("referees_json"), [])):
+                if x["role"] == "referee":
+                    bump(x["name"], x.get("judge_id"), "Z meczów dodanych przez Twoją parę", 3)
+    ranked = sorted(cands.values(), key=lambda c: -c["score"])
+    out: List[Dict[str, Any]] = []
+    for d in sorted(duos.values(), key=lambda d: -d["count"]):
+        if d["count"] >= 3 and frozenset((T.name_key(d["a"]["name"]), T.name_key(d["b"]["name"]))) not in pair_follows:
+            out.append({"kind": "pair", "name": f"{d['a']['name']} + {d['b']['name']}", "names": [d["a"]["name"], d["b"]["name"]],
+                        "judge_ids": [d["a"].get("judge_id"), d["b"].get("judge_id")], "judge_id": None,
+                        "reason": f"Stały duet ({d['count']} meczów razem)", "matches_with_video": None, "crest": None})
+            break
+    for c in ranked:
+        if len(out) >= SUGGESTIONS_MAX:
+            break
+        out.append({"kind": "referee", "name": c["name"], "judge_id": c["judge_id"], "reason": c["reason"], "matches_with_video": None, "crest": None})
+    mz, _state = S._setup(real)
+    if mz is not None and out:
+        gate = asyncio.Semaphore(3)
+
+        async def count(item: Dict[str, Any]) -> None:
+            async with gate:
+                try:
+                    item["matches_with_video"] = len([g for g in await mz.search_referee(item["names"][0] if item["kind"] == "pair" else item["name"],
+                                                                                         video="with") if g.get("bunny_item_id")])
+                except S._Stop:
+                    item["matches_with_video"] = None
+
+        await asyncio.gather(*(count(i) for i in out))
+    return out[:SUGGESTIONS_MAX]
+
+
+# ─── „Dziś sędziuje" (8:00) ─────────────────────────────────────────────────
+
+
+def hhmm(item: Mapping[str, Any]) -> Optional[str]:
+    """Godzina meczu (czas polski) z pozycji kalendarza albo None, gdy nieznana."""
+    if not item.get("time_known"):
+        return None
+    raw = R.s(item.get("date"))
+    try:
+        if "T" in raw and (raw.endswith("Z") or "+" in raw[10:]):
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(WARSAW).strftime("%H:%M")
+        return raw[11:16] or None
+    except ValueError:
+        return None
+
+
+async def morning_once(now: Optional[datetime] = None) -> Dict[str, int]:
+    """Poranny cichy push „Dziś sędziuje": jeden zbiorczy na osobę (obsada ZPRP + Meczoteka nadchodzące), ślad w `mentor_trybuna_today`
+    (osoba + dzień) daje brak powtórek przy restarcie."""
+    counts = {"judges": 0, "pushed": 0}
+    today = (now or datetime.now(timezone.utc)).astimezone(WARSAW).date()
+    day = today.isoformat()
+    rows = await C.rows(select(F))
+    if not rows:
+        return counts
+    sent = {r["judge_id"] for r in await C.rows(select(mentor_trybuna_today).where(mentor_trybuna_today.c.day == day))}
+    mz = None
+    flags = BR.load_flags()
+    if flags.enabled and flags.configured and flags.default_enabled:
+        from app import mentor_bastion_client as CL
+
+        try:
+            mz = S.Meczoteka(CL.get_client(), ["default"], C.MentorActor("0", display_name="Trybuna"))
+        except CL.ConnectorUnavailable:
+            mz = None
+    by_judge: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        by_judge.setdefault(r["judge_id"], []).append(T.follow_shape(r))
+    for jid, follows in by_judge.items():
+        if jid in sent:
+            continue
+        counts["judges"] += 1
+        try:
+            cal = await calendar_for(await C.load_actor(jid, via="jwt"), follows, 1, mz_override=mz, whole_day=True)
+        except Exception:  # noqa: BLE001
+            logger.warning("trybuna: poranny kalendarz %s nieudany", jid, exc_info=True)
+            continue
+        mine = [i for i in cal["items"] if i.get("followed") and S.parse_day(i.get("date")) == today]
+        if mine:
+            first = mine[0]
+            who = next((f["name"] for f in follows if f["id"] in first["followed"]), "obserwowany")
+            when = hhmm(first)
+            body = f"{who}: {first.get('home') or '?'} - {first.get('away') or '?'}" + (f" ({when})" if when else "")
+            if len(mine) > 1:
+                body += f" i {len(mine) - 1} inne"
+            try:
+                from app.mentor_panel_notify import push_data
+                from app.push.push import send_push_to_judges_report
+
+                data = push_data("trybuna", target="trybuna_calendar", tag="mentor-trybuna-today", quiet=True, extra={"day": day})
+                await send_push_to_judges_report([jid], "Dziś sędziuje", body, data, app_variant="baza", preference_key="mentorPanel")
+                counts["pushed"] += 1
+            except Exception:  # noqa: BLE001
+                logger.warning("trybuna: push porannego kalendarza nieudany", exc_info=True)
+        try:
+            await database.execute(mentor_trybuna_today.insert().values(judge_id=jid, day=day, sent_at=C.now()))
+        except Exception:  # noqa: BLE001 - wyścig: już zapisane
+            pass
+    return counts
+
+
+def seconds_to_morning(now: Optional[datetime] = None) -> float:
+    """Sekundy do najbliższej 8:00 czasu polskiego."""
+    local = (now or datetime.now(timezone.utc)).astimezone(WARSAW)
+    target = local.replace(hour=8, minute=0, second=0, microsecond=0)
+    if target <= local:
+        target += timedelta(days=1)
+    return (target - local).total_seconds()
+
+
+async def run_trybuna_morning() -> None:
+    """Pętla: po starcie (między 8:00 a 12:00 od razu - ślad chroni przed powtórką), potem co dobę o 8:00 czasu polskiego."""
+    await asyncio.sleep(300)
+    if 8 <= datetime.now(timezone.utc).astimezone(WARSAW).hour < 12:
+        try:
+            logger.info("mentor: trybuna rano %s", await morning_once())
+        except Exception:  # noqa: BLE001
+            logger.exception("mentor: trybuna rano nieudane")
+    while True:
+        try:
+            await asyncio.sleep(seconds_to_morning())
+            logger.info("mentor: trybuna rano %s", await morning_once())
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("mentor: trybuna rano nieudane")
+            await asyncio.sleep(60)

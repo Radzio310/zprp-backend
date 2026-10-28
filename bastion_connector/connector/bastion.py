@@ -140,6 +140,13 @@ def video_extras(video: dict, suffixes: list[str]) -> tuple[str | None, int | No
     return thumb, dur
 
 
+def frame_time(duration_s: float, at_s: float | None = None) -> float:
+    """Sekunda klatki miniatury: ~5 min meczu albo 10% dlugosci (krotsze nagrania), zawsze w granicach nagrania."""
+    dur = max(float(duration_s or 0), 1.0)
+    at = float(at_s) if at_s is not None else min(300.0, dur * 0.1)
+    return max(0.0, min(at, dur - 1.0 if dur > 2 else dur / 2))
+
+
 def classify(http_status: int, body: Any, embed_suffixes: list[str]) -> GameResult:
     if http_status == 401:
         return GameResult("BASTION_AUTH_REQUIRED", 401)

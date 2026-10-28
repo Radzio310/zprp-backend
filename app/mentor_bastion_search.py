@@ -650,6 +650,76 @@ def _media_hit(item: int, now: float) -> Optional[Tuple[Optional[str], Optional[
 
 
 async def enrich_media(real: Actor, scope: Optional[str], games: Iterable[Dict[str, Any]], limit: int = THUMB_LIMIT) -> None:
+    """Miniatura i długość kaset: z game-context (jeśli portal poda), potem NASZA klatka z magazynu BAZY (zadanie w tle:
+    `thumb_pending`), plus herby drużyn. Nigdy nie rzuca."""
+    games = list(games)
+    await _enrich_context_media(real, scope, games, limit)
+    try:
+        from app.mentor_trybuna_thumbs import attach
+
+        await attach(real, [g for g in games if isinstance(g, dict)][:max(0, limit)])
+    except Exception:  # noqa: BLE001
+        C.logger.warning("trybuna: miniatury z magazynu nieudane", exc_info=True)
+    await attach_crests(games)
+
+
+_crest_index: Optional[Tuple[float, Dict[str, str], Dict[Tuple[str, ...], str]]] = None
+CREST_TTL_S = 3600.0
+
+
+async def _crests() -> Tuple[Dict[str, str], Dict[Tuple[str, ...], str]]:
+    """Indeks herbów klubów (ten sam zbiór `zprp_public_clubs.logo_url`, co na karcie meczu): po nazwie i po rdzeniu nazwy."""
+    global _crest_index
+    if _crest_index and time.monotonic() - _crest_index[0] < CREST_TTL_S:
+        return _crest_index[1], _crest_index[2]
+    from app.db import zprp_public_clubs
+
+    by_name: Dict[str, str] = {}
+    by_core: Dict[Tuple[str, ...], str] = {}
+    try:
+        for r in await C.rows(select(zprp_public_clubs.c.name, zprp_public_clubs.c.logo_url).where(zprp_public_clubs.c.logo_url.is_not(None))):
+            logo = R.s(r.get("logo_url"))
+            if not logo:
+                continue
+            by_name.setdefault(fold(r.get("name")), logo)
+            core = tuple(sorted(team_tokens(r.get("name"))))
+            if core:
+                by_core.setdefault(core, logo)
+    except Exception:  # noqa: BLE001
+        C.logger.warning("trybuna: indeks herbów nieczytelny", exc_info=True)
+    _crest_index = (time.monotonic(), by_name, by_core)
+    return by_name, by_core
+
+
+def forget_crests() -> None:
+    global _crest_index
+    _crest_index = None
+
+
+async def crest_for(name: Any) -> Optional[str]:
+    if not R.s(name):
+        return None
+    by_name, by_core = await _crests()
+    return by_name.get(fold(name)) or by_core.get(tuple(sorted(team_tokens(name))))
+
+
+async def attach_crests(items: Iterable[Dict[str, Any]], pairs: Iterable[Tuple[str, str]] = (("home", "home_crest"), ("away", "away_crest"))) -> None:
+    """Dokłada `home_crest` / `away_crest` (url|null) po nazwie drużyny. Nazwa może być napisem albo obiektem {name}."""
+    try:
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            for src, dst in pairs:
+                if it.get(dst):
+                    continue
+                value = it.get(src)
+                name = value.get("name") if isinstance(value, dict) else value
+                it[dst] = await crest_for(name)
+    except Exception:  # noqa: BLE001
+        C.logger.warning("trybuna: herby nieudane", exc_info=True)
+
+
+async def _enrich_context_media(real: Actor, scope: Optional[str], games: Iterable[Dict[str, Any]], limit: int = THUMB_LIMIT) -> None:
     """Dokłada `thumbnail_url` i `duration_s` do słowników z `bunny_item_id` (na miejscu). Źródło: miniatura z game-context Bastionu
     (connector `/playback?include_embed=false`, ta sama droga co bilet meczu), pamięć 6 h. Brak danych, brak połączenia, limit czasu
     albo błąd = zostaje null; funkcja nigdy nie rzuca."""

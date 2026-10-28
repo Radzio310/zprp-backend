@@ -381,6 +381,8 @@ from app.mentor_trybuna import router as mentor_trybuna_router
 from app.mentor_trybuna_feed import router as mentor_trybuna_feed_router
 app.include_router(mentor_trybuna_router)
 app.include_router(mentor_trybuna_feed_router)
+from app.mentor_trybuna_thumbs import router as mentor_trybuna_thumbs_router
+app.include_router(mentor_trybuna_thumbs_router)
 app.include_router(short_result_records_router)
 # Dodatkowy raport sędziów/delegata: treść, PDF i adresaci.
 app.include_router(extra_report_router)
@@ -1637,8 +1639,12 @@ async def startup():
             asyncio.create_task(run_bastion_worker(_n))
         logger.info("✅ Mentor Bastion: worker klipów MP4 wystartował (2 pętle)")
         # Trybuna: dzienny cichy push o nowych nagraniach obserwowanych sędziów (ślad w mentor_trybuna_notified).
-        from app.mentor_trybuna_feed import run_trybuna_notifier
+        from app.mentor_trybuna_feed import run_trybuna_feed_refresher, run_trybuna_morning, run_trybuna_notifier
+        from app.mentor_trybuna_thumbs import run_thumb_worker
         asyncio.create_task(run_trybuna_notifier())
+        asyncio.create_task(run_trybuna_feed_refresher())  # kanał obserwowanych liczony w tle co 30 min
+        asyncio.create_task(run_trybuna_morning())  # "Dziś sędziuje" 8:00
+        asyncio.create_task(run_thumb_worker())  # miniatury kaset (klatka przez connector, trzymana w magazynie BAZY)
     logger.info("✅ Mentor panel: media worker, retencja i e-maile wystartowały")
     logger.info("✅ Publiczna hurtownia ZPRP wystartowała (lekki cykl 2/15 min + katalog 24 h)")
     logger.info("✅ MP protocol snapshot scheduler started")

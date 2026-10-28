@@ -914,3 +914,9 @@ def test_nominees_tables_halftime_and_filter_params():
     assert g["halftime"] == "15:11" and g["score"] == "30:28" and g["type_id"] == 12 and g["series"] == "Seria 1"
     assert parse_portal_params("status=played&gender=K&okreg=Departament Rozgrywek Krajowych") == {"status": "played", "gender": "K", "okreg": "Departament Rozgrywek Krajowych"}
     assert parse_portal_params("evil=1") is None and parse_portal_params("status=") is None
+
+
+def test_frame_time_five_minutes_or_ten_percent():
+    from connector.bastion import frame_time
+    assert frame_time(5400) == 300.0 and frame_time(1200) == 120.0 and frame_time(60) == 6.0
+    assert frame_time(5400, 99999) == 5399.0 and frame_time(5400, -4) == 0.0 and frame_time(1) == 0.1

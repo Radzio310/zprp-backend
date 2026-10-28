@@ -803,6 +803,17 @@ async def clips_payload(ctx: Dict[str, Any], clip_rows: List[Dict[str, Any]]) ->
     for r in clip_rows:
         legacy, summary = threads.get(r["id"], (None, None))
         out.append(clip_shape(ctx, r, names, legacy, summary, media.get(r["id"])))
+    # "Sporne" (Trybuna): zdania pary podzielone - flaga w liście klipów, osi pokoju i Bibliotece.
+    disputed: set = set()
+    if any(R.s(r.get("match_id")).startswith("tr_") for r in clip_rows):
+        try:
+            from app.mentor_trybuna import disputed_clip_ids
+
+            disputed = await disputed_clip_ids(ctx, [r["id"] for r in clip_rows if R.s(r.get("match_id")).startswith("tr_")])
+        except Exception:  # noqa: BLE001 - flaga nigdy nie psuje listy klipów
+            logger.warning("mentor: flaga sporne nieodczytana", exc_info=True)
+    for c in out:
+        c["disputed"] = c["id"] in disputed
     return out
 
 
