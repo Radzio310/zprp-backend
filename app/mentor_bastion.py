@@ -544,7 +544,7 @@ async def video_playback(pair_id: str, match_id: str, video_id: str, response: R
     ctx = await C.pair_context(pair_id, acting)
     card = await C.match_card(ctx, match_id)
     row = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == video_id))
-    if not row or R.s(row.get("match_id")) != card["match_id"] or R.s(row.get("pair_key")) != ctx["pair_key"]:
+    if not row or row.get("deleted_at") is not None or R.s(row.get("match_id")) != card["match_id"]             or R.s(row.get("pair_key")) != ctx["pair_key"]:
         raise berr(404, "VIDEO_NOT_FOUND", "Nie znaleziono tego nagrania - mogło zostać usunięte.")
     item = BR.parse_game_url(row.get("url")) if row.get("provider") == BR.PROVIDER else None
     if not item:

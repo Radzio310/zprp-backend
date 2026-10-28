@@ -182,12 +182,14 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
                    duration_s=upload.get("duration_s") or row.get("duration_s"))
     if ctx is not None:
         out["can_edit"] = C.may(ctx, "edit", owner=R.s(row.get("added_by")) == ctx["actor"].judge_id)
+        out["can_delete"] = C.may(ctx, "video")  # kto może dodać nagranie, ten może je usunąć
     return out
 
 
 async def video_list(ctx: Dict[str, Any], match_id: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     found = await C.rows(select(mentor_match_videos).where(mentor_match_videos.c.match_id == R.s(match_id))
-                         .where(mentor_match_videos.c.pair_key == ctx["pair_key"]).order_by(mentor_match_videos.c.created_at.asc()))
+                         .where(mentor_match_videos.c.pair_key == ctx["pair_key"]).where(mentor_match_videos.c.deleted_at.is_(None))
+                         .order_by(mentor_match_videos.c.created_at.asc()))
     names = await C.people({r.get("added_by") for r in found})
     uploads = await _uploads_by_id([r.get("upload_id") for r in found])
     return [video_shape(r, names, uploads.get(r.get("upload_id")), ctx) for r in found], found
@@ -207,9 +209,9 @@ async def _video_payload(ctx: Dict[str, Any], video_id: str) -> Dict[str, Any]:
     return video_shape(row, names, uploads.get(row.get("upload_id")), ctx)
 
 
-async def _pair_video(ctx: Dict[str, Any], match_id: str, video_id: str) -> Dict[str, Any]:
+async def _pair_video(ctx: Dict[str, Any], match_id: str, video_id: str, include_trashed: bool = False) -> Dict[str, Any]:
     row = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == video_id))
-    if not row or R.s(row.get("match_id")) != R.s(match_id) or R.s(row.get("pair_key")) != ctx["pair_key"]:
+    if not row or R.s(row.get("match_id")) != R.s(match_id) or R.s(row.get("pair_key")) != ctx["pair_key"]             or (row.get("deleted_at") is not None and not include_trashed):
         raise C.err(404, "VIDEO_NOT_FOUND", "Nie znaleziono tego nagrania - mogło zostać usunięte.")
     return row
 
@@ -262,20 +264,48 @@ async def update_video(pair_id: str, match_id: str, video_id: str, body: VideoPa
     return await _video_payload(ctx, video_id)
 
 
-@router.delete("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}")
-async def delete_video(pair_id: str, match_id: str, video_id: str, actor: Actor = Depends(mentor_actor)):
+@router.get("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}/delete-impact")
+async def video_delete_impact(pair_id: str, match_id: str, video_id: str, actor: Actor = Depends(mentor_actor)):
+    """Co zniknie razem z nagraniem - do arkusza z ostrzeżeniem (bez zapisu)."""
+    from app import mentor_video_trash as T
+
     ctx = await C.pair_context(pair_id, actor)
     row = await _pair_video(ctx, match_id, video_id)
-    C.check(ctx, "edit", owner=R.s(row.get("added_by")) == actor.judge_id)
+    return await T.impact(ctx, row)
+
+
+@router.delete("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}")
+async def delete_video(pair_id: str, match_id: str, video_id: str, actor: Actor = Depends(mentor_actor)):
+    """Link: do kosza na 30 dni (`POST .../restore`). Wgrany plik: kasowany od razu (bez kosza)."""
+    from app import mentor_video_trash as T
+
+    ctx = await C.pair_context(pair_id, actor, action="video")
+    row = await _pair_video(ctx, match_id, video_id)
     if row.get("kind") == "upload" and row.get("upload_id"):
         upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == row["upload_id"]))
         if upload:
             forget_object(upload.get("r2_key"), upload.get("play_key"), upload.get("poster_key"))
             await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == upload["id"])
                                    .values(status="expired", error="Nagranie usunięte.", r2_key=None, play_key=None, poster_key=None))
-    await database.execute(mentor_match_videos.delete().where(mentor_match_videos.c.id == video_id))
-    await C.touch(ctx, actor.judge_id, "video_deleted", "videos", row["match_id"], {"id": video_id})
-    return {"ok": True}
+        await database.execute(mentor_match_videos.delete().where(mentor_match_videos.c.id == video_id))
+        await C.touch(ctx, actor.judge_id, "video_deleted", "videos", row["match_id"], {"id": video_id})
+        return {"ok": True, "trashed": False}
+    moved = await T.move_to_trash(ctx, row, actor.judge_id)
+    await C.touch(ctx, actor.judge_id, "video_trashed", "videos", row["match_id"], {"id": video_id})
+    return {"ok": True, "trashed": True, **moved}
+
+
+@router.post("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}/restore")
+async def restore_video(pair_id: str, match_id: str, video_id: str, actor: Actor = Depends(mentor_actor)):
+    from app import mentor_video_trash as T
+
+    ctx = await C.pair_context(pair_id, actor, action="video")
+    row = await _pair_video(ctx, match_id, video_id, include_trashed=True)
+    if not T.in_trash(row):
+        raise C.err(409, "VIDEO_NOT_IN_TRASH", "To nagranie nie leży w koszu - nie ma czego przywracać.")
+    back = await T.restore(row)
+    await C.touch(ctx, actor.judge_id, "video_restored", "videos", row["match_id"], {"id": video_id})
+    return {"ok": True, **back, "video": await _video_payload(ctx, video_id)}
 
 
 # ─── Wgrywanie (R2, wieloczęściowe) ─────────────────────────────────────────
@@ -694,6 +724,14 @@ async def retention_once(now: Optional[datetime] = None) -> Dict[str, int]:
             await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == row["id"]).values(
                 status="failed", r2_key=None, error="Wgrywanie porzucone - nie dokończono go w ciągu doby."))
             counts["aborted"] += 1
+    try:
+        from app import mentor_video_trash as T
+
+        purged = await T.purge_expired(stamp)
+        if purged:
+            counts["trash"] = purged
+    except Exception:  # noqa: BLE001
+        logger.warning("mentor: sprzątanie kosza nagrań nieudane", exc_info=True)
     try:
         from app.mentor_panel_auth import cleanup_auth
 

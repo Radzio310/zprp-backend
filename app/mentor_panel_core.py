@@ -579,7 +579,8 @@ async def enrich_cards(ctx: Dict[str, Any], cards: List[Dict[str, Any]]) -> List
     async def load_videos() -> Dict[str, Dict[str, int]]:
         out: Dict[str, Dict[str, int]] = {}
         for v in await rows(select(mentor_match_videos.c.match_id, mentor_match_videos.c.kind)
-                            .where(mentor_match_videos.c.match_id.in_(ids)).where(mentor_match_videos.c.pair_key == key)):
+                            .where(mentor_match_videos.c.match_id.in_(ids)).where(mentor_match_videos.c.pair_key == key)
+                            .where(mentor_match_videos.c.deleted_at.is_(None))):
             entry = out.setdefault(R.s(v["match_id"]), {"count": 0, "uploads": 0})
             entry["count"] += 1
             entry["uploads"] += 1 if v.get("kind") == "upload" else 0

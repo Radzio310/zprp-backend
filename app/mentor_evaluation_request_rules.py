@@ -11,6 +11,11 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 REQUEST_COOLDOWN = timedelta(hours=72)
 
 
+DISCORD_HOSTS = {"discord.com", "discordapp.com", "discord.gg", "discord.me"}
+DISCORD_MESSAGE = ("To link do rozmowy na Discordzie, nie nagranie. "
+                   "Wklej link z portalu Bastion (portal.handball-bastion.pl/game?bunny_item_id=...).")
+
+
 def normalized_video_url(value: Optional[str]) -> str:
     value = str(value or "").strip()
     if not value:
@@ -21,6 +26,9 @@ def normalized_video_url(value: Optional[str]) -> str:
         raise ValueError("Niepoprawny link do nagrania - sprawdź, czy został wklejony w całości.") from exc
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("Link do nagrania musi zaczynać się od http:// lub https://.")
+    host = (parsed.hostname or "").lower()
+    if host in DISCORD_HOSTS or host.endswith(".discord.com") or host.endswith(".discordapp.com"):
+        raise ValueError(DISCORD_MESSAGE)
     # Host i schemat nie są semantycznie czułe na wielkość liter. Usuwamy też
     # samotny końcowy slash, żeby ten sam film nie powstawał dwa razy.
     path = parsed.path.rstrip("/") or ""

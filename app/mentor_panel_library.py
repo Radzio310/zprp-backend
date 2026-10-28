@@ -287,7 +287,7 @@ class ClipPatch(BaseModel):
 
 async def _video_of(ctx: Dict[str, Any], match_id: str, video_id: str) -> Dict[str, Any]:
     video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == video_id))
-    if not video or R.s(video.get("match_id")) != R.s(match_id) or R.s(video.get("pair_key")) != ctx["pair_key"]:
+    if not video or video.get("deleted_at") is not None or R.s(video.get("match_id")) != R.s(match_id) or R.s(video.get("pair_key")) != ctx["pair_key"]:
         raise C.err(404, "VIDEO_NOT_FOUND", "Nie ma takiego nagrania przy tym meczu.")
     return video
 
@@ -440,7 +440,7 @@ async def delete_clip(clip_id: str, actor: Actor = Depends(mentor_actor)):
 
 
 async def _marker_videos(ctx: Dict[str, Any], match_id: str = "") -> List[Dict[str, Any]]:
-    query = select(mentor_match_videos).where(mentor_match_videos.c.pair_key == ctx["pair_key"])
+    query = select(mentor_match_videos).where(mentor_match_videos.c.pair_key == ctx["pair_key"]).where(mentor_match_videos.c.deleted_at.is_(None))
     if match_id:
         query = query.where(mentor_match_videos.c.match_id == match_id)
     return await C.rows(query)
@@ -530,7 +530,7 @@ async def clip_from_marker(pair_id: str, body: FromMarkerBody, actor: Actor = De
 
     ctx = await C.pair_context(pair_id, actor, action="create")
     video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == body.video_id))
-    if not video or R.s(video.get("pair_key")) != ctx["pair_key"]:
+    if not video or video.get("deleted_at") is not None or R.s(video.get("pair_key")) != ctx["pair_key"]:
         raise C.err(404, "VIDEO_NOT_FOUND", "Nie ma takiego nagrania przy tej parze.")
     existing = await C.one(select(mentor_clips).where(mentor_clips.c.pair_id == ctx["pair_id"]).where(mentor_clips.c.video_id == video["id"])
                            .where(mentor_clips.c.source == "marker").where(mentor_clips.c.source_key == body.marker_id)

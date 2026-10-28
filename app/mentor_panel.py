@@ -30,6 +30,7 @@ from app.db import (
     mentor_compilations,
     mentor_evaluation_versions,
     mentor_match_flags,
+    mentor_match_videos,
     mentor_panels,
     mentor_reads,
     mentor_threads,
@@ -322,6 +323,7 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
     card = await C.match_card(ctx, match_id)
     from app.mentor_panel_media import video_list
     from app.mentor_panel_streams import room_streams
+    from app.mentor_video_trash import trash_payload
     from app.mentor_video_rules import clean_markers
 
     mid = card["match_id"]
@@ -335,7 +337,10 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
         found = await C.rows(select(mentor_clips).where(mentor_clips.c.pair_id == ctx["pair_id"])
                              .where(mentor_clips.c.match_id == mid).where(mentor_clips.c.deleted_at.is_(None))
                              .order_by(mentor_clips.c.start_s.asc()))
-        return await C.clips_payload(ctx, found)
+        # Klipy z MP4 po usuniętym nagraniu zostają w Bibliotece, nie w pokoju tego meczu.
+        gone = {r["id"] for r in await C.rows(select(mentor_match_videos.c.id).where(mentor_match_videos.c.match_id == mid)
+                                              .where(mentor_match_videos.c.deleted_at.is_not(None)))}
+        return await C.clips_payload(ctx, [c for c in found if c.get("video_id") not in gone])
 
     async def load_delegate():
         return [r for r in await C.delegate_sheet_rows(ctx["judge_ids"], [mid]) if R.s(r.get("match_id")) == mid]
@@ -382,6 +387,7 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
         "delegate_sheets": [delegate_sheet_shape(r) for r in delegate], "mentor_sheets": mentor_shapes,
         "threads": threads, "rev": ctx["rev"],
         "can": {action: C.may(ctx, action) for action in ("flag", "video", "create", "categories", "publish")},
+        "trashed_videos": await trash_payload(ctx, mid),
         "suggested_streams": streams["streams"],
         "stream_search": streams["search"],
     }

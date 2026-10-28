@@ -520,14 +520,14 @@ def test_wideo_link_i_usuwanie(env, monkeypatch):
         video = await M.add_video(PAIR, "m3", M.VideoBody(url="https://vimeo.com/123"), mentor)
         bad = await raises(M.add_video(PAIR, "m3", M.VideoBody(url="ftp://zly.adres/x"), mentor))
         synced = await M.update_video(PAIR, "m3", "vx", M.VideoPatch(sync={"match_start_s": 42}), pair)
-        not_owner = await raises(M.delete_video(PAIR, "m3", "vx", pair))
-        deleted = await M.delete_video(PAIR, "m3", "vx", mentor)
-        return video, bad, synced, not_owner, deleted
+        # Kto może dodać nagranie, ten może je usunąć (kosz 30 dni, kontrakt 8.9) - także para cudze nagranie mentora.
+        deleted = await M.delete_video(PAIR, "m3", "vx", pair)
+        return video, bad, synced, None, deleted
 
     video, bad, synced, not_owner, deleted = env.run(go)
     assert video["kind"] == "link" and video["provider"] == "vimeo" and video["playable"] and video["added_by"]["judge_id"] == MENTOR
     assert bad[0] == 422 and synced["sync"]["match_start_s"] == 42
-    assert not_owner == (403, "NOT_OWNER") and deleted == {"ok": True}
+    assert deleted["ok"] and deleted["trashed"]
 
 
 def test_retencja_nagran(env, monkeypatch):

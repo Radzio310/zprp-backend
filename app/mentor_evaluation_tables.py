@@ -103,6 +103,10 @@ def define_tables(metadata):
         Column("upload_id", String, nullable=True),
         #: Identyfikator źródła u dostawcy (Bastion: `bunny_item_id`); migracja w `mentor_bastion_tables`.
         Column("external_id", String, nullable=True),
+        #: Kosz nagrań (28.10.2026): usunięte nagranie czeka 30 dni z `trash_json` (id klipów, komentarzy, wątków do przywrócenia).
+        Column("deleted_at", DateTime(timezone=True), nullable=True),
+        Column("deleted_by", String, nullable=True),
+        Column("trash_json", Text, nullable=True),
         UniqueConstraint("match_id", "normalized_url", name="uq_mentor_match_video_url"),
     )
     return evaluations, versions, requests, videos
@@ -122,4 +126,7 @@ MIGRATIONS = (
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS updated_at timestamptz",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS kind varchar",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS upload_id varchar",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS deleted_at timestamptz",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS deleted_by varchar",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS trash_json text",
 )

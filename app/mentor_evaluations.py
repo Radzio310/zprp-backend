@@ -440,6 +440,7 @@ async def for_match(match_id: str, actor: Actor = Depends(evaluation_actor)):
         for row in await database.fetch_all(
             select(match_videos)
             .where(match_videos.c.match_id == str(match_id))
+            .where(match_videos.c.deleted_at.is_(None))
             .order_by(match_videos.c.created_at.asc())
         )
         if (dict(row).get("kind") or "link") == "link"
@@ -536,7 +537,18 @@ async def insert_link_video(match_id: str, pair_key_value: str, url: str, added_
             match_videos.c.normalized_url == url,
         )
     )
-    if existing:
+    existing = dict(existing) if existing else None
+    if existing and existing.get("deleted_at") is not None:
+        # Ten sam adres po usunięciu: dodanie przywraca nagranie z kosza (z klipami i komentarzami).
+        from app import mentor_video_trash as trash
+
+        if trash.in_trash(dict(existing)):
+            await trash.restore(dict(existing))
+        else:  # nagrobek po sprzątaniu kosza: wiersz wraca do życia (trzyma klipy z MP4)
+            await database.execute(update(match_videos).where(match_videos.c.id == existing["id"])
+                                   .values(deleted_at=None, deleted_by=None, trash_json=None))
+        return dict(await database.fetch_one(select(match_videos).where(match_videos.c.id == existing["id"]))), True
+    elif existing:
         return dict(existing), False
     provider = video_provider(url)
     if provider == "bastion":
@@ -598,7 +610,8 @@ async def update_match_video(match_id: str, video_id: str, body: MatchVideoPatch
     if me not in set(ctx["pair"] or ()):
         raise _err(403, "PAIR_ONLY", "Znaczniki nagrania ustawiają sędziowie tej pary.")
     row = await database.fetch_one(
-        select(match_videos).where(match_videos.c.id == video_id, match_videos.c.match_id == str(match_id))
+        select(match_videos).where(match_videos.c.id == video_id, match_videos.c.match_id == str(match_id),
+                                   match_videos.c.deleted_at.is_(None))
     )
     if not row:
         raise _err(404, "VIDEO_NOT_FOUND", "Nie znaleziono tego nagrania - mogło zostać usunięte.")
@@ -635,7 +648,8 @@ async def refresh_stream_start(match_id: str, video_id: str, actor: Actor = Depe
     if me not in set(ctx["pair"] or ()):
         raise _err(403, "PAIR_ONLY", "Dopasowanie nagrania ustawiają sędziowie tej pary.")
     row = await database.fetch_one(
-        select(match_videos).where(match_videos.c.id == video_id, match_videos.c.match_id == str(match_id))
+        select(match_videos).where(match_videos.c.id == video_id, match_videos.c.match_id == str(match_id),
+                                   match_videos.c.deleted_at.is_(None))
     )
     if not row:
         raise _err(404, "VIDEO_NOT_FOUND", "Nie znaleziono tego nagrania - mogło zostać usunięte.")
@@ -722,6 +736,7 @@ async def remove_match_video(match_id: str, video_id: str, actor: Actor = Depend
         select(match_videos.c.id).where(
             match_videos.c.id == video_id,
             match_videos.c.match_id == str(match_id),
+            match_videos.c.deleted_at.is_(None),
         )
     )
     if not row:
@@ -793,6 +808,7 @@ async def request_evaluation(match_id: str, req: EvaluationRequest, actor: Actor
             select(match_videos.c.url)
             .where(match_videos.c.match_id == str(match_id))
             .where(or_(match_videos.c.kind.is_(None), match_videos.c.kind == "link"))
+            .where(match_videos.c.deleted_at.is_(None))
             .order_by(match_videos.c.created_at.asc())
             .limit(1)
         )
