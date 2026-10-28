@@ -23,7 +23,9 @@ def test_porazka_zyje_zgodnie_z_terminem():
 
 def test_klasyfikacja_porazek():
     cache = {("a", "x"): None, ("a", "y"): 12.0, ("a", "z"): 5.0, ("old", "q"): None}
-    failed, healed = R.classify_failures(cache, {("old", "q")}, {("a", "z"): "poly"}, google_on=True)
+    failed, healed = R.classify_failures(
+        cache, {("old", "q")}, {("a", "z"): "poly"}, google_on=True, no_route={("a", "x")}
+    )
     assert failed == {("a", "x"): "nokm", ("a", "y"): "noshape"}
     assert healed == {("a", "z")}
 
@@ -85,3 +87,57 @@ def test_upsert_pustej_listy_nic_nie_wysyla():
     db = Recorder()
     assert asyncio.run(R.upsert_batches(db, _table(), [], ["a", "b"])) == 0
     assert db.queries == []
+
+
+def test_nieznany_wynik_nie_jest_porazka_tylko_jednoznaczny_brak_trasy():
+    cache = {("a", "x"): None, ("a", "w"): None}
+    failed, _ = R.classify_failures(cache, set(), {}, google_on=True, no_route={("a", "x")})
+    assert failed == {("a", "x"): "nokm"}  # ("a", "w") = wyjatek/limit: bez pamieci
+
+
+class _Resp:
+    def __init__(self, data=None, code=200):
+        self._d, self.status_code = data or {}, code
+
+    def json(self):
+        return self._d
+
+
+class _Client:
+    def __init__(self, behaviour):
+        self.behaviour = behaviour
+
+    async def get(self, url, params=None):
+        if isinstance(self.behaviour, Exception):
+            raise self.behaviour
+        return self.behaviour
+
+
+def _verdict(behaviour, monkeypatch):
+    from app import settlement_distances as SD
+
+    monkeypatch.setattr(SD, "GOOGLE_MAPS_API_KEY", "k")
+    return asyncio.run(SD.google_route_verdict(_Client(behaviour), "A", "B"))
+
+
+def test_zero_results_to_jednoznaczny_brak_trasy(monkeypatch):
+    assert _verdict(_Resp({"status": "ZERO_RESULTS", "routes": []}), monkeypatch) == (None, "", True)
+    assert _verdict(_Resp({"status": "NOT_FOUND", "routes": []}), monkeypatch)[2] is True
+
+
+def test_bledy_nie_sa_brakiem_trasy(monkeypatch):
+    for behaviour in (
+        TimeoutError("t"),
+        _Resp({"status": "OVER_QUERY_LIMIT", "routes": []}),
+        _Resp({"status": "REQUEST_DENIED", "routes": []}),
+        _Resp({}, code=503),
+        _Resp({"status": "OK", "routes": []}),
+    ):
+        km, enc, definitive = _verdict(behaviour, monkeypatch)
+        assert km is None and definitive is False
+
+
+def test_trasa_znaleziona(monkeypatch):
+    route = {"legs": [{"distance": {"value": 12000}}], "overview_polyline": {"points": "xyz"}}
+    ok = _Resp({"status": "OK", "routes": [route]})
+    assert _verdict(ok, monkeypatch) == (12.0, "xyz", False)

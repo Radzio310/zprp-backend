@@ -248,10 +248,28 @@ class VersionedDistanceIndex:
         return self.for_day(None).pairs
 
 
+#: Statusy Directions, w ktorych Google JEDNOZNACZNIE mowi, ze trasy nie ma.
+DEFINITIVE_NO_ROUTE = frozenset({"ZERO_RESULTS", "NOT_FOUND"})
+
+
 async def _directions_km(
     client: Any, origin: str, destination: str, *, avoid_highways: bool, traffic: bool
 ) -> list[tuple[float, str]]:
     """(km, zakodowana geometria) wszystkich tras jednego zapytania Directions (bez dróg płatnych)."""
+    routes, _ = await _directions_call(
+        client, origin, destination, avoid_highways=avoid_highways, traffic=traffic
+    )
+    return routes
+
+
+async def _directions_call(
+    client: Any, origin: str, destination: str, *, avoid_highways: bool, traffic: bool
+) -> tuple[list[tuple[float, str]], str]:
+    """
+    (trasy, status). Status: "OK", status Google (ZERO_RESULTS, NOT_FOUND,
+    OVER_QUERY_LIMIT, REQUEST_DENIED...) albo "ERROR" przy wyjatku, timeoucie
+    i bledzie HTTP. Tylko ZERO_RESULTS/NOT_FOUND znacza "trasy nie ma".
+    """
     params = {
         "origin": origin,
         "destination": destination,
@@ -266,7 +284,11 @@ async def _directions_km(
         params["departure_time"] = "now"
     try:
         response = await client.get("https://maps.googleapis.com/maps/api/directions/json", params=params)
+        http_status = getattr(response, "status_code", 200)
+        if isinstance(http_status, int) and http_status >= 400:
+            return [], "ERROR"
         data = response.json()
+        status = str(data.get("status") or "ERROR")
         out: list[tuple[float, str]] = []
         for route in data.get("routes") or []:
             meters = sum(
@@ -275,10 +297,12 @@ async def _directions_km(
             if meters:
                 points = (route.get("overview_polyline") or {}).get("points") or ""
                 out.append((float(meters) / 1000.0, str(points)))
-        return out
+        if out:
+            return out, "OK"
+        return [], status if status != "OK" else "ERROR"
     except Exception as exc:
         logger.debug("[settlement] directions %s->%s: %s", origin, destination, exc)
-        return []
+        return [], "ERROR"
 
 
 async def google_route(
@@ -289,7 +313,25 @@ async def google_route(
     origin_point: Optional[tuple[float, float]] = None,
     destination_point: Optional[tuple[float, float]] = None,
 ) -> tuple[Optional[float], str]:
+    km, encoded, _ = await google_route_verdict(
+        client, origin, destination, origin_region, origin_point, destination_point
+    )
+    return km, encoded
+
+
+async def google_route_verdict(
+    client: Any,
+    origin: str,
+    destination: str,
+    origin_region: str = "",
+    origin_point: Optional[tuple[float, float]] = None,
+    destination_point: Optional[tuple[float, float]] = None,
+) -> tuple[Optional[float], str, bool]:
     """
+    (km, geometria, trasy_nie_ma). Trzeci element jest True TYLKO wtedy, gdy
+    KAZDY wariant zapytania zwrocil ZERO_RESULTS/NOT_FOUND. Wyjatek, timeout,
+    limit zapytan, odmowa klucza i blad HTTP to "nie wiemy", nie "nie ma".
+
     NAJKRÓTSZA trasa Google bez dróg płatnych - tak samo jak aplikacja
     (`BAZA/utils/obliczRoutes.ts`: cztery zapytania Directions, minimum ze
     wszystkich wariantów) - wraz z geometrią (`overview_polyline`) wybranego
@@ -302,7 +344,7 @@ async def google_route(
     nazwą, gdy nazwa jest jednoznaczna.
     """
     if not GOOGLE_MAPS_API_KEY or not origin or not destination:
-        return None, ""
+        return None, "", False
     start = (
         f"{origin_point[0]},{origin_point[1]}" if origin_point
         else f"{origin}, {origin_region}, Polska" if origin_region else f"{origin}, Polska"
@@ -311,16 +353,16 @@ async def google_route(
     import asyncio
 
     answers = await asyncio.gather(
-        _directions_km(client, start, end, avoid_highways=False, traffic=False),
-        _directions_km(client, start, end, avoid_highways=True, traffic=False),
-        _directions_km(client, start, end, avoid_highways=False, traffic=True),
-        _directions_km(client, start, end, avoid_highways=True, traffic=True),
+        _directions_call(client, start, end, avoid_highways=False, traffic=False),
+        _directions_call(client, start, end, avoid_highways=True, traffic=False),
+        _directions_call(client, start, end, avoid_highways=False, traffic=True),
+        _directions_call(client, start, end, avoid_highways=True, traffic=True),
     )
-    values = [item for group in answers for item in group]
+    values = [item for routes, _ in answers for item in routes]
     if not values:
-        return None, ""
+        return None, "", all(status in DEFINITIVE_NO_ROUTE for _, status in answers)
     km, encoded = min(values, key=lambda item: item[0])
-    return round(km, 1), encoded
+    return round(km, 1), encoded, False
 
 
 async def google_distance(
@@ -352,6 +394,7 @@ async def resolve_distances(
     locate: Optional[Any] = None,
     shapes: Optional[dict] = None,
     on_progress: Optional[Any] = None,
+    no_route: Optional[set] = None,
 ) -> dict[tuple[str, str], tuple[Optional[float], str]]:
     """
     Para miast -> (kilometry, zrodlo).
@@ -403,10 +446,12 @@ async def resolve_distances(
             value, encoded = (None, "")
             async with semaphore:
                 if client is not None:
-                    value, encoded = await google_route(
+                    value, encoded, definitive = await google_route_verdict(
                         client, origin, destination, origin_region,
                         *(locate(origin, destination) if locate else (None, None)),
                     )
+                    if definitive and no_route is not None:
+                        no_route.add(key)
             cache[key] = value
             if shapes is not None and value is not None and encoded:
                 shapes[key] = encoded

@@ -1435,6 +1435,7 @@ async def refresh_province(
                         cache[fkey] = None
                 before = set(cache)
                 shapes: dict = {}
+                no_route: set = set()
                 resolved = await resolve_distances(
                     [(home, city) for _, home, city in google_rows],
                     DistanceIndex(None),
@@ -1444,6 +1445,7 @@ async def refresh_province(
                     locate=_route_locator(province),
                     shapes=shapes,
                     on_progress=tick,
+                    no_route=no_route,
                 )
                 logger.info(
                     "[settlement] %s: Google zmierzyl %d par (pamiec z geometria: %d)",
@@ -1455,7 +1457,7 @@ async def refresh_province(
                     shapes,
                 )
                 failed, healed = classify_failures(
-                    cache, before, shapes, google_on=bool(SD.GOOGLE_MAPS_API_KEY)
+                    cache, before, shapes, google_on=bool(SD.GOOGLE_MAPS_API_KEY), no_route=no_route
                 )
                 if failed or healed:
                     await _failure_save(region_slug, failed, healed, started)

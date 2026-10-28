@@ -28,10 +28,13 @@ def failure_alive(kind: str, checked_at: Optional[datetime], now: datetime) -> b
     return bool(ttl and checked_at is not None and (now - checked_at) <= ttl)
 
 
-def classify_failures(cache: dict, before: set, shapes: dict, *, google_on: bool) -> tuple[dict, set]:
+def classify_failures(
+    cache: dict, before: set, shapes: dict, *, google_on: bool, no_route: Optional[set] = None
+) -> tuple[dict, set]:
     """
     Z wyniku pomiaru: ({klucz: rodzaj porazki}, {klucze w pelni zmierzone}).
-    Bez klucza Google "brak wyniku" nic nie znaczy, wiec nie zapisujemy porazek.
+    "nokm" tylko dla par z `no_route` (Google jednoznacznie: trasy nie ma);
+    wyjatek, timeout, limit czy odmowa klucza to "nie wiemy" i nie sa pamietane.
     """
     failed: dict = {}
     healed: set = set()
@@ -39,7 +42,7 @@ def classify_failures(cache: dict, before: set, shapes: dict, *, google_on: bool
         if key in before:
             continue
         if value is None:
-            if google_on:
+            if google_on and no_route is not None and key in no_route:
                 failed[key] = "nokm"
         elif key in shapes:
             healed.add(key)
