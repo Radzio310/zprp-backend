@@ -21,6 +21,7 @@ from app import mentor_bastion_rules as BR
 from app import mentor_bastion_search as S
 from app import mentor_panel_core as C
 from app import mentor_panel_rules as R
+from app import mentor_trybuna_rank as RK
 from app import mentor_trybuna_rules as T
 from app.db import (
     database,
@@ -198,7 +199,8 @@ async def trybuna_search(pair_id: str, body: SearchBody, response: Response, rea
     by_item = {item: mid for (_, item), mid in watched.items()}
     rows = [game_row(g, by_item) for g in games]
     await S.enrich_media(real, mz.scope, rows)
-    out = {"games": rows, "offset": body.offset,
+    ranked, youtube = await build_ranked(ctx, rows, q, referee, d_from, d_to, t_from, t_to)
+    out = {"games": rows, "ranked": ranked, "best": RK.best_key(ranked), "youtube": youtube, "offset": body.offset,
            "next_offset": None if ranged else (body.offset + S.PAGE if len(games) >= S.PAGE else None),
            "connection_scope": mz.scope, "query": {"q": q or None, "referee": referee or None}}
     if meta is not None:
@@ -208,45 +210,134 @@ async def trybuna_search(pair_id: str, body: SearchBody, response: Response, rea
     return out
 
 
+def _local_str(starts: Any) -> Optional[str]:
+    return R.aware(starts).astimezone(WARSAW).strftime("%Y-%m-%d %H:%M:%S") if isinstance(starts, datetime) else None
+
+
+async def youtube_results(pair_cards: List[Dict[str, Any]], q: str, d_from: Optional[date], d_to: Optional[date],
+                          t_from: Optional[int], t_to: Optional[int], limit: int = 20) -> List[Dict[str, Any]]:
+    """Transmisje YouTube znane portalowi, OCENIONE wobec zapytania i meczu, do którego je przypisano: `confidence` 0..100 i `sure`
+    z `query_score` (kod co do litery, drużyny, dzień), a `official` (kanał oficjalny / potwierdzone) to osobny sygnał, który
+    pewności nie daje. Film o innym meczu niż przypisany (drużyny z tytułu) jest tłumiony. Nowe / pewne najpierw."""
+    profile = RK.parse_query(q, d_from if d_from and d_from == d_to else None)
+    since = datetime.now(timezone.utc) - timedelta(days=120)
+    if d_from:
+        since = min(since, datetime(d_from.year, d_from.month, d_from.day, tzinfo=timezone.utc) - timedelta(days=1))
+    found = await C.rows(select(match_streams).where(match_streams.c.platform == "youtube").where(match_streams.c.hidden.is_(False))
+                         .where(match_streams.c.last_seen_at >= since).order_by(match_streams.c.starts_at.desc()).limit(300))
+    ids = sorted({R.s(s.get("match_id")) for s in found if R.s(s.get("match_id"))})
+    zrows = {R.s(r["match_id"]): r for r in await C.rows(select(zprp_public_matches).where(zprp_public_matches.c.match_id.in_(ids)))} if ids else {}
+    out, seen = [], set()
+    for s in found:
+        vid = R.s(s.get("video_id"))
+        if not vid or vid in seen:
+            continue
+        local = _local_str(s.get("starts_at"))
+        if not S.in_range({"date": local, "unscheduled": local is None}, d_from, d_to, t_from, t_to):
+            continue
+        tgame = RK.title_game(s.get("title"), local)
+        zrow = zrows.get(R.s(s.get("match_id")))
+        card = R.card_from_public(zrow) if zrow else T.card_from_snapshot("yt", T.snapshot_from_game(tgame))
+        official = s.get("confidence") in ("official", "confirmed")
+        if RK.empty_profile(profile):
+            sc = {"confidence": 40, "sure": False, "signals": {"code": None, "teams": None, "date": None}}
+        else:
+            sc = RK.query_score(profile, card, extra_names=[tgame.get("home"), tgame.get("away")])
+            if not RK.video_consistent(tgame, card):
+                sc = {**sc, "sure": False, "confidence": min(sc["confidence"], 35)}
+            if official and not sc["sure"] and sc["confidence"] > 0:
+                sc = {**sc, "confidence": min(99, sc["confidence"] + 5)}  # oficjalność to tylko lekka wskazówka, nie pewność
+            if sc["confidence"] < RK.RANK_MIN:
+                continue
+        seen.add(vid)
+        code = R.s(card.get("match_code")) or R.s(tgame.get("code")) or None
+        game_like = {"home": (card.get("home") or {}).get("name") or tgame.get("home"), "away": (card.get("away") or {}).get("name") or tgame.get("away"),
+                     "date": local, "code": code, "competition": card.get("competition_name")}
+        out.append({"video_id": vid, "url": s.get("url"), "title": s.get("title"),
+                    "thumbnail_url": s.get("thumbnail_url") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                    "thumbnail_maxres_url": f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg", "duration_s": s.get("duration_s"),
+                    "channel": s.get("channel_title"), "starts_at": _iso(s.get("starts_at")),
+                    "published_at": _iso(s.get("starts_at") or s.get("first_seen_at")), "date": local,
+                    "portal_confidence": s.get("confidence"), "official": official, "zprp_match_id": s.get("match_id"),
+                    "confidence": sc["confidence"], "sure": bool(sc["sure"]), "signals": sc["signals"], "code": code,
+                    "home": game_like["home"], "away": game_like["away"],
+                    "target": RK.pair_target(game_like, pair_cards, zprp_id=s.get("match_id"))})
+    out.sort(key=RK.rank_key)
+    return out[:limit]
+
+
+async def build_ranked(ctx: Dict[str, Any], rows: List[Dict[str, Any]], q: str, referee: str, d_from: Optional[date], d_to: Optional[date],
+                       t_from: Optional[int], t_to: Optional[int]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Jedna lista wyników (Bastion + YouTube + "baza") posortowana wg trafności: pewne najpierw, potem pewność, potem data.
+    Zwraca (`ranked`, wyniki YouTube). Każdy wpis: `source`, `key`, `confidence`, `sure`, `signals`, dane do pokazania, `ref` (do
+    elementu) i `target` (`pair_match` z `match_id` meczu pary albo `trybuna`)."""
+    from app.mentor_trybuna import watched_cards
+
+    pair_cards = await C.pair_match_cards(ctx["judge_ids"])
+    profile = RK.parse_query(q, d_from if d_from and d_from == d_to else None)
+    ranked: List[Dict[str, Any]] = []
+    for g in rows:
+        card = T.card_from_snapshot("x", T.snapshot_from_game(g))
+        if RK.empty_profile(profile):
+            sc = {"confidence": 60 if referee else 40, "sure": False, "signals": {"code": None, "teams": None, "date": None}}
+        else:
+            sc = RK.query_score(profile, card)
+        g["confidence"], g["sure"], g["signals"] = sc["confidence"], bool(sc["sure"]), sc["signals"]
+        g["target"] = RK.pair_target(g, pair_cards)
+        if sc["confidence"] < RK.RANK_MIN:
+            continue
+        ident = f"bastion:{g['bunny_item_id']}" if g.get("bunny_item_id") else f"game:{g.get('game_id')}"
+        ranked.append({"source": "bastion", "key": ident, "confidence": sc["confidence"], "sure": bool(sc["sure"]), "signals": sc["signals"],
+                       "title": g.get("title"), "date": g.get("date"), "home": g.get("home"), "away": g.get("away"), "code": g.get("code"),
+                       "thumbnail_url": g.get("thumbnail_url"), "state": g.get("state"), "ref": {"bunny_item_id": g.get("bunny_item_id"), "game_id": g.get("game_id")},
+                       "target": g["target"]})
+    youtube = await youtube_results(pair_cards, q, d_from, d_to, t_from, t_to)
+    for y in youtube:
+        if y["confidence"] < RK.RANK_MIN:
+            continue
+        ranked.append({"source": "youtube", "key": f"yt:{y['video_id']}", "confidence": y["confidence"], "sure": y["sure"], "signals": y["signals"],
+                       "title": y["title"], "date": y["date"], "home": y["home"], "away": y["away"], "code": y["code"],
+                       "thumbnail_url": y["thumbnail_url"], "official": y["official"], "ref": {"video_id": y["video_id"], "url": y["url"]},
+                       "target": y["target"]})
+    if not RK.empty_profile(profile):
+        # "Baza": mecze tej pary i mecze z jej Trybuny pasujące do zapytania (dodanie nagrania idzie do istniejącego meczu).
+        for c in pair_cards:
+            if not S.in_range({"date": _local_str(c.get("scheduled_at"))}, d_from, d_to, None, None):
+                continue
+            sc = RK.query_score(profile, c)
+            if sc["confidence"] >= 50:
+                ranked.append({"source": "baza", "key": f"pair:{c['match_id']}", "confidence": sc["confidence"], "sure": bool(sc["sure"]),
+                               "signals": sc["signals"], "title": None, "date": _local_str(c.get("scheduled_at")), "home": (c.get("home") or {}).get("name"),
+                               "away": (c.get("away") or {}).get("name"), "code": c.get("match_code"), "ref": {"match_id": c["match_id"]},
+                               "target": RK.pair_target({}, [c], zprp_id=c["match_id"])})
+        for c in await watched_cards(ctx):
+            if not S.in_range({"date": _local_str(c.get("scheduled_at"))}, d_from, d_to, None, None):
+                continue
+            sc = RK.query_score(profile, c)
+            if sc["confidence"] >= 50:
+                ranked.append({"source": "baza", "key": f"trybuna:{c['match_id']}", "confidence": sc["confidence"], "sure": bool(sc["sure"]),
+                               "signals": sc["signals"], "title": c.get("title"), "date": _local_str(c.get("scheduled_at")), "home": (c.get("home") or {}).get("name"),
+                               "away": (c.get("away") or {}).get("name"), "code": c.get("match_code"), "ref": {"match_id": c["match_id"]},
+                               "target": {"kind": "trybuna", "match_id": c["match_id"], "label": "Trybuna tej pary"}})
+    ranked.sort(key=RK.rank_key)
+    return ranked[:40], youtube
+
+
 @router.get("/pairs/{pair_id}/trybuna/youtube")
 async def trybuna_youtube(pair_id: str, q: str = Query("", max_length=80), date_from: str = Query("", max_length=10),
                           date_to: str = Query("", max_length=10), time_from: str = Query("", max_length=5),
                           time_to: str = Query("", max_length=5), actor: Actor = Depends(mentor_actor)):
-    """Wyniki YouTube do dodania: transmisje, które portal już zna (kanały klubów i ZPRP), po tytule. Bez jednostek z puli dobowej;
-    cokolwiek innego z YouTube wchodzi wklejonym linkiem."""
+    """Wyniki YouTube do dodania: transmisje, które portal już zna (kanały klubów i ZPRP). Każdy wynik ma `confidence` / `sure` liczone
+    WOBEC ZAPYTANIA i meczu, do którego go przypisano (kod "LCM/32" co do litery, drużyny, dzień) - `official` (kanał oficjalny)
+    jest osobnym sygnałem i pewności nie daje; lista jest posortowana wg trafności; `target` mówi, dokąd dodać (mecz pary albo
+    Trybuna). Bez jednostek z puli dobowej; cokolwiek innego z YouTube wchodzi wklejonym linkiem."""
     ctx = await C.pair_context(pair_id, actor)
     C.check(ctx, "video")
-    words = [w for w in T.name_key(q).split() if len(w) >= 3][:4]
     d_from, d_to, t_from, t_to = parse_range(date_from, date_to, time_from, time_to)
-    since = datetime.now(timezone.utc) - timedelta(days=120)
-    if d_from:
-        since = min(since, datetime(d_from.year, d_from.month, d_from.day, tzinfo=timezone.utc) - timedelta(days=1))
-    query = (select(match_streams).where(match_streams.c.platform == "youtube").where(match_streams.c.hidden.is_(False))
-             .where(match_streams.c.last_seen_at >= since).order_by(match_streams.c.starts_at.desc()).limit(300))
-    found = await C.rows(query)
-    out, seen = [], set()
-    for s in found:
-        hay = T.name_key(f"{s.get('title') or ''} {s.get('channel_title') or ''}")
-        if words and not all(w in hay for w in words):
-            continue
-        vid = R.s(s.get("video_id"))
-        if not vid or vid in seen:
-            continue
-        starts = s.get("starts_at")
-        local = starts.astimezone(WARSAW).strftime("%Y-%m-%d %H:%M:%S") if isinstance(starts, datetime) else None
-        # Ten sam filtr czasu co dla Bastionu; transmisja bez godziny startu przechodzi filtr godzin jako "godzina nieznana".
-        if not S.in_range({"date": local, "unscheduled": local is None}, d_from, d_to, t_from, t_to):
-            continue
-        seen.add(vid)
-        out.append({"video_id": vid, "url": s.get("url"), "title": s.get("title"),
-                    "thumbnail_url": s.get("thumbnail_url") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-                    "thumbnail_maxres_url": f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg", "duration_s": s.get("duration_s"),
-                    "channel": s.get("channel_title"), "starts_at": _iso(s.get("starts_at")), "published_at": _iso(s.get("starts_at") or s.get("first_seen_at")),
-                    "confidence": s.get("confidence"), "official": s.get("confidence") in ("official", "confirmed"),
-                    "zprp_match_id": s.get("match_id")})
-        if len(out) >= 20:
-            break
-    return {"streams": out, "query": q or None, "range": {"date_from": d_from.isoformat() if d_from else None,
+    pair_cards = await C.pair_match_cards(ctx["judge_ids"])
+    out = await youtube_results(pair_cards, q, d_from, d_to, t_from, t_to)
+    return {"streams": out, "best": next((f"yt:{o['video_id']}" for o in out[:1] if o["sure"] and not (len(out) > 1 and out[1]["sure"] and out[1]["code"] != o["code"])), None),
+            "query": q or None, "range": {"date_from": d_from.isoformat() if d_from else None,
             "date_to": d_to.isoformat() if d_to else None, "time_from": time_from or None, "time_to": time_to or None}}
 
 

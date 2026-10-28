@@ -841,3 +841,87 @@ def test_miniatury_w_magazynie_stale_url_i_herby(env, monkeypatch):
     assert pending.get("thumbnail_url") is None and pending["thumb_pending"] is True and busy is True and stored["key"].endswith("trybuna/thumbs/7.jpg")
     assert ready["thumb_pending"] is False and ready["thumbnail_url"] == f"/mentor-panel/trybuna/thumb/7.jpg?s={sig}" and ready["duration_s"] == 3600
     assert ready["home_crest"] == "https://l/c1.png" and ready["away_crest"] is None
+
+
+# ─── Przebudowa wyszukiwania: trafność wobec zapytania, jedna lista, cel dodania ─────
+
+
+def test_regresja_lcm_32_tylko_wlasciwy_film_jest_pewny_i_pierwszy(env):
+    from datetime import timedelta
+
+    async def go():
+        a = await env.actor(JUDGES[0])
+        h = {"source_hash": "h", "source_json": {}}
+        start = datetime.now(timezone.utc) - timedelta(days=18)
+        teams = [("LCM/32", "AZS AGH Kraków", "ENERGA Gwardia Koszalin"), ("LCM/31", "Orlen Wisła Płock", "PGE Wybrzeże Gdańsk"),
+                 ("LCM/30", "Industria Kielce", "KGHM Chrobry Głogów"), ("LCM/29", "Azoty Puławy", "MMTS Kwidzyn")]
+        for i, (code, home, away) in enumerate(teams):
+            when = start - timedelta(days=i)
+            await env.ins("zprp_public_matches", match_id=f"lcm{i}", season_id="S1", competition_id="K9", competition_name="Liga Centralna Mężczyzn",
+                          match_code=code, home_team_name=home, away_team_name=away, scheduled_at=datetime(when.year, when.month, when.day, 19, 0), **h)
+            # Wszystkie filmy mają "oficjalny" kanał; właściwy jest NAJSTARSZY, więc lista po dacie miałaby go na końcu.
+            await env.ins("match_streams", match_id=f"lcm{i}", url=f"https://www.youtube.com/watch?v=vid{i}aaaaaaaa", platform="youtube",
+                          video_id=f"vid{i}aaaaaaaa", title=f"LCM: {home} - {away}", state="vod", starts_at=when if i else start - timedelta(days=30),
+                          confidence="official", source="portal", channel_title="ZPRP TV", hidden=False)
+        F = env.trybuna_feed
+        return await F.trybuna_youtube(PAIR, "LCM/32", "", "", "", "", a)
+
+    out = env.run(go)
+    streams = out["streams"]
+    assert [s["video_id"] for s in streams if s["sure"]] == ["vid0aaaaaaaa"]       # tylko AGH - Gwardia jest pewny
+    assert streams[0]["video_id"] == "vid0aaaaaaaa" and streams[0]["official"] is True and streams[0]["code"] == "LCM/32"
+    assert all(s["confidence"] == 0 or s["video_id"] == "vid0aaaaaaaa" for s in streams) or len(streams) == 1  # inne kody odpadają
+    assert out["best"] == "yt:vid0aaaaaaaa"
+
+
+def test_query_score_kod_druzyny_data_oficjalnosc_nie_daje_pewnosci(env):
+    RK = importlib.import_module("app.mentor_trybuna_rank")
+    card = {"match_code": "LCM/32", "home": {"name": "AZS AGH Kraków"}, "away": {"name": "ENERGA Gwardia Koszalin"},
+            "scheduled_at": datetime(2026, 10, 10, 17, 0, tzinfo=timezone.utc)}
+    code = RK.query_score(RK.parse_query("LCM/32"), card)
+    wrong = RK.query_score(RK.parse_query("LCM/31"), card)
+    teams = RK.query_score(RK.parse_query("AGH Gwardia 2026-10-10"), card)
+    one = RK.query_score(RK.parse_query("Gwardia"), card)
+    case = RK.query_score(RK.parse_query("lcm/32"), card)
+    assert code["sure"] and code["confidence"] == 100
+    assert wrong["confidence"] == 0 and not wrong["sure"]            # inny kod = nie ten mecz
+    assert teams["sure"] and teams["signals"] == {"code": None, "teams": "both", "date": "same"}
+    assert not one["sure"] and 25 <= one["confidence"] < 100
+    assert not case["sure"] and case["signals"]["code"] == "case"
+    ranked = [{"key": "a", "sure": False, "confidence": 80, "date": "2026-10-01"}, {"key": "b", "sure": True, "confidence": 100, "date": "2026-09-01", "code": "X/1"},
+              {"key": "c", "sure": False, "confidence": 80, "date": "2026-10-05"}]
+    ranked.sort(key=RK.rank_key)
+    assert [r["key"] for r in ranked] == ["b", "c", "a"]                # pewne > pewność > nowsza data
+    assert RK.best_key(ranked) == "b"
+    assert RK.best_key([{"key": "x", "sure": False, "confidence": 80}, {"key": "y", "sure": False, "confidence": 70}]) is None
+    assert RK.best_key([{"key": "x", "sure": False, "confidence": 80}, {"key": "y", "sure": False, "confidence": 40}]) == "x"
+    two = [{"key": "p", "sure": True, "confidence": 100, "code": "A/1"}, {"key": "q", "sure": True, "confidence": 100, "code": "B/2"}]
+    assert RK.best_key(two) is None                                      # dwa różne pewne mecze: wybiera człowiek
+
+
+def test_jedna_lista_cel_dodania_mecz_pary_lub_trybuna(env, monkeypatch):
+    async def go():
+        a = await env.actor(JUDGES[0])
+        when = await m1_when(env)
+        ref = [{"name": "Jakub Rawicki", "role": "referee"}]
+        games = [
+            {"bunny_item_id": 1, "code": "ISM/1", "home": "SPR Gliwice", "away": "KS Opole", "date": when + ":00", "video_state": "READY", "referees": ref},
+            {"bunny_item_id": 2, "code": "LCM/32", "home": "AZS AGH Kraków", "away": "ENERGA Gwardia Koszalin", "date": "2026-10-10 19:00:00", "video_state": "READY", "referees": ref},
+        ]
+        S, client, mz = meczoteka(env, [(200, {"games": games, "has_more": False})])
+        monkeypatch.setattr(env.trybuna_feed.S, "_setup", lambda real: (mz, None))
+        SB = env.trybuna_feed.SearchBody
+        by_code = await env.trybuna_feed.trybuna_search(PAIR, SB(q="ISM/1"), _Resp(), a, a)
+        S.forget_search_cache()
+        by_other = await env.trybuna_feed.trybuna_search(PAIR, SB(q="LCM/32"), _Resp(), a, a)
+        return by_code, by_other
+
+    by_code, by_other = env.run(go)
+    top = by_code["ranked"][0]
+    assert top["source"] == "bastion" and top["key"] == "bastion:1" and top["sure"] and by_code["best"] == "bastion:1"
+    assert top["target"]["kind"] == "pair_match" and top["target"]["match_id"] == "m1" and "SPR Gliwice" in top["target"]["label"]
+    assert [r["key"] for r in by_code["ranked"] if r["source"] == "bastion"] == ["bastion:1"]      # LCM/32 odpada przy zapytaniu ISM/1
+    assert any(r["source"] == "baza" and r["target"]["match_id"] == "m1" for r in by_code["ranked"])  # i mecz pary z "bazy"
+    other = by_other["ranked"][0]
+    assert other["key"] == "bastion:2" and other["sure"] and other["target"] == {"kind": "trybuna", "match_id": None, "label": "Trybuna (cudzy mecz)"}
+    assert by_other["best"] == "bastion:2" and "youtube" in by_other
