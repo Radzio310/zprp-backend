@@ -1626,7 +1626,8 @@ async def startup():
     # Handball Bastion: trwały worker klipów MP4 (stan i dzierżawa w bazie, restart go wznawia). Tylko za BASTION_ENABLED.
     from app.mentor_bastion_rules import enabled as _bastion_enabled
     if _bastion_enabled():
-        from app.mentor_bastion_jobs import run_bastion_worker
+        from app.mentor_bastion_jobs import repair_legacy_links, run_bastion_worker
+        asyncio.create_task(repair_legacy_links())
         for _n in (1, 2):
             asyncio.create_task(run_bastion_worker(_n))
         logger.info("✅ Mentor Bastion: worker klipów MP4 wystartował (2 pętle)")

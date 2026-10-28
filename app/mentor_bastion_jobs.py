@@ -937,6 +937,28 @@ async def run_once(worker_id: str, *, lease_s: int = BR.LEASE_S, client: Any = N
     return True
 
 
+async def repair_legacy_links() -> int:
+    """Linki Bastionu dodane przed włączeniem flagi leżą jako zwykły link (provider inny niż bastion) z tytułem
+    podglądu z przekierowania na logowanie Discorda. Przy starcie z włączoną flagą przestawiamy je na Bastion
+    i czyścimy obcy podgląd. Adres zostaje bez zmian (unikalność normalized_url w meczu)."""
+    from sqlalchemy import select, update
+
+    from app.db import database, mentor_match_videos as V
+
+    rows = await database.fetch_all(select(V.c.id, V.c.url, V.c.provider).where(V.c.url.like("%handball-bastion.pl/game%")))
+    fixed = 0
+    for r in rows:
+        item = BR.parse_game_url(r["url"])
+        if not item or r["provider"] == BR.PROVIDER:
+            continue
+        await database.execute(update(V).where(V.c.id == r["id"]).values(
+            provider=BR.PROVIDER, external_id=str(item), title=None, thumbnail_url=None, site_name=None, duration_s=None))
+        fixed += 1
+    if fixed:
+        logger.info("Mentor Bastion: %s starych linków przestawionych na Bastion", fixed)
+    return fixed
+
+
 async def run_bastion_worker(n: int = 1) -> None:
     """Pętla w tle (start w `main.py`, także na Railway: jeden proces uvicorn, stan w bazie, lease chroni przed dublami
     przy większej liczbie replik). Budzi ją zapis zadania, inaczej sprawdza co 15 s."""
