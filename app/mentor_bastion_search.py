@@ -357,11 +357,16 @@ class _Stop(Exception):
 
 
 _search_cache: Dict[Tuple[Any, ...], Tuple[float, Tuple[List[Dict[str, Any]], bool]]] = {}
+_totals: Dict[Tuple[Any, ...], Optional[int]] = {}
+#: Granice zakresów dat (strona startowa po wyszukiwaniu binarnym) pamiętane 10 min - lista portalu rośnie.
+_bound_cache: Dict[Tuple[Any, ...], Tuple[float, int]] = {}
 _rate_log: Dict[str, List[float]] = {}
 
 
 def forget_search_cache() -> None:
     _search_cache.clear()
+    _totals.clear()
+    _bound_cache.clear()
     _rate_log.clear()
 
 
@@ -403,6 +408,8 @@ class Meczoteka:
         self.client, self.scopes, self.real = client, scopes, real
         self.scope: Optional[str] = None
         self.retry_429 = retry_429
+        self.total: Optional[int] = None
+        self._page_total: Optional[int] = None
 
     def _owner(self, scope: str) -> Optional[str]:
         return self.real.judge_id if scope == "personal" else None
@@ -434,12 +441,14 @@ class Meczoteka:
             verdict, body = await self._one(self.scope, extra)
             if verdict.kind != "ok":
                 raise _Stop([(self.scope, verdict)])
+            self._page_total = body.get("total") if isinstance(body.get("total"), int) else None
             return [g for g in body["games"] if isinstance(g, dict)], bool(body.get("has_more"))
         verdicts: List[Tuple[str, BR.PlaybackVerdict]] = []
         for scope in self.scopes:
             verdict, body = await self._one(scope, extra)
             if verdict.kind == "ok":
                 self.scope = scope
+                self._page_total = body.get("total") if isinstance(body.get("total"), int) else None
                 return [g for g in body["games"] if isinstance(g, dict)], bool(body.get("has_more"))
             verdicts.append((scope, verdict))
             if verdict.kind in ("rate_limited", "unavailable"):
@@ -450,11 +459,13 @@ class Meczoteka:
         key = (self.real.judge_id, tuple(sorted((k, str(v)) for k, v in extra.items())))
         hit = cache_get(key)
         if hit is not None:
+            self.total = _totals.get(key)
             return hit
         if not rate_allow(self.real.judge_id):
             raise _Stop([((self.scopes or ["default"])[0], BR.PlaybackVerdict("rate_limited", "BASTION_RATE_LIMITED"))])
         games, more = await self._page(extra)
         cache_put(key, games, more)
+        _totals[key] = self.total = getattr(self, "_page_total", None)
         return games, more
 
     async def _paged(self, extra: Dict[str, Any], offset: int = 0) -> List[Dict[str, Any]]:
@@ -486,6 +497,15 @@ class Meczoteka:
             extra["q"] = q
         if PORTAL_DATE_PARAMS and (d_from or d_to):
             extra["portal"] = "&".join(f"{k}={v}" for k, v in ((PORTAL_DATE_PARAMS[0], d_from), (PORTAL_DATE_PARAMS[1], d_to)) if v)
+        if q or referee:
+            max_pages = min(max_pages, 5)  # z tekstem lub sędzią total jest małe: czytamy wszystko (do 5 stron)
+        elif d_from or d_to:
+            # Lista portalu jest posortowana MALEJĄCO po dacie i zaczyna od przyszłości: stron zakresu szukamy binarnie po offsecie.
+            found = await self._scan_by_date(extra, d_from, d_to, max_pages)
+            if found is not None:
+                rows_b, meta_b = found
+                out_b = [g for g in rows_b if in_range(g, d_from, d_to, t_from, t_to)]
+                return out_b, meta_b
         rows: List[Dict[str, Any]] = []
         days: List[date] = []
         pages, more, truncated = 0, False, False
@@ -503,7 +523,87 @@ class Meczoteka:
                 break
         truncated = bool(more)
         out = [g for g in rows if in_range(g, d_from, d_to, t_from, t_to) and (not referee or has_person(g, referee, role))]
-        return out, {"pages": pages, "truncated": truncated, "local_filter": True}
+        return out, {"pages": pages, "truncated": truncated, "local_filter": True, "mode": "linear", "requests": pages}
+
+    async def _read_page(self, extra: Dict[str, Any], page: int) -> Tuple[List[Dict[str, Any]], bool]:
+        return await self._cached({**extra, "offset": page * SCAN_PAGE} if page else dict(extra))
+
+    async def _scan_by_date(self, extra: Dict[str, Any], d_from: Optional[date], d_to: Optional[date],
+                            max_pages: int) -> Optional[Tuple[List[Dict[str, Any]], Dict[str, Any]]]:
+        """Zakres dat bez tekstu: wyszukiwanie binarne strony, od której dnie są <= `d_to` (log2(total/50) żądań), potem czytanie
+        stron aż do dnia < `d_from`. Strona startowa pamiętana 10 min na dzień końca. Zwraca None, gdy nie da się ufać sortowaniu
+        (brak `total`, niemonotoniczne daty) - wtedy wołający robi zwykły skan z `truncated`."""
+        games0, more0 = await self._read_page(extra, 0)
+        total = self.total
+        if not games0:
+            return [], {"pages": 1, "truncated": False, "local_filter": True, "mode": "binary", "requests": 1}
+        if total is None:
+            return None
+        n_pages = max(1, -(-total // SCAN_PAGE))
+        seen: Dict[int, List[Dict[str, Any]]] = {0: games0}
+        requests = 1
+
+        def edge(games: List[Dict[str, Any]]) -> Tuple[Optional[date], Optional[date]]:
+            ds = [d for d in (parse_day(g.get("date")) for g in games) if d]
+            return (ds[0], ds[-1]) if ds else (None, None)
+
+        def monotonic() -> bool:
+            prev: Optional[date] = None
+            for pg in sorted(seen):
+                f, l = edge(seen[pg])
+                if f is None:
+                    continue
+                if (prev is not None and f > prev) or l > f:
+                    return False
+                prev = l
+            return True
+
+        async def page(pg: int) -> List[Dict[str, Any]]:
+            nonlocal requests
+            if pg not in seen:
+                g, _ = await self._read_page(extra, pg)
+                seen[pg] = g
+                requests += 1
+            return seen[pg]
+
+        start = 0
+        if d_to is not None:
+            f0, _ = edge(games0)
+            if f0 is not None and f0 > d_to:
+                bkey = (self.real.judge_id, str(extra.get("video")), d_to)
+                hit = _bound_cache.get(bkey)
+                if hit and time.monotonic() - hit[0] < SEARCH_CACHE_TTL_S and hit[1] < n_pages:
+                    start = hit[1]
+                else:
+                    lo, hi = 1, n_pages  # najmniejsza strona, której PIERWSZY wiersz ma dzień <= d_to (n_pages = żadna)
+                    while lo < hi:
+                        mid = (lo + hi) // 2
+                        f, _ = edge(await page(mid))
+                        if f is None:
+                            return None
+                        if f <= d_to:
+                            hi = mid
+                        else:
+                            lo = mid + 1
+                    start = max(lo - 1, 0)  # granica może leżeć w końcówce poprzedniej strony
+                    if not monotonic():
+                        return None
+                    if len(_bound_cache) > 500:
+                        _bound_cache.clear()
+                    _bound_cache[bkey] = (time.monotonic(), start)
+        rows: List[Dict[str, Any]] = []
+        done, pg = False, start
+        while pg < min(start + max(1, max_pages), n_pages):
+            games = await page(pg)
+            rows += games
+            _, last = edge(games)
+            if (last is not None and d_from and last < d_from) or pg >= n_pages - 1 or not games:
+                done = True
+                break
+            pg += 1
+        if not monotonic():
+            return None
+        return rows, {"pages": requests, "truncated": not done, "local_filter": True, "mode": "binary", "requests": requests}
 
 
 

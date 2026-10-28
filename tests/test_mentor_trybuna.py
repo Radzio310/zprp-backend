@@ -589,3 +589,82 @@ def test_youtube_wyniki_maja_miniature_czas_i_oficjalnosc_oraz_filtr_dat(env):
     assert s["thumbnail_url"] == "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg" and s["thumbnail_maxres_url"].endswith("maxresdefault.jpg")
     assert s["duration_s"] == 5400 and s["official"] is True and s["channel"] == "ZPRP TV" and s["published_at"]
     assert miss["streams"] == []
+
+
+# ─── Zakres dat: wyszukiwanie binarne po offsecie ───────────────────────────
+
+
+class SortedPortal:
+    """Portal: lista malejąco po dacie, total, limit/offset, video=with odfiltrowuje mecze bez nagrania."""
+
+    def __init__(self, rows):
+        self.rows, self.calls = rows, []
+
+    async def request(self, method, path, params=None, json=None, timeout=None):
+        from app import mentor_bastion_client as CL
+
+        p = dict(params or {})
+        self.calls.append(p)
+        rows = [r for r in self.rows if p.get("video") != "with" or r.get("bunny_item_id")]
+        off, lim = int(p.get("offset", 0)), int(p.get("limit", 20))
+        return CL.Reply(200, {"games": rows[off:off + lim], "total": len(rows), "has_more": off + lim < len(rows)})
+
+
+def portal_rows(days=400, per_day=3):
+    from datetime import date, timedelta
+
+    top = date(2027, 4, 29)
+    out, n = [], 0
+    for d in range(days):
+        day = top - timedelta(days=d)
+        for h in range(per_day):
+            n += 1
+            out.append({"bunny_item_id": n if h < 2 else None, "game_id": n, "date": f"{day.isoformat()} {18 - h * 3:02d}:00:00",
+                        "video_state": "READY" if h < 2 else "NONE", "referees": []})
+    return out
+
+
+def scanner(env, rows):
+    S = importlib.import_module("app.mentor_bastion_search")
+    S.forget_search_cache()
+    portal = SortedPortal(rows)
+
+    class Real:
+        judge_id = JUDGES[0]
+
+    return S, portal, S.Meczoteka(portal, ["default"], Real())
+
+
+def test_zakres_dat_szuka_binarnie_i_pamieta_granice(env):
+    from datetime import date
+
+    async def go():
+        S, portal, mz = scanner(env, portal_rows())
+        rows, meta = await mz.scan(d_from=date(2026, 10, 10), d_to=date(2026, 10, 12))
+        first_calls = len(portal.calls)
+        S.forget_search_cache.__call__  # noqa: B018 - cache stron zostaje, granice liczone od nowa
+        rows2, meta2 = await mz.scan(d_from=date(2026, 10, 10), d_to=date(2026, 10, 12))
+        return rows, meta, first_calls, len(portal.calls), rows2
+
+    rows, meta, first_calls, total_calls, rows2 = env.run(go)
+    days = {r["date"][:10] for r in rows}
+    assert days == {"2026-10-10", "2026-10-11", "2026-10-12"} and len(rows) == 9
+    assert meta["mode"] == "binary" and meta["truncated"] is False and first_calls <= 12 and total_calls == first_calls  # drugi raz z pamięci
+    assert len(rows2) == 9
+
+
+def test_zakres_dat_z_nagraniem_i_niemonotoniczne_sortowanie(env):
+    from datetime import date
+
+    async def go():
+        S, portal, mz = scanner(env, portal_rows())
+        with_video, meta = await mz.scan(video="with", d_from=date(2026, 10, 10), d_to=date(2026, 10, 10))
+        shuffled = portal_rows()
+        shuffled[600], shuffled[1100] = shuffled[1100], shuffled[600]  # psuje porządek
+        S2, portal2, mz2 = scanner(env, shuffled)
+        rows, meta2 = await mz2.scan(d_from=date(2026, 10, 10), d_to=date(2026, 10, 12))
+        return with_video, meta, rows, meta2, portal.calls[0]
+
+    with_video, meta, rows, meta2, first = env.run(go)
+    assert len(with_video) == 2 and all(r["bunny_item_id"] for r in with_video) and first["video"] == "with" and meta["mode"] == "binary"
+    assert meta2["mode"] == "linear" and meta2["truncated"] is True  # nie ufamy sortowaniu: skan z truncated

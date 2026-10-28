@@ -18,8 +18,8 @@ import urllib.request
 PARAMS = ("q", "referee", "referees", "referee_name", "judge", "sedzia")
 
 
-def call(base: str, token: str, scope: str, name: str, param: str, portal: str = "", limit: int = 10) -> dict:
-    args = {"scope": scope, "video": "any", "limit": limit, "debug": "true"}
+def call(base: str, token: str, scope: str, name: str, param: str, portal: str = "", limit: int = 10, offset: int = 0, video: str = "any") -> dict:
+    args = {"scope": scope, "video": video, "limit": limit, "offset": offset, "debug": "true"}
     if name:
         args.update(referee=name, referee_param=param)
     if portal:
@@ -78,8 +78,30 @@ def probe_dates(base: str, token: str, scope: str, d1: str, d2: str) -> None:
     print("Wniosek: portal filtruje, gdy total jest wyraznie mniejszy niz bez parametrow i prawie wszystkie wiersze sa w zakresie.")
 
 
+def probe_order(base: str, token: str, scope: str) -> None:
+    """Czy lista jest monotonicznie malejaca po dacie (podstawa wyszukiwania binarnego) i czy video=with zmienia total?"""
+    print("=== PORZADEK: daty wierszy z offsetow 0, total/2, total-50 (limit 50) ===")
+    first = call(base, token, scope, "", "q", "", 50, 0)
+    body = first["body"] if isinstance(first["body"], dict) else {}
+    total = body.get("total") or 0
+    print(f"--- total={total} (video=any)")
+    seen = []
+    for off in (0, max(total // 2 // 50 * 50, 0), max(total - 50, 0)):
+        out = call(base, token, scope, "", "q", "", 50, off)
+        games = (out["body"] if isinstance(out["body"], dict) else {}).get("games") or []
+        days = [str(g.get("date"))[:10] for g in games]
+        seen.append((off, days[:1], days[-1:]))
+        print(f"   offset={off}: wierszy={len(games)} pierwsza={days[:1]} ostatnia={days[-1:]} malejaco_w_stronie={days == sorted(days, reverse=True)}")
+    firsts_lasts = [d for _, f, l in seen for d in (f + l) if d]
+    print("   MONOTONICZNIE MALEJACO miedzy offsetami:", firsts_lasts == sorted(firsts_lasts, reverse=True))
+    withv = call(base, token, scope, "", "q", "", 50, 0, "with")
+    wb = withv["body"] if isinstance(withv["body"], dict) else {}
+    print(f"--- video=with: total={wb.get('total')} (any: {total}) -> {'ZMIENIA total' if wb.get('total') != total else 'bez zmiany'}")
+
+
 if __name__ == "__main__":
     main()
     if len(sys.argv) > 4:
         probe_dates(os.environ.get("BASTION_CONNECTOR_URL", "").rstrip("/"), os.environ.get("BASTION_CONNECTOR_TOKEN", ""),
                     sys.argv[2], sys.argv[3], sys.argv[4])
+        probe_order(os.environ.get("BASTION_CONNECTOR_URL", "").rstrip("/"), os.environ.get("BASTION_CONNECTOR_TOKEN", ""), sys.argv[2])
