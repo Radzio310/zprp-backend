@@ -179,6 +179,10 @@ railway ssh -s zprp-backend "echo $b | base64 -d | python - 'Jan Kowalski'"
 
 Wynik pokazuje dla każdego parametru liczbę wyników, `row_keys` i sędziów z pierwszej kasety. Parametr, który zwęża listę do meczów tego sędziego, wpisujemy w `REFEREE_PARAM`; jeśli żaden nie zawęża, szukanie po sędzi działa przez `q` (nazwisko jako zwykły tekst) i filtr po stronie BAZY (`referees` w wierszach), a pole z obsadą dopisujemy do `parse_referees` w `bastion_connector/connector/bastion.py`.
 
+### Daty i miniatury (Trybuna, 28.10.2026, do potwierdzenia próbą)
+
+`GET /games/search` przyjmuje też `portal=k=v&k2=v2` (klucze tylko z `date_from|date_to|from|to|date_start|date_end|since|until|date`, wartości `RRRR-MM-DD`) - przekazywane do `/api/games` portalu wyłącznie do prób. `/playback` zwraca teraz `thumbnail_url` i `duration_s` (z obiektu `video` game-context: klucze `thumbnail_url|thumbnail|poster_url|poster|preview_url|cover_url|image_url|image`, tylko https z hostów Bunny) oraz `video_keys` (nazwy pól `video`). Próba dat: `python probe_meczoteka_referee.py "Imię Nazwisko" default 2026-10-10 2026-10-12` pokazuje `total` i zakres dat wierszy dla każdej pary parametrów wobec odpowiedzi bez parametrów.
+
 ## 8. Ryzyka i otwarte kwestie
 
 - Trwałość sesji Bastionu nieznana; może wymagać cyklicznego logowania przez człowieka (MFA nie omijamy).

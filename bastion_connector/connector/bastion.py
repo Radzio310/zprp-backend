@@ -3,6 +3,7 @@ wiec odpowiedz jest walidowana, a bledy mapowane na kody BAZY (handoff 8.1)."""
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -21,6 +22,9 @@ class GameResult:
     detail: str | None = None
     identity: dict = field(default_factory=dict)  # {id, label, source, viewer_keys}; puste, gdy brak klucza viewer
     match: dict = field(default_factory=dict)  # krotkie podsumowanie meczu z game-context (bilet meczu), bez embedu
+    thumbnail_url: str | None = None  # miniatura z obiektu `video` game-context (https, host z listy Bunny), gdy portal ja podaje
+    duration_s: int | None = None
+    video_keys: list[str] = field(default_factory=list)  # NAZWY pol obiektu `video` (do potwierdzenia ksztaltu)
 
 
 _EXPIRY_PARAMS = ("expires", "expire", "token_expires", "exp")
@@ -115,6 +119,27 @@ def summarize_match(body: Any) -> dict:
     return out
 
 
+_THUMB_KEYS = ("thumbnail_url", "thumbnail", "poster_url", "poster", "preview_url", "preview", "cover_url", "image_url", "image")
+_DURATION_KEYS = ("duration_s", "duration", "length", "length_s", "duration_seconds")
+
+
+def video_extras(video: dict, suffixes: list[str]) -> tuple[str | None, int | None]:
+    """Miniatura (tylko https i host z sufiksow Bunny) i dlugosc w sekundach z obiektu `video` game-context; brak = None."""
+    thumb = None
+    for k in _THUMB_KEYS:
+        v = video.get(k)
+        if isinstance(v, str) and v.startswith("https://") and len(v) <= 600 and embed_url_ok(v, suffixes):
+            thumb = v
+            break
+    dur = None
+    for k in _DURATION_KEYS:
+        v = video.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 86400:
+            dur = int(round(v))
+            break
+    return thumb, dur
+
+
 def classify(http_status: int, body: Any, embed_suffixes: list[str]) -> GameResult:
     if http_status == 401:
         return GameResult("BASTION_AUTH_REQUIRED", 401)
@@ -130,6 +155,8 @@ def classify(http_status: int, body: Any, embed_suffixes: list[str]) -> GameResu
     embed = video.get("embed_url") if isinstance(video.get("embed_url"), str) else None
     res = GameResult("OK", 200, video_state=video.get("state") if isinstance(video.get("state"), str) else None,
                      top_keys=sorted(body.keys())[:20], identity=extract_identity(body), match=summarize_match(body))
+    res.thumbnail_url, res.duration_s = video_extras(video, embed_suffixes)
+    res.video_keys = sorted(str(k) for k in video)[:30]
     if embed:
         if not embed_url_ok(embed, embed_suffixes):
             host = urlsplit(embed).hostname
@@ -170,6 +197,21 @@ def _int(v: Any) -> int | None:
     if isinstance(v, str) and v.strip().isdigit():
         return int(v.strip())
     return None
+
+
+#: Parametry dat portalu do prob (nieznane, czy portal je zna): `portal=date_from=2026-10-01&date_to=2026-10-31`.
+PORTAL_DATE_PARAMS = ("date_from", "date_to", "from", "to", "date_start", "date_end", "since", "until", "date")
+
+
+def parse_portal_params(raw: str) -> dict | None:
+    """"k=v&k2=v2" -> {k: v}, tylko klucze z PORTAL_DATE_PARAMS i wartosci YYYY-MM-DD / HH:MM; inaczej None (zly format)."""
+    out: dict = {}
+    for part in [p for p in (raw or "").split("&") if p]:
+        k, _, v = part.partition("=")
+        if k not in PORTAL_DATE_PARAMS or not re.fullmatch(r"\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?", v):
+            return None
+        out[k] = v
+    return out
 
 
 REFEREE_PARAMS = ("q", "referee", "referees", "referee_name", "judge", "sedzia")
@@ -298,7 +340,7 @@ def normalize_games(body: Any, limit: int, debug: bool = False) -> dict:
 
 
 async def fetch_games(req, base_url: str, q: str, limit: int, offset: int, season_id: int | None, video: str,
-                      referee: str = "", referee_param: str = "q") -> tuple[str, int | None, Any]:
+                      referee: str = "", referee_param: str = "q", portal: dict | None = None) -> tuple[str, int | None, Any]:
     """Zwraca (kod, http, cialo). Kody jak w classify; 200 z nie-obiektem = BASTION_BAD_RESPONSE.
     `referee` = nazwisko sedziego; trafia do parametru `referee_param` (z listy REFEREE_PARAMS, domyslnie zwykle `q`)."""
     params: dict[str, Any] = {"limit": str(limit), "offset": str(offset)}
@@ -306,6 +348,8 @@ async def fetch_games(req, base_url: str, q: str, limit: int, offset: int, seaso
         params["q"] = q
     if referee:
         params[referee_param if referee_param in REFEREE_PARAMS else "q"] = referee
+    for k, v in (portal or {}).items():
+        params[k] = v
     if season_id is not None:
         params["season_id"] = str(season_id)
     if video in ("with", "without"):

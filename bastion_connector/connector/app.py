@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from .bastion import REFEREE_PARAMS
+from .bastion import REFEREE_PARAMS, parse_portal_params
 from .config import Settings
 from .service import ConnectorError, Service
 from .tickets import TicketError
@@ -207,7 +207,7 @@ async def clip_download_url(remote_id: str, scope: str, judge_id: str | None = N
 
 @app.get("/games/search", dependencies=[Depends(auth)])
 async def games_search(scope: str, q: str = "", judge_id: str | None = None, limit: int = 20, offset: int = 0,
-                       season_id: int | None = None, video: str = "with", referee: str = "", referee_param: str = "q", debug: bool = False):
+                       season_id: int | None = None, video: str = "with", referee: str = "", referee_param: str = "q", debug: bool = False, portal: str = ""):
     """Meczoteka: lista meczow z nagraniem (bunny_item_id) pasujacych do tekstu (druzyny/kod/data) albo do sedziego
     (`referee` = imie i nazwisko, `referee_param` = nazwa parametru portalu do prob: q|referee|referees|referee_name|judge|sedzia).
     Tylko odczyt."""
@@ -218,7 +218,10 @@ async def games_search(scope: str, q: str = "", judge_id: str | None = None, lim
         raise ConnectorError("BAD_QUERY", 400)
     if not 1 <= limit <= 50 or not 0 <= offset <= 5000 or video not in ("with", "without", "any"):
         raise ConnectorError("BAD_PARAMS", 400)
-    res = await svc.games_search(scope, judge_id, q, limit, offset, season_id, video, referee, referee_param, debug)
+    extra = parse_portal_params(portal)
+    if extra is None:
+        raise ConnectorError("BAD_PARAMS", 400)
+    res = await svc.games_search(scope, judge_id, q, limit, offset, season_id, video, referee, referee_param, debug, extra)
     return JSONResponse(res, headers={"Cache-Control": "no-store"})
 
 
@@ -234,7 +237,8 @@ async def playback(scope: str, bunny_item_id: int | None = None, game_url: str |
     http = {"OK": 200, "BASTION_AUTH_REQUIRED": 409, "BASTION_RESOURCE_FORBIDDEN": 403,
             "BASTION_RATE_LIMITED": 429}.get(res.code, 503 if res.code != "BASTION_BAD_RESPONSE" else 502)
     body = {"code": res.code, "bunny_item_id": item, "video_state": res.video_state, "expires_at": res.expires_at,
-            "game_context_keys": res.top_keys, "detail": res.detail, "match": res.match, **info}
+            "game_context_keys": res.top_keys, "detail": res.detail, "match": res.match,
+            "thumbnail_url": res.thumbnail_url, "duration_s": res.duration_s, "video_keys": res.video_keys, **info}
     if res.embed_url and include_embed:
         body["embed_url"] = res.embed_url
     return JSONResponse(body, status_code=http, headers={"Cache-Control": "no-store"})

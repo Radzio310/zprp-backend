@@ -118,6 +118,10 @@ class Meczoteka:
         params = dict(request.url.params)
         self.calls.append((request.url.path, params))
         key = "default" if params.get("scope") == "default" else f"personal-{params.get('judge_id')}"
+        if request.url.path == "/playback":
+            self.playback_calls = getattr(self, "playback_calls", 0) + 1
+            http, body = getattr(self, "playback", {}).get(int(params["bunny_item_id"]), (200, {"code": "OK"}))
+            return httpx.Response(http, json=body)
         if request.url.path == "/games/search":
             http, body = self.games.get(key, (409, {"error": "BASTION_AUTH_REQUIRED"}))
             return httpx.Response(http, json=body)
@@ -251,3 +255,47 @@ def test_season_proposals_stops_on_auth(env):
         assert out["bastion"]["state"] == "auth_required" and "Połącz" in out["bastion"]["message"]
 
     env.run(go)
+
+
+def test_wyniki_maja_miniature_i_dlugosc_z_pamieci(env):
+    async def go():
+        env.search.forget_media_cache()
+        day = await m1_day(env)
+        env.fake.games["default"] = (200, {"games": [
+            {"bunny_item_id": 11, "code": "ISM/1", "home": "Gliwice", "away": "Opole", "date": day},
+            {"bunny_item_id": 12, "code": "ISM/1", "home": "Gliwice", "away": "Opole", "date": day},
+        ], "total": 2, "has_more": False})
+        env.fake.playback = {11: (200, {"code": "OK", "thumbnail_url": "https://vz-1.b-cdn.net/g/thumbnail.jpg", "duration_s": 3600})}
+        real, acting = await actors(env, A)
+        first = await env.search.bastion_search(PAIR, "m1", Response(), None, real, acting)
+        by = {g["bunny_item_id"]: g for g in first["games"]}
+        calls = env.fake.playback_calls
+        env.search.forget_search_cache()
+        second = await env.search.bastion_search(PAIR, "m1", Response(), None, real, acting)
+        return by, calls, env.fake.playback_calls, len(second["games"])
+
+    by, calls, calls_after, n = env.run(go)
+    assert by[11]["thumbnail_url"] == "https://vz-1.b-cdn.net/g/thumbnail.jpg" and by[11]["duration_s"] == 3600
+    assert by[12]["thumbnail_url"] is None and by[12]["duration_s"] is None  # brak = null, bez błędu
+    assert calls == 2 and calls_after == 2 and n == 2  # druga odpowiedź z pamięci miniatur
+
+
+def test_podglad_przed_dodaniem_nie_zapisuje_i_ma_koperte_bledu(env):
+    async def go():
+        real, acting = await actors(env, A)
+        env.fake.playback = {5: (200, {"code": "OK", "embed_url": "https://iframe.mediadelivery.net/embed/1/x?token=t", "video_state": "READY",
+                                       "duration_s": 3000, "thumbnail_url": "https://vz-1.b-cdn.net/x/thumbnail.jpg"}),
+                             6: (409, {"code": "BASTION_AUTH_REQUIRED"})}
+        F = env.trybuna_feed
+        videos_before = len(await env.db.fetch_all(env.T["mentor_match_videos"].select()))
+        ok = await F.trybuna_preview(PAIR, F.PreviewBody(bunny_item_id=5), Response(), real, acting)
+        videos_after = len(await env.db.fetch_all(env.T["mentor_match_videos"].select()))
+        status, code, detail = await denied(F.trybuna_preview(PAIR, F.PreviewBody(bunny_item_id=6), Response(), real, acting))
+        sreal, sacting = await actors(env, STRANGER)
+        denied_access = await denied(F.trybuna_preview(PAIR, F.PreviewBody(bunny_item_id=5), Response(), sreal, sacting))
+        return ok, videos_before, videos_after, status, code, detail, denied_access[0]
+
+    ok, before, after, status, code, detail, access = env.run(go)
+    assert ok["embed_url"].startswith("https://iframe.mediadelivery.net/") and ok["mode"] == "bunny_embed" and ok["duration_s"] == 3000
+    assert ok["thumbnail_url"].endswith("thumbnail.jpg") and ok["capabilities"]["seek"] is True and before == after
+    assert (status, code) == (409, "BASTION_AUTH_REQUIRED") and "connections" in detail and access in (403, 404)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Query, Response
@@ -98,12 +98,13 @@ def is_upcoming(game: Mapping[str, Any], today) -> bool:
 
 
 def game_row(game: Mapping[str, Any], watched: Mapping[int, str]) -> Dict[str, Any]:
-    item = int(game["bunny_item_id"])
+    item = int(game["bunny_item_id"]) if game.get("bunny_item_id") else None
     keep = ("title", "home", "away", "date", "competition", "code", "score", "video_state", "video_coverage", "duration_s")
-    return {"bunny_item_id": item, "url": BR.canonical_game_url(item), **{k: game.get(k) for k in keep},
+    return {"bunny_item_id": item, "game_id": game.get("game_id"), "url": BR.canonical_game_url(item) if item else None,
+            "thumbnail_url": game.get("thumbnail_url"), **{k: game.get(k) for k in keep},
             "referees": T.clean_referees(game.get("referees") or []), "state": T.feed_state(game.get("video_state")),
             "unscheduled": bool(game.get("unscheduled")), "time_known": game_time_known(game),
-            "added": item in watched, "match_id": watched.get(item)}
+            "added": bool(item and item in watched), "match_id": watched.get(item) if item else None}
 
 
 async def watched_by_item(pair_ids: List[str], items: List[int]) -> Dict[Tuple[str, int], str]:
@@ -120,6 +121,40 @@ class SearchBody(BaseModel):
     referee: Optional[str] = Field(default=None, max_length=80)
     video: str = Field(default="any", pattern="^(with|any)$")
     offset: int = Field(default=0, ge=0, le=500)
+    #: Filtr czasu (czas polski): dzień = date_from == date_to; godziny opcjonalne (okno przez północ: od > do).
+    date_from: Optional[str] = Field(default=None, max_length=10)
+    date_to: Optional[str] = Field(default=None, max_length=10)
+    time_from: Optional[str] = Field(default=None, max_length=5)
+    time_to: Optional[str] = Field(default=None, max_length=5)
+
+
+MAX_RANGE_DAYS = 366
+DAYS_MAX = 62
+DAYS_CACHE_S = 600.0
+_days_cache: Dict[Tuple[Any, ...], Tuple[float, Dict[str, Any]]] = {}
+
+
+def parse_range(date_from: Any, date_to: Any, time_from: Any, time_to: Any):
+    """(d_from, d_to, t_from, t_to) z napisów albo 422 `BAD_DATE` / `BAD_TIME` / `RANGE_TOO_LONG`."""
+    def day(v: Any) -> Optional[date]:
+        v = R.s(v)
+        if not v:
+            return None
+        try:
+            return date.fromisoformat(v)
+        except ValueError:
+            raise C.err(422, "BAD_DATE", "Data ma postać RRRR-MM-DD.") from None
+
+    d_from, d_to = day(date_from), day(date_to)
+    if d_from and d_to and d_from > d_to:
+        raise C.err(422, "BAD_DATE", "Data początkowa jest późniejsza niż końcowa.")
+    if d_from and d_to and (d_to - d_from).days > MAX_RANGE_DAYS:
+        raise C.err(422, "RANGE_TOO_LONG", f"Zakres dat może mieć najwyżej {MAX_RANGE_DAYS} dni.")
+    t_from = S.parse_hm(time_from) if R.s(time_from) else None
+    t_to = S.parse_hm(time_to) if R.s(time_to) else None
+    if (R.s(time_from) and t_from is None) or (R.s(time_to) and t_to is None):
+        raise C.err(422, "BAD_TIME", "Godzina ma postać GG:MM.")
+    return d_from, d_to, t_from, t_to
 
 
 @router.post("/pairs/{pair_id}/trybuna/search")
@@ -134,7 +169,9 @@ async def trybuna_search(pair_id: str, body: SearchBody, response: Response, rea
     ctx = await C.pair_context(pair_id, acting)
     C.check(ctx, "video")
     q, referee = R.s(body.q), R.s(body.referee)
-    if not q and not referee:
+    d_from, d_to, t_from, t_to = parse_range(body.date_from, body.date_to, body.time_from, body.time_to)
+    ranged = bool(d_from or d_to or t_from is not None or t_to is not None)
+    if not q and not referee and not ranged:
         raise berr(422, "BAD_QUERY", "Wpisz nazwisko sędziego, nazwę drużyny, kod albo datę meczu.")
     if any(ord(ch) < 32 for ch in q + referee):
         raise berr(422, "BAD_QUERY", "Wpisz nazwisko sędziego, nazwę drużyny, kod albo datę meczu.")
@@ -143,26 +180,45 @@ async def trybuna_search(pair_id: str, body: SearchBody, response: Response, rea
         raise berr(404, "BASTION_DISABLED", S.DISABLED_MESSAGE)
     if state == "unconfigured" or mz is None:
         raise berr(503, "BASTION_UNAVAILABLE", S.UNCONFIGURED_MESSAGE)
+    meta = None
     try:
-        games = await (mz.search_referee(referee, video=body.video, offset=body.offset) if referee else mz.search(q))
+        if ranged:
+            # Przegląd okresu z tekstem albo sędzią: strony po 50 (do 10), daty i godziny filtrowane po stronie BAZY.
+            games, meta = await mz.scan(q=q, referee=referee, video=body.video, d_from=d_from, d_to=d_to, t_from=t_from, t_to=t_to)
+            games = games[:100]
+        else:
+            games = await (mz.search_referee(referee, video=body.video, offset=body.offset) if referee else mz.search(q))
     except S._Stop as stop:
         raise_stop(real, stop)
-    games = [g for g in games if g.get("bunny_item_id")]
-    watched = await watched_by_item([ctx["pair_id"]], [int(g["bunny_item_id"]) for g in games])
+    if not ranged:
+        games = [g for g in games if g.get("bunny_item_id")]
+    watched = await watched_by_item([ctx["pair_id"]], [int(g["bunny_item_id"]) for g in games if g.get("bunny_item_id")])
     by_item = {item: mid for (_, item), mid in watched.items()}
     rows = [game_row(g, by_item) for g in games]
-    return {"games": rows, "offset": body.offset, "next_offset": body.offset + S.PAGE if len(games) >= S.PAGE else None,
-            "connection_scope": mz.scope, "query": {"q": q or None, "referee": referee or None}}
+    await S.enrich_media(real, mz.scope, rows)
+    out = {"games": rows, "offset": body.offset,
+           "next_offset": None if ranged else (body.offset + S.PAGE if len(games) >= S.PAGE else None),
+           "connection_scope": mz.scope, "query": {"q": q or None, "referee": referee or None}}
+    if meta is not None:
+        out["range"] = {"date_from": d_from.isoformat() if d_from else None, "date_to": d_to.isoformat() if d_to else None,
+                        "time_from": R.s(body.time_from) or None, "time_to": R.s(body.time_to) or None, "pages": meta["pages"],
+                        "truncated": meta["truncated"], "local_filter": meta["local_filter"]}
+    return out
 
 
 @router.get("/pairs/{pair_id}/trybuna/youtube")
-async def trybuna_youtube(pair_id: str, q: str = Query("", max_length=80), actor: Actor = Depends(mentor_actor)):
+async def trybuna_youtube(pair_id: str, q: str = Query("", max_length=80), date_from: str = Query("", max_length=10),
+                          date_to: str = Query("", max_length=10), time_from: str = Query("", max_length=5),
+                          time_to: str = Query("", max_length=5), actor: Actor = Depends(mentor_actor)):
     """Wyniki YouTube do dodania: transmisje, które portal już zna (kanały klubów i ZPRP), po tytule. Bez jednostek z puli dobowej;
     cokolwiek innego z YouTube wchodzi wklejonym linkiem."""
     ctx = await C.pair_context(pair_id, actor)
     C.check(ctx, "video")
     words = [w for w in T.name_key(q).split() if len(w) >= 3][:4]
+    d_from, d_to, t_from, t_to = parse_range(date_from, date_to, time_from, time_to)
     since = datetime.now(timezone.utc) - timedelta(days=120)
+    if d_from:
+        since = min(since, datetime(d_from.year, d_from.month, d_from.day, tzinfo=timezone.utc) - timedelta(days=1))
     query = (select(match_streams).where(match_streams.c.platform == "youtube").where(match_streams.c.hidden.is_(False))
              .where(match_streams.c.last_seen_at >= since).order_by(match_streams.c.starts_at.desc()).limit(300))
     found = await C.rows(query)
@@ -174,13 +230,22 @@ async def trybuna_youtube(pair_id: str, q: str = Query("", max_length=80), actor
         vid = R.s(s.get("video_id"))
         if not vid or vid in seen:
             continue
+        starts = s.get("starts_at")
+        local = starts.astimezone(WARSAW).strftime("%Y-%m-%d %H:%M:%S") if isinstance(starts, datetime) else None
+        # Ten sam filtr czasu co dla Bastionu; transmisja bez godziny startu przechodzi filtr godzin jako "godzina nieznana".
+        if not S.in_range({"date": local, "unscheduled": local is None}, d_from, d_to, t_from, t_to):
+            continue
         seen.add(vid)
-        out.append({"video_id": vid, "url": s.get("url"), "title": s.get("title"), "thumbnail_url": s.get("thumbnail_url"),
-                    "channel": s.get("channel_title"), "starts_at": _iso(s.get("starts_at")), "confidence": s.get("confidence"),
+        out.append({"video_id": vid, "url": s.get("url"), "title": s.get("title"),
+                    "thumbnail_url": s.get("thumbnail_url") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                    "thumbnail_maxres_url": f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg", "duration_s": s.get("duration_s"),
+                    "channel": s.get("channel_title"), "starts_at": _iso(s.get("starts_at")), "published_at": _iso(s.get("starts_at") or s.get("first_seen_at")),
+                    "confidence": s.get("confidence"), "official": s.get("confidence") in ("official", "confirmed"),
                     "zprp_match_id": s.get("match_id")})
         if len(out) >= 20:
             break
-    return {"streams": out, "query": q or None}
+    return {"streams": out, "query": q or None, "range": {"date_from": d_from.isoformat() if d_from else None,
+            "date_to": d_to.isoformat() if d_to else None, "time_from": time_from or None, "time_to": time_to or None}}
 
 
 # ─── Obserwowani ────────────────────────────────────────────────────────────
@@ -387,6 +452,8 @@ async def build_feed(real: Actor, follows: List[Dict[str, Any]], days: int, *, r
     items.sort(key=lambda i: R.s(i.get("date")), reverse=True)
     items = items[:FEED_ITEMS]
     # Gdzie ten mecz już jest w Trybunie moich par.
+    if mz is not None:
+        await S.enrich_media(real, mz.scope, [i["bastion"] for i in items if i.get("bastion")])
     pair_ids = [p["id"] for p in await _my_pairs(real)]
     got = await watched_by_item(pair_ids, [i["bastion"]["bunny_item_id"] for i in items if i.get("bastion")])
     for i in items:
@@ -410,7 +477,8 @@ def _feed_item(card: Mapping[str, Any], zprp_id: Optional[str], refs: List[Dict[
         "followed": [f["id"] for f in follows if T.follow_matches(f, refs or T.clean_referees((game or {}).get("referees") or []))],
         "state": state,  # "video" = jest nagranie, "waiting" = czeka na nagranie
         "bastion": ({"bunny_item_id": int(game["bunny_item_id"]), "url": BR.canonical_game_url(int(game["bunny_item_id"])),
-                     "video_state": game.get("video_state"), "title": game.get("title")} if has_video else None),
+                     "video_state": game.get("video_state"), "title": game.get("title"),
+                     "thumbnail_url": game.get("thumbnail_url"), "duration_s": game.get("duration_s")} if has_video else None),
         "video_state": (game or {}).get("video_state"),
     }
 
@@ -551,6 +619,128 @@ async def calendar(days: int = Query(30, ge=1, le=90), real: Actor = Depends(bas
     items.sort(key=lambda i: (i.get("date") is None, R.s(i.get("date"))))
     return {"items": items, "follows": len(follows), "days": days, "bastion": bastion,
             "unresolved": [f["name"] for f in follows if len(f.get("judge_ids") or []) < len(follow_names(f))]}
+
+
+# ─── Podgląd kasety przed dodaniem ──────────────────────────────────────────
+
+
+class PreviewBody(BaseModel):
+    bunny_item_id: int = Field(ge=1)
+
+
+@router.post("/pairs/{pair_id}/trybuna/preview")
+async def trybuna_preview(pair_id: str, body: PreviewBody, response: Response, real: Actor = Depends(base_actor),
+                          acting: Actor = Depends(mentor_actor)):
+    """Podgląd na miejscu PRZED dodaniem: krótko ważny `embed_url` Bastionu dla kasety, której nie ma jeszcze w żadnym meczu
+    (te same zasady co `POST .../videos/{v}/playback`: `Cache-Control: no-store`, adres nigdy nie jest zapisywany ani logowany,
+    połączenie domyślne potem osobiste prawdziwego użytkownika, błędy w kopercie 409/403/503/429 z `connections`, nigdy 401).
+    Odpowiedź: `{provider, mode:"bunny_embed", embed_url, expires_at, connection_scope, capabilities, duration_s, video_state,
+    bunny_item_id, thumbnail_url}`. Akcja `video` (kto może dodać, może obejrzeć). Do nagrania już dodanego służy `playback`."""
+    from app import mentor_bastion_client as CL
+    from app.mentor_bastion import CAPABILITIES, _client, _playback_failure, _scope_judge, apply_verdict, berr
+
+    response.headers["Cache-Control"] = "no-store"
+    ctx = await C.pair_context(pair_id, acting)
+    C.check(ctx, "video")
+    flags = BR.load_flags()
+    if not flags.enabled:
+        raise berr(404, "BASTION_DISABLED", S.DISABLED_MESSAGE)
+    scopes = BR.candidate_scopes(flags)
+    if not scopes or not flags.configured:
+        raise berr(503, "BASTION_UNAVAILABLE", S.UNCONFIGURED_MESSAGE)
+    client = _client()
+    verdicts: List[Tuple[str, BR.PlaybackVerdict]] = []
+    for scope in scopes:
+        owner = _scope_judge(scope, real)
+        try:
+            reply = await client.playback(scope, owner, body.bunny_item_id)
+        except CL.ConnectorUnavailable:
+            verdicts.append((scope, BR.PlaybackVerdict("unavailable", "BASTION_UNAVAILABLE")))
+            break
+        verdict = BR.classify_playback(reply.status, reply.body)
+        if verdict.kind == "ok" and not BR.embed_url_ok(reply.body.get("embed_url")):
+            verdict = BR.PlaybackVerdict("unavailable", "BASTION_BAD_RESPONSE")
+        await apply_verdict(scope, owner, verdict)
+        if verdict.kind == "ok":
+            return {"provider": BR.PROVIDER, "mode": "bunny_embed", "embed_url": reply.body["embed_url"],
+                    "expires_at": BR.embed_expiry_hint(reply.body.get("expires_at")), "connection_scope": scope,
+                    "capabilities": dict(CAPABILITIES), "duration_s": reply.body.get("duration_s"),
+                    "video_state": reply.body.get("video_state"), "bunny_item_id": body.bunny_item_id,
+                    "thumbnail_url": reply.body.get("thumbnail_url")}
+        verdicts.append((scope, verdict))
+        if verdict.kind in ("rate_limited", "unavailable"):
+            break
+    raise _playback_failure(flags, real, verdicts)
+
+
+# ─── Kalendarz nagrań: mapa dni ─────────────────────────────────────────────
+
+
+def forget_days_cache() -> None:
+    _days_cache.clear()
+
+
+@router.get("/pairs/{pair_id}/trybuna/days")
+async def trybuna_days(pair_id: str, response: Response, from_: str = Query(..., alias="from", max_length=10),
+                       to: str = Query(..., max_length=10), real: Actor = Depends(base_actor), acting: Actor = Depends(mentor_actor)):
+    """Mapa nagrań (kalendarz Trybuny): dla każdego dnia zakresu `{date, with_video, total, followed}`. `total`/`with_video` z Meczoteki
+    (wiersze portalu w tym dniu / z gotowym nagraniem), `followed` = mecze obserwowanych (nominees z portalu i obsada ZPRP, bez
+    podwójnego liczenia). Najwyżej 62 dni; wynik pamiętany 10 min na użytkownika i zakres. `bastion.state` mówi, czy Meczoteka
+    odpowiedziała (inaczej tylko `followed` z ZPRP), `bastion.truncated` - że przegląd urwał się na 10 stronach."""
+    response.headers["Cache-Control"] = "no-store"
+    await C.pair_context(pair_id, acting)
+    d_from, d_to, _, _ = parse_range(from_, to, "", "")
+    if not d_from or not d_to:
+        raise C.err(422, "BAD_DATE", "Podaj from i to w postaci RRRR-MM-DD.")
+    if (d_to - d_from).days + 1 > DAYS_MAX:
+        raise C.err(422, "RANGE_TOO_LONG", f"Kalendarz pokazuje najwyżej {DAYS_MAX} dni naraz.")
+    key = (real.judge_id, d_from, d_to)
+    hit = _days_cache.get(key)
+    if hit and time.monotonic() - hit[0] < DAYS_CACHE_S:
+        return hit[1]
+    follows = await my_follows(real.judge_id)
+    counts: Dict[date, Dict[str, int]] = {}
+    for i in range((d_to - d_from).days + 1):
+        counts[d_from + timedelta(days=i)] = {"with_video": 0, "total": 0, "followed": 0}
+    followed_keys: Dict[date, set] = {d: set() for d in counts}
+    bastion: Dict[str, Any] = {"state": "ok", "truncated": False}
+    mz, state = S._setup(real)
+    games: List[Dict[str, Any]] = []
+    if mz is None:
+        bastion = {"state": state or "unconfigured", "truncated": False}
+    else:
+        try:
+            games, meta = await mz.scan(video="any", d_from=d_from, d_to=d_to)
+            bastion["truncated"] = bool(meta["truncated"])
+        except S._Stop as stop:
+            bastion = {"state": await stop_state(stop), "truncated": False}
+    for g in games:
+        day = S.parse_day(g.get("date"))
+        if day not in counts:
+            continue
+        counts[day]["total"] += 1
+        if g.get("bunny_item_id") and T.feed_state(g.get("video_state")) == "video":
+            counts[day]["with_video"] += 1
+        refs = T.clean_referees(g.get("referees") or [])
+        if any(T.follow_matches(f, refs) for f in follows):
+            followed_keys[day].add(f"b:{g.get('bunny_item_id') or g.get('game_id')}")
+    if follows:
+        zrows = await zprp_rows_for(follows, datetime(d_from.year, d_from.month, d_from.day),
+                                    datetime(d_to.year, d_to.month, d_to.day) + timedelta(days=1))
+        for r in zrows:
+            card = R.card_from_public(r)
+            day = S.card_day(card)
+            if day not in counts:
+                continue
+            twin = next((g for g in games if S.score_game(g, card)["confidence"] >= T.AUTO_MIN), None)
+            followed_keys[day].add(f"b:{twin.get('bunny_item_id') or twin.get('game_id')}" if twin else f"z:{r['match_id']}")
+    for d, keys in followed_keys.items():
+        counts[d]["followed"] = len(keys)
+    out = {"days": [{"date": d.isoformat(), **c} for d, c in sorted(counts.items())], "bastion": bastion}
+    if len(_days_cache) > 300:
+        _days_cache.clear()
+    _days_cache[key] = (time.monotonic(), out)
+    return out
 
 
 # ─── Kolejka „Do obejrzenia" ────────────────────────────────────────────────

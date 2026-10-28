@@ -265,7 +265,7 @@ def shape_game(game: Mapping[str, Any], card: Mapping[str, Any], added: Iterable
     item = int(game["bunny_item_id"])
     keep = ("title", "home", "away", "date", "competition", "code", "score", "video_state", "video_coverage", "duration_s")
     return {"bunny_item_id": item, "url": BR.canonical_game_url(item), **{k: game.get(k) for k in keep},
-            "referees": game.get("referees") if isinstance(game.get("referees"), list) else [],
+            "referees": game.get("referees") if isinstance(game.get("referees"), list) else [], "thumbnail_url": game.get("thumbnail_url"),
             **score_game(game, card), "added": item in set(added)}
 
 
@@ -308,6 +308,44 @@ def has_person(game: Mapping[str, Any], name: Any, role: str = "referee") -> boo
     key = person_key(name)
     return bool(key) and any(person_key(r.get("name")) == key and (r.get("role") or "referee") == role
                              for r in game.get("referees") or [] if isinstance(r, Mapping))
+
+
+#: Skan okresu (filtr dat w Trybunie): strona 50 wierszy, do 10 stron. Czy portal sam filtruje daty - NIEPOTWIERDZONE (próba
+#: `scripts/probe_meczoteka_referee.py`); dopóki `None`, paginujemy i filtrujemy lokalnie. Po potwierdzeniu: ("date_from", "date_to").
+SCAN_PAGE = 50
+SCAN_MAX_PAGES = 10
+PORTAL_DATE_PARAMS: Optional[Tuple[str, str]] = None
+
+
+def parse_hm(value: Any) -> Optional[int]:
+    """"HH:MM" -> minuty od północy (None gdy zły format)."""
+    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", str(value or "").strip())
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+
+def game_minutes(game: Mapping[str, Any]) -> Optional[int]:
+    """Godzina meczu (czas polski) w minutach; None = nieznana (mecz bez terminu albo 00:00:00 przy `unscheduled`)."""
+    raw = str(game.get("date") or "")
+    m = re.search(r"[ T](\d{2}):(\d{2})", raw)
+    if not m or game.get("unscheduled"):
+        return None
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+def in_range(game: Mapping[str, Any], d_from: Optional[date], d_to: Optional[date], t_from: Optional[int], t_to: Optional[int]) -> bool:
+    """Dzień w zakresie (włącznie) i godzina w oknie (okno przez północ: od > do). Godzina nieznana przechodzi filtr godzin."""
+    day = parse_day(game.get("date"))
+    if (d_from or d_to) and day is None:
+        return False
+    if d_from and day < d_from or d_to and day > d_to:
+        return False
+    if t_from is None and t_to is None:
+        return True
+    minutes = game_minutes(game)
+    if minutes is None:
+        return True
+    lo, hi = t_from if t_from is not None else 0, t_to if t_to is not None else 24 * 60 - 1
+    return lo <= minutes <= hi if lo <= hi else (minutes >= lo or minutes <= hi)
 
 
 class _Stop(Exception):
@@ -435,6 +473,122 @@ class Meczoteka:
         games = await self._paged({"referee": name, "referee_param": REFEREE_PARAM, "video": video}, offset)
         return [g for g in games if has_person(g, name, role)]
 
+    async def scan(self, *, q: str = "", referee: str = "", role: str = "referee", video: str = "any",
+                   d_from: Optional[date] = None, d_to: Optional[date] = None, t_from: Optional[int] = None,
+                   t_to: Optional[int] = None, max_pages: int = SCAN_MAX_PAGES) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Przegląd okresu (opcjonalnie z tekstem lub sędzią): strony po 50 (do `max_pages`), filtr dat/godzin lokalnie.
+        Wczesne wyjście, gdy daty wierszy idą malejąco i ostatnia jest już przed początkiem zakresu. `meta.truncated` = były
+        jeszcze strony, a limit stron się skończył (wynik niepełny)."""
+        extra: Dict[str, Any] = {"video": video, "limit": SCAN_PAGE}
+        if referee:
+            extra.update(referee=referee, referee_param=REFEREE_PARAM)
+        elif q:
+            extra["q"] = q
+        if PORTAL_DATE_PARAMS and (d_from or d_to):
+            extra["portal"] = "&".join(f"{k}={v}" for k, v in ((PORTAL_DATE_PARAMS[0], d_from), (PORTAL_DATE_PARAMS[1], d_to)) if v)
+        rows: List[Dict[str, Any]] = []
+        days: List[date] = []
+        pages, more, truncated = 0, False, False
+        for page in range(max(1, max_pages)):
+            games, more = await self._cached({**extra, "offset": page * SCAN_PAGE} if page else dict(extra))
+            pages += 1
+            rows += games
+            days += [d for d in (parse_day(g.get("date")) for g in games) if d]
+            if not more or not games:
+                more = False
+                break
+            descending = len(days) > 1 and all(days[i] >= days[i + 1] for i in range(len(days) - 1))
+            if descending and d_from and days and days[-1] < d_from:
+                more = False  # reszta jest starsza niż zakres
+                break
+        truncated = bool(more)
+        out = [g for g in rows if in_range(g, d_from, d_to, t_from, t_to) and (not referee or has_person(g, referee, role))]
+        return out, {"pages": pages, "truncated": truncated, "local_filter": True}
+
+
+
+#: Miniatury i długość kaset (z game-context bez embedu): pamięć 6 h, brak wyniku 10 min; najwyżej 12 kaset na odpowiedź.
+THUMB_TTL_S = 6 * 3600.0
+THUMB_MISS_TTL_S = 600.0
+THUMB_LIMIT = 12
+THUMB_CONCURRENCY = 4
+THUMB_DEADLINE_S = 12.0
+_media_cache: Dict[int, Tuple[float, Optional[str], Optional[int]]] = {}
+
+
+def forget_media_cache() -> None:
+    _media_cache.clear()
+
+
+def _media_hit(item: int, now: float) -> Optional[Tuple[Optional[str], Optional[int]]]:
+    hit = _media_cache.get(item)
+    if hit is None:
+        return None
+    ttl = THUMB_TTL_S if (hit[1] or hit[2]) else THUMB_MISS_TTL_S
+    if now - hit[0] >= ttl:
+        _media_cache.pop(item, None)
+        return None
+    return hit[1], hit[2]
+
+
+async def enrich_media(real: Actor, scope: Optional[str], games: Iterable[Dict[str, Any]], limit: int = THUMB_LIMIT) -> None:
+    """Dokłada `thumbnail_url` i `duration_s` do słowników z `bunny_item_id` (na miejscu). Źródło: miniatura z game-context Bastionu
+    (connector `/playback?include_embed=false`, ta sama droga co bilet meczu), pamięć 6 h. Brak danych, brak połączenia, limit czasu
+    albo błąd = zostaje null; funkcja nigdy nie rzuca."""
+    try:
+        from app import mentor_bastion_client as CL
+        from app.mentor_bastion import _client, _scope_judge
+
+        targets = [g for g in games if isinstance(g, dict) and g.get("bunny_item_id")][:max(0, limit)]
+        now = time.monotonic()
+        todo: List[int] = []
+        for g in targets:
+            item = int(g["bunny_item_id"])
+            hit = _media_hit(item, now)
+            if hit is not None:
+                g["thumbnail_url"] = g.get("thumbnail_url") or hit[0]
+                g["duration_s"] = g.get("duration_s") or hit[1]
+            elif item not in todo:
+                todo.append(item)
+        flags = BR.load_flags()
+        if not todo or not flags.enabled or not flags.configured:
+            return
+        scopes = [scope] if scope else BR.candidate_scopes(flags)
+        client = _client()
+        gate = asyncio.Semaphore(THUMB_CONCURRENCY)
+
+        async def one(item: int) -> None:
+            async with gate:
+                found: Tuple[Optional[str], Optional[int]] = (None, None)
+                for sc in scopes:
+                    try:
+                        reply = await client.playback(sc, _scope_judge(sc, real), item, include_embed=False)
+                    except CL.ConnectorUnavailable:
+                        break
+                    verdict = BR.classify_playback(reply.status, reply.body)
+                    if verdict.kind == "ok":
+                        thumb = reply.body.get("thumbnail_url")
+                        dur = reply.body.get("duration_s")
+                        found = (thumb if isinstance(thumb, str) and thumb.startswith("https://") else None,
+                                 int(dur) if isinstance(dur, (int, float)) and not isinstance(dur, bool) and dur > 0 else None)
+                        break
+                    if verdict.kind in ("rate_limited", "unavailable"):
+                        break
+                if len(_media_cache) > 2000:
+                    _media_cache.clear()
+                _media_cache[item] = (time.monotonic(), found[0], found[1])
+
+        try:
+            await asyncio.wait_for(asyncio.gather(*(one(i) for i in todo)), THUMB_DEADLINE_S)
+        except asyncio.TimeoutError:
+            pass
+        for g in targets:
+            hit = _media_hit(int(g["bunny_item_id"]), time.monotonic())
+            if hit is not None:
+                g["thumbnail_url"] = g.get("thumbnail_url") or hit[0]
+                g["duration_s"] = g.get("duration_s") or hit[1]
+    except Exception:  # noqa: BLE001 - miniatura to dodatek
+        C.logger.warning("trybuna: miniatury kaset nieudane", exc_info=True)
 
 
 def _setup(real: Actor) -> Tuple[Optional[Meczoteka], Optional[str]]:
@@ -514,6 +668,7 @@ async def bastion_search(pair_id: str, match_id: str, response: Response, body: 
         kind = CODE_KIND.get(exc.detail.get("code"), "unavailable")
         exc.detail["message"] = STATE_MESSAGES[kind]
         raise exc from None
+    await enrich_media(real, mz.scope, games)
     return {"games": games, "best": best_of(games), "queries": used, "connection_scope": mz.scope,
             "match": R.slim_match(card)}
 
@@ -536,7 +691,8 @@ def _youtube_proposal(stream: Mapping[str, Any]) -> Dict[str, Any]:
 
 def _bastion_proposal(game: Mapping[str, Any]) -> Dict[str, Any]:
     return {"source": "bastion", "key": f"bastion:{game['bunny_item_id']}", "url": game["url"], "title": game.get("title"),
-            "confidence": game["confidence"], "sure": game["sure"], "game": dict(game)}
+            "confidence": game["confidence"], "sure": game["sure"], "game": dict(game),
+            "thumbnail_url": game.get("thumbnail_url"), "duration_s": game.get("duration_s")}
 
 
 def bastion_state_message(state: str) -> str:
@@ -642,6 +798,8 @@ async def season_proposals(pair_id: str, response: Response, body: Optional[Seas
                 bastion["partial"] = True
                 bastion["skipped"] = len(skipped)
 
+    if found:
+        await enrich_media(real, bastion.get("scope"), list(found.values()))
     items = []
     for card in cards:
         mid = R.s(card["match_id"])

@@ -869,3 +869,36 @@ def test_nominees_groups_real_shape_names_and_debug_only_sample():
     assert r["raw_sample"][0]["nominees"][0]["names"][1] == "RAWICKI Jakub"
     plain = normalize_games({"items": [row]}, 5)
     assert not {"raw_sample", "row_keys", "rows_raw", "rows_kept"} & set(plain)
+
+
+def test_portal_date_params_whitelist_and_forwarding():
+    import asyncio
+    from connector.bastion import fetch_games, parse_portal_params
+    assert parse_portal_params("date_from=2026-10-01&date_to=2026-10-31") == {"date_from": "2026-10-01", "date_to": "2026-10-31"}
+    assert parse_portal_params("") == {} and parse_portal_params("evil=2026-10-01") is None and parse_portal_params("date=x") is None
+    sent = {}
+
+    class Resp:
+        status = 200
+
+        async def json(self):
+            return {"items": []}
+
+    class Req:
+        async def get(self, url, params=None, **kw):
+            sent.update(params)
+            return Resp()
+
+    asyncio.run(fetch_games(Req(), "https://x", "", 50, 0, None, "any", "", "q", {"since": "2026-10-01"}))
+    assert sent["since"] == "2026-10-01" and sent["limit"] == "50"
+
+
+def test_video_extras_thumbnail_host_whitelist_and_duration():
+    from connector.bastion import classify
+    sfx = ["mediadelivery.net", "b-cdn.net"]
+    ok = classify(200, {"video": {"state": "READY", "embed_url": "https://iframe.mediadelivery.net/embed/1/x", "thumbnail": "https://vz-1.b-cdn.net/x/thumbnail.jpg",
+                                  "duration": 3600.4}}, sfx)
+    assert ok.thumbnail_url == "https://vz-1.b-cdn.net/x/thumbnail.jpg" and ok.duration_s == 3600 and "thumbnail" in ok.video_keys
+    bad = classify(200, {"video": {"embed_url": "https://iframe.mediadelivery.net/embed/1/x", "thumbnail": "https://evil.example/t.jpg", "duration": -4}}, sfx)
+    assert bad.thumbnail_url is None and bad.duration_s is None
+    assert classify(200, {"video": {}}, sfx).thumbnail_url is None

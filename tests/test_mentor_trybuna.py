@@ -491,3 +491,101 @@ def test_kalendarz_ma_przyszle_i_bez_terminu_a_kanal_ich_nie(env, monkeypatch):
     assert "m2" in [i["zprp_match_id"] for i in cal["items"]]
     homes = [i["home"] for i in feed["items"]]
     assert "Stary" in homes and "X" not in homes and "Z" not in homes
+
+
+# ─── Filtr czasu i mapa dni ─────────────────────────────────────────────────
+
+
+def test_filtr_dat_i_godzin_reguly(env):
+    from datetime import date
+
+    S = importlib.import_module("app.mentor_bastion_search")
+    assert S.parse_hm("18:30") == 1110 and S.parse_hm("7:05") == 425 and S.parse_hm("25:00") is None and S.parse_hm("x") is None
+    g = {"date": "2026-10-12 18:30:00"}
+    unknown = {"date": "2026-10-12 00:00:00", "unscheduled": True}
+    d = date(2026, 10, 12)
+    assert S.in_range(g, d, d, S.parse_hm("18:00"), S.parse_hm("19:00"))
+    assert not S.in_range(g, d, d, S.parse_hm("19:00"), None)
+    assert S.in_range(unknown, d, d, S.parse_hm("19:00"), S.parse_hm("20:00"))  # godzina nieznana przechodzi filtr godzin
+    assert not S.in_range(g, date(2026, 10, 13), None, None, None) and not S.in_range({"date": None}, d, d, None, None)
+    night = {"date": "2026-10-12 23:30:00"}
+    assert S.in_range(night, d, d, S.parse_hm("22:00"), S.parse_hm("02:00")) and not S.in_range(g, d, d, S.parse_hm("22:00"), S.parse_hm("02:00"))
+
+
+def test_szukanie_z_zakresem_dat_filtruje_lokalnie_i_konczy_wczesnie(env, monkeypatch):
+    async def go():
+        actor = await env.actor(JUDGES[0])
+        ref = [{"name": "Jakub Rawicki", "role": "referee"}]
+        page1 = [
+            {"bunny_item_id": 1, "date": "2026-10-12 18:00:00", "referees": ref, "home": "A", "away": "B"},
+            {"bunny_item_id": 2, "date": "2026-10-11 12:00:00", "referees": ref},
+            {"bunny_item_id": 3, "date": "2026-10-11 12:00:00", "referees": [{"name": "Ktoś Inny", "role": "referee"}]},
+            {"bunny_item_id": None, "game_id": 9, "date": "2026-10-10 00:00:00", "unscheduled": True, "referees": ref},
+            {"bunny_item_id": 4, "date": "2026-10-05 12:00:00", "referees": ref},  # przed zakresem
+        ]
+        S, client, mz = meczoteka(env, [(200, {"games": page1, "has_more": True}), (200, {"games": [{"bunny_item_id": 5, "date": "2026-09-01 12:00:00", "referees": ref}], "has_more": False})])
+        monkeypatch.setattr(env.trybuna_feed.S, "_setup", lambda real: (mz, None))
+        SB = env.trybuna_feed.SearchBody
+        out = await env.trybuna_feed.trybuna_search(PAIR, SB(referee="Rawicki Jakub", date_from="2026-10-10", date_to="2026-10-12", time_from="17:00", time_to="19:00"),
+                                                    _Resp(), actor, actor)
+        bad = await code_of(env.trybuna_feed.trybuna_search(PAIR, SB(date_from="2026-10-12", date_to="2026-10-10"), _Resp(), actor, actor))
+        bad_time = await code_of(env.trybuna_feed.trybuna_search(PAIR, SB(date_from="2026-10-12", time_from="99:99"), _Resp(), actor, actor))
+        return out, len(client.calls), bad, bad_time, client.calls[0]
+
+    out, calls, bad, bad_time, first = env.run(go)
+    assert [g["bunny_item_id"] for g in out["games"]] == [1, None]  # 2: poza godzinami; 3: inny sędzia; 4: poza zakresem; bez nagrania zostaje
+    assert calls == 1 and first["limit"] == 50 and out["range"]["pages"] == 1 and out["range"]["truncated"] is False  # wczesne wyjście
+    assert out["next_offset"] is None and out["range"]["local_filter"] is True
+    assert bad == (422, "BAD_DATE") and bad_time == (422, "BAD_TIME")
+
+
+def test_mapa_dni_liczy_nagrania_obserwowanych_i_pamieta_10_minut(env, monkeypatch):
+    async def go():
+        actor = await env.actor(JUDGES[0])
+        await env.trybuna_feed.follow(env.trybuna_feed.FollowBody(kind="referee", name="Piotr Lis"), actor)
+        ref = [{"name": "Piotr Lis", "role": "referee"}]
+        games = [
+            {"bunny_item_id": 1, "date": "2026-10-12 18:00:00", "video_state": "READY", "referees": ref, "home": "A", "away": "B"},
+            {"bunny_item_id": 2, "date": "2026-10-12 20:00:00", "video_state": "READY", "referees": []},
+            {"bunny_item_id": None, "game_id": 3, "date": "2026-10-13 17:00:00", "video_state": "NONE", "referees": ref},
+            {"bunny_item_id": 4, "date": "2026-10-20 17:00:00", "video_state": "READY", "referees": []},  # poza zakresem
+        ]
+        S, client, mz = meczoteka(env, [(200, {"games": games, "has_more": False})])
+        monkeypatch.setattr(env.trybuna_feed.S, "_setup", lambda real: (mz, None))
+        env.trybuna_feed.forget_days_cache()
+        first = await env.trybuna_feed.trybuna_days(PAIR, _Resp(), "2026-10-12", "2026-10-14", actor, actor)
+        again = await env.trybuna_feed.trybuna_days(PAIR, _Resp(), "2026-10-12", "2026-10-14", actor, actor)
+        long = await code_of(env.trybuna_feed.trybuna_days(PAIR, _Resp(), "2026-01-01", "2026-12-31", actor, actor))
+        return first, again, len(client.calls), long
+
+    first, again, calls, long = env.run(go)
+    by = {d["date"]: d for d in first["days"]}
+    assert list(by) == ["2026-10-12", "2026-10-13", "2026-10-14"]
+    assert (by["2026-10-12"]["total"], by["2026-10-12"]["with_video"], by["2026-10-12"]["followed"]) == (2, 2, 1)
+    assert (by["2026-10-13"]["total"], by["2026-10-13"]["with_video"], by["2026-10-13"]["followed"]) == (1, 0, 1)
+    assert (by["2026-10-14"]["total"], by["2026-10-14"]["followed"]) == (0, 0)
+    assert first["bastion"]["state"] == "ok" and again is first and calls == 1 and long == (422, "RANGE_TOO_LONG")
+
+
+def test_youtube_wyniki_maja_miniature_czas_i_oficjalnosc_oraz_filtr_dat(env):
+    from datetime import timedelta
+
+    async def go():
+        actor = await env.actor(JUDGES[0])
+        start = datetime.now(timezone.utc) - timedelta(days=3)
+        await env.ins("match_streams", match_id="m1", url="https://www.youtube.com/watch?v=abcdefghijk", platform="youtube", video_id="abcdefghijk",
+                      title="SPR Gliwice - KS Opole", state="vod", starts_at=start, duration_s=5400, confidence="official", source="portal",
+                      channel_title="ZPRP TV", hidden=False)
+        from app.streams.rules import WARSAW
+
+        day = start.astimezone(WARSAW).date().isoformat()
+        F = env.trybuna_feed
+        hit = await F.trybuna_youtube(PAIR, "Gliwice", day, day, "", "", actor)
+        miss = await F.trybuna_youtube(PAIR, "Gliwice", "2020-01-01", "2020-01-02", "", "", actor)
+        return hit, miss
+
+    hit, miss = env.run(go)
+    s = hit["streams"][0]
+    assert s["thumbnail_url"] == "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg" and s["thumbnail_maxres_url"].endswith("maxresdefault.jpg")
+    assert s["duration_s"] == 5400 and s["official"] is True and s["channel"] == "ZPRP TV" and s["published_at"]
+    assert miss["streams"] == []

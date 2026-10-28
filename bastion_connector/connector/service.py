@@ -229,12 +229,13 @@ class Service:
             await req.dispose()
 
     async def games_search(self, scope: str, judge_id: str | None, q: str, limit: int, offset: int,
-                           season_id: int | None, video: str, referee: str = "", referee_param: str = "q", debug: bool = False) -> dict:
+                           season_id: int | None, video: str, referee: str = "", referee_param: str = "q", debug: bool = False,
+                           portal: dict | None = None) -> dict:
         """Wyszukiwanie w Meczotece (GET /api/games) sesja tego polaczenia. Tylko odczyt."""
         key = conn_key_for(scope, judge_id)
         req, state, meta = await self._with_state_request(key)
         try:
-            code, http, body = await fetch_games(req, self.s.portal_base_url, q, limit, offset, season_id, video, referee, referee_param)
+            code, http, body = await fetch_games(req, self.s.portal_base_url, q, limit, offset, season_id, video, referee, referee_param, portal)
             if code == "OK":
                 await self._persist_if_changed(req, key, state, meta)
                 return {**normalize_games(body, limit, debug), "connection": key, "limit": limit, "offset": offset}
