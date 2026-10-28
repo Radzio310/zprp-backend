@@ -720,6 +720,7 @@ def test_ankieta_wyniki_po_glosie_mentor_po_obu_glosach_sporne(env):
     assert before["total"] == 0 and before["mine"] is None and before["counts"] is None and before["voters"] is None and before["reveal"] is False
     assert mentor_first["mine"] == "differ" and mentor_first["counts"]["differ"] == 1 and mentor_first["voters"][0]["is_mentor"] is True
     assert mentor_first["my_reason"] == "Faul ataku" and mentor_first["my_rule_ref"] == "8:5b" and before["my_reason"] is None
+    assert before["mentor_voted"] is False and hidden["mentor_voted"] is True  # sam fakt, bez treści głosu
     assert hidden["mentor_vote"] is None and hidden["reveal"] is False and hidden["total"] == 1 and hidden["counts"] == {"agree": 1, "differ": 0, "unsure": 0}
     assert bad_reason[1] == "REASON_ONLY_DIFFER" and bad_ref[1] == "BAD_RULE_REF"
     assert revealed["reveal"] is True and revealed["mentor_vote"]["vote"] == "differ" and revealed["mentor_vote"]["rule_ref"] == "8:5b"

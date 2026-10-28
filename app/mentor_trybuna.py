@@ -1145,6 +1145,7 @@ async def opinions_payload(ctx: Dict[str, Any], thread_id: str, me: str) -> Dict
     my_row = next((r for r in found if r["judge_id"] == R.s(me)), None)
     out: Dict[str, Any] = {"total": len(visible), "mine": mine, "my_reason": (my_row or {}).get("reason"),
                            "my_rule_ref": (my_row or {}).get("rule_ref"), "counts": None, "voters": None, "mentor_vote": mentor_vote,
+                           "mentor_voted": mentor_row is not None,
                            "reveal": reveal, "labels": dict(T.VOTE_LABELS), "disputed": _disputed(found, mentor_ids)}
     if show:
         out["counts"] = {v: sum(1 for r in visible if r["vote"] == v) for v in T.VOTES}
