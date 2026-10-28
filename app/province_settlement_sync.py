@@ -31,7 +31,7 @@ from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 from httpx import AsyncClient
-from sqlalchemy import and_, delete, insert, select, update
+from sqlalchemy import and_, delete, insert, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import settlement_origin as O
@@ -60,6 +60,16 @@ from app.deps import get_settings
 from app import national_lookup_rules as NL
 from app.national_place_rules import province_label, province_slug
 from app.national_distances import load_national_pairs
+from app import settlement_distances as SD
+from app.settlement_sync_rules import (
+    STORE_BATCH,
+    VENUE_EMPTY_RETRY_DAYS,
+    VENUE_TTL_DAYS,
+    classify_failures,
+    failure_alive,
+    upsert_batches,
+    venue_needs_refresh,
+)
 from app.settlement_distances import (
     DistanceIndex,
     VersionedDistanceIndex,
@@ -650,9 +660,8 @@ async def _store_judges(province: str, judges: dict[str, dict]) -> None:
 #: Ile zapytan o hale naraz. Publiczne API rozgrywek to jedna maszyna zwiazku.
 VENUE_CONCURRENCY = 8
 
-#: Po tylu dniach pytamy o hale drugi raz - ale TYLKO przy meczach, ktore
-#: dopiero maja sie odbyc. Hali rozegranego meczu nikt juz nie zmieni.
-VENUE_TTL_DAYS = 14
+# Terminy odswiezania hal (VENUE_TTL_DAYS, VENUE_EMPTY_RETRY_DAYS) i decyzja
+# `venue_needs_refresh` siedza w settlement_sync_rules - tam sa testy.
 
 
 async def _resolve_venues(
@@ -689,21 +698,7 @@ async def _resolve_venues(
 
     stale: list[str] = []
     for match_id, match_at in wanted.items():
-        hit = cached.get(match_id)
-        if not hit:
-            stale.append(match_id)
-            continue
-        if not _s(hit.get("city")):
-            # Wpis bez miasta pytamy ponownie tylko wtedy, gdy zapisano go PRZED
-            # meczem (API moglo jeszcze nie znac hali). Rozegranego meczu, o ktory
-            # pytalismy juz po fakcie, nie pytamy w kolko.
-            stamp = hit.get("fetched_at")
-            if stamp is None or match_at is None or stamp < match_at:
-                stale.append(match_id)
-            continue
-        fetched_at = hit.get("fetched_at")
-        upcoming = match_at is None or match_at >= now - timedelta(days=1)
-        if upcoming and (fetched_at is None or (now - fetched_at) > timedelta(days=VENUE_TTL_DAYS)):
+        if venue_needs_refresh(cached.get(match_id), match_at, now):
             stale.append(match_id)
 
     if stale:
@@ -734,7 +729,13 @@ async def _resolve_venues(
                     await remember_officials(officials, match_id=match_id, now=now)
                 venue = venue_from_payload(payload)
                 if not (venue["city"] or venue["hall"]):
-                    return
+                    # API dalej nie zna hali. Po meczu zapamietujemy PUSTY wpis,
+                    # zeby nie pytac przy kazdym odswiezeniu; przed meczem hala
+                    # jeszcze moze sie pojawic, wiec nie zapisujemy nic.
+                    match_at = wanted.get(match_id)
+                    if match_at is None or match_at >= now:
+                        return
+                    venue = {"city": "", "hall": "", "street": "", "number": ""}
                 cached[match_id] = {**venue, "match_id": match_id, "fetched_at": now}
                 statement = pg_insert(zprp_match_venues).values(
                     match_id=match_id,
@@ -766,6 +767,12 @@ async def _resolve_venues(
 # Zapis
 # ---------------------------------------------------------------------------
 
+async def _upsert_matches(values_list: list[dict]) -> None:
+    await upsert_batches(
+        database, province_settlement_matches, values_list, ["province", "judge_id", "match_key"]
+    )
+
+
 async def _store(
     province: str,
     rows: list[dict],
@@ -783,6 +790,7 @@ async def _store(
     """
     now = _now()
     seen: set[tuple[str, str]] = set()
+    batch: dict[tuple[str, str], dict] = {}
 
     for row in rows:
         judge = judges.get(row["judge_id"]) or {}
@@ -809,17 +817,9 @@ async def _store(
             "last_seen_at": now,
             "updated_at": now,
         }
-        statement = pg_insert(province_settlement_matches).values(**values)
-        await database.execute(
-            statement.on_conflict_do_update(
-                index_elements=[
-                    province_settlement_matches.c.province,
-                    province_settlement_matches.c.judge_id,
-                    province_settlement_matches.c.match_key,
-                ],
-                set_={k: v for k, v in values.items() if k not in ("province", "judge_id", "match_key")},
-            )
-        )
+        # Jeden wiersz na klucz w paczce (ON CONFLICT nie znosi dwoch trafien w ten
+        # sam wiersz); pozniejszy wygrywa - tak samo jak przy zapisie po jednym.
+        batch[(row["judge_id"], row["match_key"])] = values
         seen.add((row["judge_id"], row["match_key"]))
 
     # Obsady, ktorych ten przebieg NIE widzial, gasna. Nie kasujemy ich: mecz
@@ -836,7 +836,7 @@ async def _store(
             )
         )
     )
-    dropped = 0
+    to_drop: list[tuple[str, str]] = []
     for row in stale:
         key = (_s(row["judge_id"]), _s(row["match_key"]))
         if key in seen:
@@ -844,19 +844,28 @@ async def _store(
         # Sezon, ktorego ten przebieg nie pobieral - nie jego sprawa.
         if not in_scope(row["match_at"], scope, current=current):
             continue
-        await database.execute(
-            update(province_settlement_matches)
-            .where(
-                and_(
-                    province_settlement_matches.c.province == province,
-                    province_settlement_matches.c.judge_id == key[0],
-                    province_settlement_matches.c.match_key == key[1],
+        to_drop.append(key)
+
+    # Zapis paczkami w JEDNEJ transakcji: kilka tysiecy wierszy to kilkanascie
+    # zapytan zamiast kilku tysiecy, a przerwany przebieg nie zostawia pol-zapisu.
+    async with database.transaction():
+        await _upsert_matches(list(batch.values()))
+        for start in range(0, len(to_drop), STORE_BATCH):
+            chunk = to_drop[start : start + STORE_BATCH]
+            await database.execute(
+                update(province_settlement_matches)
+                .where(
+                    and_(
+                        province_settlement_matches.c.province == province,
+                        tuple_(
+                            province_settlement_matches.c.judge_id,
+                            province_settlement_matches.c.match_key,
+                        ).in_(chunk),
+                    )
                 )
+                .values(active=False, updated_at=now)
             )
-            .values(active=False, updated_at=now)
-        )
-        dropped += 1
-    return dropped
+    return len(to_drop)
 
 
 # ---------------------------------------------------------------------------
@@ -1414,6 +1423,16 @@ async def refresh_province(
                 # (jedno ponowne pomiary); km zostają, jeśli wynik ten sam.
                 have_shapes = await _google_shape_keys(region_slug)
                 cache = {k: v for k, v in memory.items() if k in have_shapes}
+                # Porazki pomiaru pamietane z terminem waznosci: para bez wyniku
+                # (7 dni) i para z km bez geometrii (30 dni) nie wraca do Google
+                # przy kazdym odswiezeniu.
+                started = _now()
+                live_failures = await _failure_memory(region_slug, started)
+                for fkey, kind in live_failures.items():
+                    if kind == "noshape" and fkey in memory:
+                        cache[fkey] = memory[fkey]
+                    elif kind == "nokm" and fkey not in memory:
+                        cache[fkey] = None
                 before = set(cache)
                 shapes: dict = {}
                 resolved = await resolve_distances(
@@ -1435,6 +1454,11 @@ async def refresh_province(
                     {k: v for k, v in cache.items() if k not in before and v is not None},
                     shapes,
                 )
+                failed, healed = classify_failures(
+                    cache, before, shapes, google_on=bool(SD.GOOGLE_MAPS_API_KEY)
+                )
+                if failed or healed:
+                    await _failure_save(region_slug, failed, healed, started)
                 for position, home, city in google_rows:
                     hit = resolved.get((home, city))
                     if hit is not None:
@@ -1607,6 +1631,47 @@ async def _google_shape_keys(region_slug: str) -> set:
     return {
         (r["from_key"][: -len(suffix)], r["to_key"]) for r in rows if r["from_key"].endswith(suffix)
     }
+
+
+async def _failure_memory(region_slug: str, now: datetime) -> dict:
+    """Zywe porazki pomiaru okregu: {(dom, hala): "nokm" | "noshape"}."""
+    from app.db import settlement_pair_failures as F
+
+    try:
+        rows = await database.fetch_all(select(F.c.from_key, F.c.to_key, F.c.kind, F.c.checked_at))
+    except Exception:
+        return {}
+    suffix = f"|{region_slug}"
+    return {
+        (r["from_key"][: -len(suffix)], r["to_key"]): r["kind"]
+        for r in rows
+        if r["from_key"].endswith(suffix)
+        and r["from_key"][: -len(suffix)] not in REMEASURE_ORIGINS
+        and failure_alive(r["kind"], r["checked_at"], now)
+    }
+
+
+async def _failure_save(region_slug: str, failed: dict, healed: set, now: datetime) -> None:
+    from app.db import settlement_pair_failures as F
+
+    try:
+        async with database.transaction():
+            await upsert_batches(
+                database,
+                F,
+                [
+                    {"from_key": f"{o}|{region_slug}", "to_key": d, "kind": kind, "checked_at": now}
+                    for (o, d), kind in failed.items()
+                ],
+                ["from_key", "to_key"],
+            )
+            keys = [(f"{o}|{region_slug}", d) for (o, d) in healed]
+            for start in range(0, len(keys), STORE_BATCH):
+                await database.execute(
+                    delete(F).where(tuple_(F.c.from_key, F.c.to_key).in_(keys[start : start + STORE_BATCH]))
+                )
+    except Exception as exc:
+        logger.debug("[settlement] pamięć porażek: %s", exc)
 
 
 async def last_run(province: str) -> Optional[dict]:

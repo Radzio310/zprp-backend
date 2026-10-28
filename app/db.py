@@ -1288,6 +1288,20 @@ city_route_shapes = Table(
 )
 
 
+# Pamięć porażek pomiaru Google (rozliczenia okręgu). Para, dla której Google nie
+# dał wyniku ("nokm") albo dał km bez geometrii ("noshape"), nie jest mierzona od
+# nowa przy każdym odświeżeniu - ważność liczy kod (7 i 30 dni). Klucze jak w
+# `city_distances` (dom|województwo, hala z adresem).
+settlement_pair_failures = Table(
+    "settlement_pair_failures",
+    metadata,
+    Column("from_key", String, primary_key=True),
+    Column("to_key", String, primary_key=True),
+    Column("kind", String, nullable=False),          # "nokm" | "noshape"
+    Column("checked_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+
 # 18.1f) Wygenerowane dokumenty - numeracja SL/01/2026/1
 #
 # Numer musi być niepowtarzalny w obrębie okręgu, miesiąca i rodzaju dokumentu,

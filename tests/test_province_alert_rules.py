@@ -214,9 +214,16 @@ def test_alert_routes_require_token():
 
 def test_refusal_reuses_settlements_permission(monkeypatch):
     import asyncio
+    import importlib
 
-    from app import province_alerts, province_panel_guard
+    from app import province_alerts
     from app.province_panel_access import VipRecord
+
+    # `_refusal` robi `from app.province_panel_guard import _lookup`, czyli bierze
+    # modul z sys.modules. `from app import province_panel_guard` bierze atrybut
+    # pakietu `app` - po testach, ktore podmieniaja moduly, to dwa rozne obiekty,
+    # i monkeypatch lapal ten nieuzywany (wtedy szlo prawdziwe zapytanie do bazy).
+    province_panel_guard = importlib.import_module("app.province_panel_guard")
 
     async def lookup(payload):
         return False, VipRecord(username="vip", province="ŚLĄSKIE", permissions={"assignments": True})
