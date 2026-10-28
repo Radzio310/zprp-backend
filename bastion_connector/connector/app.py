@@ -204,6 +204,20 @@ async def clip_download_url(remote_id: str, scope: str, judge_id: str | None = N
     return JSONResponse(await svc.clip_download_url(scope, judge_id, _clip_id(remote_id)), headers={"Cache-Control": "no-store"})
 
 
+@app.get("/games/search", dependencies=[Depends(auth)])
+async def games_search(scope: str, q: str = "", judge_id: str | None = None, limit: int = 20, offset: int = 0,
+                       season_id: int | None = None, video: str = "with"):
+    """Meczoteka: lista meczow z nagraniem (bunny_item_id) pasujacych do tekstu (druzyny/kod/data). Tylko odczyt."""
+    _scope(scope, judge_id)
+    q = q.strip()
+    if len(q) > 80 or any(ord(c) < 32 for c in q):
+        raise ConnectorError("BAD_QUERY", 400)
+    if not 1 <= limit <= 50 or not 0 <= offset <= 5000 or video not in ("with", "without", "any"):
+        raise ConnectorError("BAD_PARAMS", 400)
+    res = await svc.games_search(scope, judge_id, q, limit, offset, season_id, video)
+    return JSONResponse(res, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/playback", dependencies=[Depends(auth)])
 async def playback(scope: str, bunny_item_id: int | None = None, game_url: str | None = None,
                    judge_id: str | None = None, include_embed: bool = True):

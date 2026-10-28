@@ -57,6 +57,7 @@ Wszystkie z `Authorization: Bearer BASTION_CONNECTOR_TOKEN`, poza WSS.
 | `POST /attempts` `{scope, judge_id, probe_bunny_item_id?}` | tworzy próbę, zwraca `id`, `ticket`, `ws_path` |
 | `GET /attempts/{id}`, `POST .../cancel`, `POST .../ticket` | stan, anulowanie, nowy bilet |
 | `WSS /ws/login/{id}` | klatki JPEG (binarne) + wejście (JSON), bilet w 1. wiadomości |
+| `GET /games/search?scope&judge_id&q&limit&offset&season_id&video` | Meczoteka: portal `GET /api/games` sesją (publiczny game_library.js: items[{bunny_item_id, game_code, date, home_team, away_team, type_name, series, score{full_home,full_away}, video_state, video_coverage}], paging{total,has_more}); zwraca `{games:[{bunny_item_id,title,home,away,date,competition,code,score,video_state,video_coverage,thumbnail:null,duration_s:null}],total,has_more}`; kształt z JS, do potwierdzenia na żywo (/test, karta M) |
 | `GET /playback?scope&judge_id&bunny_item_id` (lub `game_url`) | game-context z zapisanej sesji, `embed_url` |
 | `GET /connections/status`, `DELETE /connections` | metadane (bez sekretów), usunięcie stanu |
 | `POST /probe/clip` `{scope, judge_id, bunny_item_id, start_s, end_s}` | P8: jedno zlecenie cięcia (prywatny klip), zwraca zdalne `remote_id` i kod; 202 = `needs_reconciliation` |

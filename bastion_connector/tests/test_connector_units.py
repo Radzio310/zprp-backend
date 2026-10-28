@@ -793,3 +793,29 @@ def test_summarize_match_whitelist_and_shapes():
     assert summarize_match({}) == {} and summarize_match({"match": "x"}) == {}
     r = classify(200, {"video": {"state": "READY"}, "match": {"home": "A"}}, ["mediadelivery.net"])
     assert r.match["home"] == "A" and r.embed_url is None
+
+
+# ---------- Meczoteka /api/games ----------
+def test_normalize_games_shape_and_skips_unmatched():
+    from connector.bastion import normalize_games
+    body = {"items": [
+        {"id": 1, "bunny_item_id": 5632, "game_code": "LCM/32", "date": "2026-10-04 17:00", "home_team": "Orlen Wisla",
+         "away_team": "Industria", "type_name": "Liga Centralna", "score": {"full_home": 30, "full_away": 28},
+         "video_state": "READY", "video_coverage": 2},
+        {"id": 2, "bunny_item_id": None, "home_team": "A", "away_team": "B"},
+        "smiec", {"bunny_item_id": "77", "home_team": "X"},
+    ], "paging": {"total": 120, "has_more": True}}
+    r = normalize_games(body, 10)
+    assert [g["bunny_item_id"] for g in r["games"]] == [5632, 77]
+    g = r["games"][0]
+    assert g["home"] == "Orlen Wisla" and g["code"] == "LCM/32" and g["score"] == "30:28"
+    assert g["competition"] == "Liga Centralna" and g["title"] == "Orlen Wisla - Industria - LCM/32"
+    assert r["total"] == 120 and r["has_more"] is True
+    assert r["games"][1]["title"] == "X"
+
+
+def test_normalize_games_limit_and_garbage():
+    from connector.bastion import normalize_games
+    assert normalize_games(None, 5) == {"games": [], "total": None, "has_more": False}
+    body = {"items": [{"bunny_item_id": i} for i in range(1, 9)]}
+    assert len(normalize_games(body, 3)["games"]) == 3

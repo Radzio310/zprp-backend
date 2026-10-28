@@ -152,3 +152,82 @@ async def fetch_game_context(req, base_url: str, bunny_item_id: int, embed_suffi
         return classify(resp.status, body, embed_suffixes)
     except Exception as e:  # noqa: BLE001 - timeout/siec to NIE dowod wygasniecia sesji
         return GameResult("BASTION_UNAVAILABLE", None, detail=type(e).__name__)
+
+
+# ---------- Meczoteka: GET /api/games (lista meczow, strona /games; ksztalt z publicznego game_library.js) ----------
+def _txt(v: Any, limit: int = 120) -> str | None:
+    if isinstance(v, bool) or not isinstance(v, (str, int)):
+        return None
+    t = str(v).strip()
+    return t[:limit] if t else None
+
+
+def _int(v: Any) -> int | None:
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.strip().isdigit():
+        return int(v.strip())
+    return None
+
+
+def normalize_game(g: Any) -> dict | None:
+    """Jeden wiersz /api/games -> {bunny_item_id, title, home, away, date, competition, code, ...}. Bez bunny_item_id
+    (mecz bez dopasowanego nagrania) wiersz jest pomijany: nie ma czego proponowac."""
+    if not isinstance(g, dict):
+        return None
+    item = _int(g.get("bunny_item_id"))
+    if item is None or item < 1:
+        return None
+    home, away = _txt(g.get("home_team")), _txt(g.get("away_team"))
+    code = _txt(g.get("game_code"), 40)
+    date = _txt(g.get("date"), 40)
+    sc = g.get("score") if isinstance(g.get("score"), dict) else {}
+    score = None
+    if _int(sc.get("full_home")) is not None and _int(sc.get("full_away")) is not None:
+        score = f"{_int(sc.get('full_home'))}:{_int(sc.get('full_away'))}"
+    title = " - ".join(x for x in (f"{home} - {away}" if home and away else (home or away), code) if x) or f"Mecz {item}"
+    out = {"bunny_item_id": item, "title": title, "home": home, "away": away, "date": date,
+           "competition": _txt(g.get("type_name")) or _txt(g.get("series")), "code": code, "score": score,
+           "video_state": _txt(g.get("video_state"), 20), "video_coverage": _int(g.get("video_coverage")),
+           "thumbnail": None, "duration_s": None}
+    return out
+
+
+def normalize_games(body: Any, limit: int) -> dict:
+    items = body.get("items") if isinstance(body, dict) else None
+    games = [n for n in (normalize_game(x) for x in (items if isinstance(items, list) else [])) if n][:limit]
+    paging = body.get("paging") if isinstance(body, dict) and isinstance(body.get("paging"), dict) else {}
+    return {"games": games, "total": _int(paging.get("total")), "has_more": bool(paging.get("has_more"))}
+
+
+async def fetch_games(req, base_url: str, q: str, limit: int, offset: int, season_id: int | None, video: str) -> tuple[str, int | None, Any]:
+    """Zwraca (kod, http, cialo). Kody jak w classify; 200 z nie-obiektem = BASTION_BAD_RESPONSE."""
+    params: dict[str, Any] = {"limit": str(limit), "offset": str(offset)}
+    if q:
+        params["q"] = q
+    if season_id is not None:
+        params["season_id"] = str(season_id)
+    if video in ("with", "without"):
+        params["video"] = video
+    try:
+        resp = await req.get(f"{base_url}/api/games", params=params, timeout=15000, max_redirects=0)
+        try:
+            body = await resp.json()
+        except Exception:  # noqa: BLE001
+            body = None
+    except Exception as e:  # noqa: BLE001
+        return "BASTION_UNAVAILABLE", None, type(e).__name__
+    st = resp.status
+    if st == 401:
+        return "BASTION_AUTH_REQUIRED", st, None
+    if st == 403:
+        return "BASTION_RESOURCE_FORBIDDEN", st, None
+    if st == 429:
+        return "BASTION_RATE_LIMITED", st, None
+    if st != 200:
+        return "BASTION_UNAVAILABLE", st, None
+    if not isinstance(body, dict):
+        return "BASTION_BAD_RESPONSE", st, None
+    return "OK", st, body

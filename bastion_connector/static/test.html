@@ -331,6 +331,14 @@ canvas:focus-visible{box-shadow:none}
     <div class="tip"><b id="tip-b">Kliknij w okno, żeby pisać.</b> Wklejanie: Ctrl+V. Okno zgłasza Discordowi brak klucza bezpieczeństwa, więc od razu zapyta o kod.</div>
    </section>
 
+   <section class="card rise" style="--i:6" aria-labelledby="h-gs">
+    <p class="eyebrow" id="h-gs"><span class="n">M</span>Szukaj w meczotece</p>
+    <div class="why" style="margin-bottom:12px">Tylko odczyt: GET /games/search sesją wybranego połączenia (portal /api/games). Wpisz drużynę, kod (np. LCM/32) albo datę. „Użyj” wstawia numer nagrania do pola powyżej.</div>
+    <label class="field"><span>Szukany tekst</span><input class="in" id="gsq" placeholder="np. Wisła, LCM/32, 2026-10-04" autocomplete="off" maxlength="80"></label>
+    <div class="acts"><button type="button" class="btn" id="gsgo">Szukaj w meczotece</button><div class="why" id="gswhy" aria-live="polite"></div></div>
+    <ol class="steps" id="gslist"></ol>
+   </section>
+
    <section class="card rise" style="--i:6" aria-labelledby="h-p8">
     <p class="eyebrow" id="h-p8"><span class="n">P8</span>Cięcie klipu i pobranie MP4</p>
     <div class="why" style="margin-bottom:12px"><b>Uwaga:</b> przycisk poniżej utworzy jeden prywatny klip na koncie Bastionu (połączenie wybrane po lewej). Klip ma treść „BAZA test P8”, typ NORMAL, znacznik PLAY_ON, odbiorca: tylko to konto. Klip zostaje w Bastionie, my kasujemy tylko pobrany plik.</div>
@@ -616,6 +624,29 @@ $('p8go').onclick=async()=>{
   log('P8 pobranie i ffprobe','ok',j);
  }finally{p8busy=false}
 };
+
+/* ---------- Meczoteka: wyszukiwanie ---------- */
+$('gsgo').onclick=async()=>{
+ const t=token(),w=$('gswhy'),ul=$('gslist');w.textContent='';
+ if(!t.ok){w.textContent='Zablokowane. '+t.why;return}
+ if(!$('judge').value.trim()){w.textContent='Zablokowane. Podaj identyfikator sędziego (judge_id).';return}
+ const q=new URLSearchParams({scope:st.scope,judge_id:$('judge').value,q:$('gsq').value.trim(),limit:'20'});
+ ul.textContent='';w.textContent='Szukam…';
+ let r,j;try{r=await fetch('/games/search?'+q,{headers:H()});j=await r.json()}catch(e){w.textContent='Błąd sieci: '+e.message;return}
+ if(!r.ok){const m='HTTP '+r.status+' · '+(j.error||j.detail||'');w.textContent=m;log('Meczoteka: '+m,'err',j);return}
+ w.textContent='Znaleziono '+(j.total==null?j.games.length:j.total)+' (pokazano '+j.games.length+(j.has_more?', jest więcej':'')+').';
+ log('Meczoteka: '+j.games.length+' wyników','ok',j);
+ if(!j.games.length){const li=document.createElement('li');li.className='empty';li.textContent='Brak meczów z nagraniem dla tego tekstu.';ul.append(li)}
+ j.games.forEach(g=>{
+  const li=document.createElement('li');li.className='step';li.dataset.state='ok';
+  const lamp=document.createElement('span');lamp.className='lamp';
+  const d=document.createElement('div'),b=document.createElement('b'),m=document.createElement('span');m.className='msg';
+  b.textContent=g.title+(g.score?' ('+g.score+')':'');
+  m.textContent=[g.date,g.competition,'nagranie '+g.bunny_item_id,g.video_state].filter(Boolean).join(' · ');
+  d.append(b,m);
+  const btn=document.createElement('button');btn.type='button';btn.className='mini';btn.textContent='Użyj';
+  btn.onclick=()=>{$('item').value=g.bunny_item_id;btn.textContent='Wstawiono'};
+  li.append(lamp,d,btn);ul.append(li)})};
 
 /* ---------- kopiowanie do docs §7 ---------- */
 const esc=s=>String(s).replace(/\|/g,'\\|').replace(/\n/g,' ');

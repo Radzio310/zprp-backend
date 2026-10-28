@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from . import attempts_store, clips, crypto, tickets
 from .attempts_store import AttemptStore
-from .bastion import GameResult, fetch_game_context
+from .bastion import GameResult, fetch_game_context, fetch_games, normalize_games
 from .config import Settings
 from .store import StateStore, conn_key_for, cookie_summary, filter_state_to_host, now_iso
 from .urlrules import is_blocked_navigation
@@ -225,6 +225,26 @@ class Service:
             elif res.code == "BASTION_AUTH_REQUIRED":
                 self.store.touch_meta(key, last_error_code=res.code)  # nie kasujemy stanu po jednym 401
             return res, info
+        finally:
+            await req.dispose()
+
+    async def games_search(self, scope: str, judge_id: str | None, q: str, limit: int, offset: int,
+                           season_id: int | None, video: str) -> dict:
+        """Wyszukiwanie w Meczotece (GET /api/games) sesja tego polaczenia. Tylko odczyt."""
+        key = conn_key_for(scope, judge_id)
+        req, state, meta = await self._with_state_request(key)
+        try:
+            code, http, body = await fetch_games(req, self.s.portal_base_url, q, limit, offset, season_id, video)
+            if code == "OK":
+                await self._persist_if_changed(req, key, state, meta)
+                return {**normalize_games(body, limit), "connection": key, "limit": limit, "offset": offset}
+            if code == "BASTION_AUTH_REQUIRED":
+                self.store.touch_meta(key, last_error_code=code)
+            err = self._auth_err(code)
+            if err:
+                raise err
+            raise ConnectorError("BASTION_BAD_RESPONSE" if code == "BASTION_BAD_RESPONSE" else "BASTION_UNAVAILABLE",
+                                 502 if code == "BASTION_BAD_RESPONSE" else 503, f"http {http}" if http else (body or None))
         finally:
             await req.dispose()
 
