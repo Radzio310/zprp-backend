@@ -87,12 +87,14 @@ async def plan(ctx: Dict[str, Any], video: Dict[str, Any]) -> Dict[str, Any]:
         for a in await C.rows(select(mentor_clip_assets.c.clip_id, mentor_clip_assets.c.revision)
                               .where(mentor_clip_assets.c.clip_id.in_(ids)).where(mentor_clip_assets.c.status == "ready")):
             ready.add((a["clip_id"], int(a["revision"] or 0)))
-    kept, virtual = [], []
+    kept, virtual, orphans = [], [], []
     for c in clips:
         has_file = (c["id"], int(c.get("media_rev") or 1)) in ready or (c.get("mp4_status") == "ready" and c.get("mp4_key"))
         # 28.10: klip nie znika razem z nagraniem (zniknął klip ręcznie zaznaczony przy błędnym linku). Zostaje w meczu
         # i w Bibliotece także bez pliku; bez MP4 po prostu nie ma co odtworzyć, dopóki nagranie nie wróci.
         kept.append(c["id"])
+        if not has_file:
+            orphans.append(c["id"])
     # Wątki klipów, które zostają, nie są ruszane. Reszta: komentarze z kotwicą w tym nagraniu + wątki klipów wirtualnych.
     thread_rows = await C.rows(select(mentor_threads).where(mentor_threads.c.pair_id == ctx["pair_id"]))
     keep_threads = {t["id"] for t in thread_rows if t.get("target_kind") == "clip" and t.get("target_id") in set(kept)}
@@ -107,13 +109,18 @@ async def plan(ctx: Dict[str, Any], video: Dict[str, Any]) -> Dict[str, Any]:
     touched = {c["thread_id"] for c in live if c["id"] in gone} | virtual_threads
     emptied = sorted(t for t in touched
                      if t in virtual_threads or not any(c["thread_id"] == t and c["id"] not in gone for c in live))
-    return {"virtual_clip_ids": virtual, "kept_clip_ids": kept, "comment_ids": comment_ids, "thread_ids": emptied,
-            "threads": [by_id[t] for t in emptied if t in by_id]}
+    return {"virtual_clip_ids": virtual, "kept_clip_ids": kept, "orphan_clip_ids": orphans, "comment_ids": comment_ids,
+            "thread_ids": emptied, "threads": [by_id[t] for t in emptied if t in by_id]}
 
 
 def counts(found: Dict[str, Any]) -> Dict[str, int]:
     return {"virtual_clips": len(found["virtual_clip_ids"]), "kept_clips": len(found["kept_clip_ids"]),
             "threads": len(found["thread_ids"]), "comments": len(found["comment_ids"])}
+
+
+def orphan_count(found: Dict[str, Any]) -> int:
+    """Klipy bez gotowego pliku MP4: po usunięciu nagrania nie mają czego odtworzyć (link wraca z kosza, plik - nigdy)."""
+    return len(found.get("orphan_clip_ids") or [])
 
 
 def restorable(video: Dict[str, Any]) -> bool:
@@ -123,52 +130,76 @@ def restorable(video: Dict[str, Any]) -> bool:
 
 async def impact(ctx: Dict[str, Any], video: Dict[str, Any]) -> Dict[str, Any]:
     found = await plan(ctx, video)
-    return {"video_id": video["id"], **counts(found), "restorable": restorable(video), "retention_days": TRASH_DAYS}
+    can_restore = restorable(video)
+    # `orphan_clips`: klipy bez MP4 z tego nagrania. Przy wgranym pliku (bez kosza) zostają na zawsze bez źródła -
+    # arkusz ostrzega wprost; przy linku wrócą razem z nagraniem z kosza.
+    orphans = orphan_count(found)
+    return {"video_id": video["id"], **counts(found), "orphan_clips": orphans, "orphans_permanent": (not can_restore) and orphans > 0,
+            "restorable": can_restore, "retention_days": TRASH_DAYS}
 
 
 # ─── Kosz i przywracanie ────────────────────────────────────────────────────
 
 
 async def move_to_trash(ctx: Dict[str, Any], video: Dict[str, Any], actor_id: str) -> Dict[str, Any]:
-    found = await plan(ctx, video)
     stamp = C.now()
-    for cid in found["virtual_clip_ids"]:
-        await database.execute(update(mentor_clips).where(mentor_clips.c.id == cid)
-                               .values(deleted_at=stamp, public_token=None, published_at=None))
-        try:
-            from app import mentor_bastion_jobs as J
+    # Wszystko albo nic: jedna transakcja. Wiersz nagrania zajmuje warunek `deleted_at IS NULL`, więc dwa równoległe
+    # usunięcia nie zrobią tego dwa razy (drugie dostaje 404 `VIDEO_NOT_FOUND`).
+    async with database.transaction():
+        claimed = await database.fetch_one(
+            update(mentor_match_videos).where(mentor_match_videos.c.id == video["id"])
+            .where(mentor_match_videos.c.deleted_at.is_(None))
+            .values(deleted_at=stamp, deleted_by=R.s(actor_id)).returning(mentor_match_videos.c.id))
+        if claimed is None:
+            raise C.err(404, "VIDEO_NOT_FOUND", "Nie znaleziono tego nagrania - mogło zostać usunięte.")
+        found = await plan(ctx, video)
+        for cid in found["virtual_clip_ids"]:
+            await database.execute(update(mentor_clips).where(mentor_clips.c.id == cid).where(mentor_clips.c.deleted_at.is_(None))
+                                   .values(deleted_at=stamp, public_token=None, published_at=None))
+            try:
+                from app import mentor_bastion_jobs as J
 
-            await J.discard_clip_media(cid)  # zadania w toku anulowane (gotowych plików klip wirtualny nie ma)
-        except Exception:  # noqa: BLE001
-            logger.warning("mentor: anulowanie zadań klipu przy usuwaniu nagrania nieudane", exc_info=True)
-    if found["comment_ids"]:
-        await database.execute(update(mentor_comments).where(mentor_comments.c.id.in_(found["comment_ids"])).values(deleted_at=stamp))
-    for tid in found["thread_ids"]:
-        await database.execute(mentor_threads.delete().where(mentor_threads.c.id == tid))
-    trash = {"clip_ids": found["virtual_clip_ids"], "kept_clip_ids": found["kept_clip_ids"],
-             "comment_ids": found["comment_ids"], "threads": found["threads"]}
-    await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == video["id"])
-                           .values(deleted_at=stamp, deleted_by=R.s(actor_id), trash_json=_dump(trash)))
-    return {**counts(found), "expires_at": stamp + timedelta(days=TRASH_DAYS)}
+                await J.discard_clip_media(cid)  # zadania w toku anulowane (gotowych plików klip wirtualny nie ma)
+            except Exception:  # noqa: BLE001
+                logger.warning("mentor: anulowanie zadań klipu przy usuwaniu nagrania nieudane", exc_info=True)
+        if found["comment_ids"]:
+            await database.execute(update(mentor_comments).where(mentor_comments.c.id.in_(found["comment_ids"]))
+                                   .where(mentor_comments.c.deleted_at.is_(None)).values(deleted_at=stamp))
+        for tid in found["thread_ids"]:
+            await database.execute(mentor_threads.delete().where(mentor_threads.c.id == tid))
+        trash = {"clip_ids": found["virtual_clip_ids"], "kept_clip_ids": found["kept_clip_ids"],
+                 "comment_ids": found["comment_ids"], "threads": found["threads"]}
+        await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == video["id"])
+                               .values(trash_json=_dump(trash)))
+    return {**counts(found), "orphan_clips": orphan_count(found), "expires_at": stamp + timedelta(days=TRASH_DAYS)}
 
 
 async def restore(video: Dict[str, Any]) -> Dict[str, int]:
     trash = _loads(video.get("trash_json"))
     clip_ids = [R.s(i) for i in trash.get("clip_ids") or []]
     comment_ids = [R.s(i) for i in trash.get("comment_ids") or []]
-    if clip_ids:
-        await database.execute(update(mentor_clips).where(mentor_clips.c.id.in_(clip_ids)).values(deleted_at=None))
-    for snap in trash.get("threads") or []:
-        if not isinstance(snap, dict) or not snap.get("id"):
-            continue
-        if await C.one(select(mentor_threads.c.id).where(mentor_threads.c.id == snap["id"])):
-            continue
-        values = {k: (_aware(v) if k in _DATETIME_KEYS else v) for k, v in snap.items() if k in mentor_threads.c}
-        await database.execute(mentor_threads.insert().values(**values))
-    if comment_ids:
-        await database.execute(update(mentor_comments).where(mentor_comments.c.id.in_(comment_ids)).values(deleted_at=None))
-    await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == video["id"])
-                           .values(deleted_at=None, deleted_by=None, trash_json=None))
+    # Jedna transakcja; wiersz wraca tylko, gdy nadal leży w koszu (`deleted_at IS NOT NULL`), więc dwa równoległe
+    # przywrócenia nie dublują wątków i komentarzy (drugie nic nie robi).
+    async with database.transaction():
+        claimed = await database.fetch_one(
+            update(mentor_match_videos).where(mentor_match_videos.c.id == video["id"])
+            .where(mentor_match_videos.c.deleted_at.is_not(None))
+            .values(deleted_at=None, deleted_by=None, trash_json=None).returning(mentor_match_videos.c.id))
+        if claimed is None:
+            return {"clips": 0, "comments": 0, "threads": 0}
+        if clip_ids:
+            await database.execute(update(mentor_clips).where(mentor_clips.c.id.in_(clip_ids))
+                                   .where(mentor_clips.c.deleted_at.is_not(None)).values(deleted_at=None))
+        for snap in trash.get("threads") or []:
+            if not isinstance(snap, dict) or not snap.get("id"):
+                continue
+            if await C.one(select(mentor_threads.c.id).where(mentor_threads.c.id == snap["id"])):
+                continue
+            values = {k: (_aware(v) if k in _DATETIME_KEYS else v) for k, v in snap.items() if k in mentor_threads.c}
+            await database.execute(mentor_threads.insert().values(**values))
+        if comment_ids:
+            await database.execute(update(mentor_comments).where(mentor_comments.c.id.in_(comment_ids))
+                                   .where(mentor_comments.c.deleted_at.is_not(None)).values(deleted_at=None))
     return {"clips": len(clip_ids), "comments": len(comment_ids), "threads": len(trash.get("threads") or [])}
 
 
@@ -201,13 +232,30 @@ async def trash_payload(ctx: Dict[str, Any], match_id: str) -> List[Dict[str, An
 async def purge_row(row: Dict[str, Any]) -> str:
     """Zamyka kosz jednej pozycji: wiersz znika, chyba że trzyma klipy z MP4 (wtedy ukryty nagrobek).
     Wspólne dla sprzątania po 30 dniach i ręcznego „Usuń na zawsze”. Zwraca "deleted" albo "tombstone"."""
-    holders = await C.one(select(mentor_clips.c.id).where(mentor_clips.c.video_id == row["id"])
-                          .where(mentor_clips.c.deleted_at.is_(None)).limit(1))
-    if holders:
-        await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == row["id"])
-                               .values(trash_json=_dump({"purged": True})))
-        return "tombstone"
-    await database.execute(mentor_match_videos.delete().where(mentor_match_videos.c.id == row["id"]))
+    # Jedna transakcja, tylko na pozycji, która nadal jest w koszu. Kasuje też komentarze schowane razem z nagraniem
+    # (miękko usunięte, już nie do przywrócenia) i miękko usunięte komentarze zakotwiczone w tym nagraniu.
+    trash = _loads(row.get("trash_json"))
+    comment_ids = [R.s(i) for i in trash.get("comment_ids") or []]
+    async with database.transaction():
+        still = await C.one(select(mentor_match_videos.c.id, mentor_match_videos.c.trash_json)
+                            .where(mentor_match_videos.c.id == row["id"]).where(mentor_match_videos.c.deleted_at.is_not(None)))
+        if still is None:
+            return "deleted"
+        if _loads(still.get("trash_json")).get("purged"):
+            return "tombstone"
+        if comment_ids:
+            await database.execute(mentor_comments.delete().where(mentor_comments.c.id.in_(comment_ids))
+                                   .where(mentor_comments.c.deleted_at.is_not(None)))
+        await database.execute(mentor_comments.delete().where(mentor_comments.c.video_id == row["id"])
+                               .where(mentor_comments.c.deleted_at.is_not(None)))
+        holders = await C.one(select(mentor_clips.c.id).where(mentor_clips.c.video_id == row["id"])
+                              .where(mentor_clips.c.deleted_at.is_(None)).limit(1))
+        if holders:
+            await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == row["id"])
+                                   .values(trash_json=_dump({"purged": True})))
+            return "tombstone"
+        await database.execute(mentor_match_videos.delete().where(mentor_match_videos.c.id == row["id"])
+                               .where(mentor_match_videos.c.deleted_at.is_not(None)))
     return "deleted"
 
 

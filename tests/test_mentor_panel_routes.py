@@ -504,7 +504,7 @@ def test_wgrywanie_transkodowanie_i_mp4(env, monkeypatch, tmp_path):
 
 
 def test_wideo_link_i_usuwanie(env, monkeypatch):
-    async def fake_insert(match_id, pair_key, url, added_by):
+    async def fake_insert(match_id, pair_key, url, added_by, idempotency_key=None):
         row = {"id": "vx", "match_id": match_id, "pair_key": pair_key, "url": url, "normalized_url": url, "provider": "vimeo",
                "added_by": added_by, "kind": "link", "created_at": datetime.now(timezone.utc)}
         await env.db.execute(env.T["mentor_match_videos"].insert().values(**row))

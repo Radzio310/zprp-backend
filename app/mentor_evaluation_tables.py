@@ -107,8 +107,12 @@ def define_tables(metadata):
         Column("deleted_at", DateTime(timezone=True), nullable=True),
         Column("deleted_by", String, nullable=True),
         Column("trash_json", Text, nullable=True),
+        #: Klucz idempotencji dodania (nagłówek `Idempotency-Key`): powtórka żądania zwraca ten sam wiersz.
+        Column("idempotency_key", String, nullable=True),
         UniqueConstraint("match_id", "normalized_url", name="uq_mentor_match_video_url"),
     )
+    Index("uq_mentor_match_video_idem", videos.c.pair_key, videos.c.match_id, videos.c.idempotency_key, unique=True,
+          postgresql_where=videos.c.idempotency_key.is_not(None), sqlite_where=videos.c.idempotency_key.is_not(None))
     return evaluations, versions, requests, videos
 
 

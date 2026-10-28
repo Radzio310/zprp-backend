@@ -29,7 +29,7 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 
@@ -228,10 +228,26 @@ class VideoPatch(BaseModel):
     title: Optional[str] = Field(default=None, max_length=200)
 
 
+def idempotency_key(value: Optional[str]) -> Optional[str]:
+    """Nagłówek `Idempotency-Key` (uuid z klienta): 8-80 znaków [A-Za-z0-9._:-]; pusty = bez idempotencji."""
+    if not isinstance(value, str):
+        return None
+    key = value.strip()
+    if not key:
+        return None
+    if not 8 <= len(key) <= 80 or not all(ch.isalnum() or ch in "._:-" for ch in key):
+        raise C.err(422, "BAD_IDEMPOTENCY_KEY", "Nagłówek Idempotency-Key ma 8-80 znaków: litery, cyfry oraz . _ : -")
+    return key
+
+
 @router.post("/pairs/{pair_id}/matches/{match_id}/videos")
-async def add_video(pair_id: str, match_id: str, body: VideoBody, actor: Actor = Depends(mentor_actor)):
+async def add_video(pair_id: str, match_id: str, body: VideoBody, actor: Actor = Depends(mentor_actor),
+                    idempotency_header: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    """Dodaje nagranie-link. `Idempotency-Key: <uuid>` (jeden na próbę dodania, ten sam przy ponowieniu): powtórka zwraca
+    to samo nagranie bez duplikatu; ten sam klucz z innym adresem = 409 `IDEMPOTENCY_KEY_REUSED`."""
     ctx = await C.pair_context(pair_id, actor, action="video")
     card = await C.match_card(ctx, match_id)
+    key = idempotency_key(idempotency_header)
     from app.mentor_evaluation_request_rules import normalized_video_url
     from app.mentor_evaluations import insert_link_video
 
@@ -241,7 +257,9 @@ async def add_video(pair_id: str, match_id: str, body: VideoBody, actor: Actor =
         raise C.err(422, "VIDEO_URL", str(exc)) from exc
     if not url:
         raise C.err(422, "VIDEO_URL", "Podaj link do nagrania.")
-    row, created = await insert_link_video(card["match_id"], ctx["pair_key"], url, actor.judge_id)
+    row, created = await insert_link_video(card["match_id"], ctx["pair_key"], url, actor.judge_id, key)
+    if key and row.get("idempotency_key") == key and R.s(row.get("normalized_url")) != url:
+        raise C.err(409, "IDEMPOTENCY_KEY_REUSED", "Ten klucz idempotencji był już użyty z innym adresem nagrania.")
     if created:
         await C.touch(ctx, actor.judge_id, "video_added", "videos", card["match_id"], {"id": row["id"]})
     return await _video_payload(ctx, row["id"])
@@ -282,6 +300,7 @@ async def delete_video(pair_id: str, match_id: str, video_id: str, actor: Actor 
     ctx = await C.pair_context(pair_id, actor, action="video")
     row = await _pair_video(ctx, match_id, video_id)
     if row.get("kind") == "upload" and row.get("upload_id"):
+        impact = await T.impact(ctx, row)  # przed skasowaniem: ile klipów zostanie bez źródła (bez kosza, bez cofania)
         upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == row["upload_id"]))
         if upload:
             forget_object(upload.get("r2_key"), upload.get("play_key"), upload.get("poster_key"))
@@ -289,7 +308,7 @@ async def delete_video(pair_id: str, match_id: str, video_id: str, actor: Actor 
                                    .values(status="expired", error="Nagranie usunięte.", r2_key=None, play_key=None, poster_key=None))
         await database.execute(mentor_match_videos.delete().where(mentor_match_videos.c.id == video_id))
         await C.touch(ctx, actor.judge_id, "video_deleted", "videos", row["match_id"], {"id": video_id})
-        return {"ok": True, "trashed": False}
+        return {"ok": True, "trashed": False, "orphan_clips": impact["orphan_clips"], "kept_clips": impact["kept_clips"]}
     moved = await T.move_to_trash(ctx, row, actor.judge_id)
     await C.touch(ctx, actor.judge_id, "video_trashed", "videos", row["match_id"], {"id": video_id})
     return {"ok": True, "trashed": True, **moved}

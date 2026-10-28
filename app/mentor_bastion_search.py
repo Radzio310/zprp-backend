@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 import unicodedata
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
@@ -45,6 +46,17 @@ SEASON_MIN = 55
 #: Nagrania sezonu: najwięcej meczów w jednym przebiegu i równoległych zapytań do connectora.
 SEASON_MAX_MATCHES = 40
 SEASON_CONCURRENCY = 3
+#: Nagrania sezonu: łączny czas przebiegu (po nim kończymy z tym, co jest, `bastion.deadline: true`).
+SEASON_DEADLINE_S = 100.0
+#: Jedno ponowienie po 429 (tylko w nagraniach sezonu) po tylu sekundach.
+RETRY_429_DELAY_S = 3.0
+#: Pamięć wyników Meczoteki na serwerze (na użytkownika i zapytanie) i limit prawdziwych zapytań na użytkownika.
+SEARCH_CACHE_TTL_S = 600.0
+SEARCH_CACHE_MAX = 600
+RATE_WINDOW_S = 300.0
+RATE_MAX = 120
+#: Nazwa parametru wyszukiwania po sędzi w Meczotece (do potwierdzenia próbą): "q" = nazwisko jako zwykły tekst.
+REFEREE_PARAM = "q"
 
 #: Słowa, które nie odróżniają drużyn (formy prawne, skróty klubowe, sponsorzy ogólni).
 TEAM_STOP = {
@@ -160,11 +172,46 @@ def _iso_dt(text: str) -> Optional[datetime]:
         return None
 
 
+_AGE = re.compile(r"\bu[\s-]?(\d{2})\b")
+_YOUTH = re.compile(r"\b(junior\w*|mlodzik\w*|mlodziez\w*|kadet\w*|dzieci\w*|mini)\b")
+_WOMEN = re.compile(r"\b(kobiet\w*|women|dziewcz\w*|dziewczat\w*|seniorki|zenski\w*)\b")
+
+
+def category_profile(*texts: Any) -> Optional[Tuple[Optional[str], bool]]:
+    """(wiek, kobiety) z nazw rozgrywek: "U18" -> "u18", juniorzy/młodzik/kadet -> "youth", brak znaku = senior. None = brak tekstu."""
+    hay = " ".join(_plain(x) for x in texts if x).strip()
+    if not hay:
+        return None
+    age = None
+    m = _AGE.search(hay)
+    if m:
+        age = "u" + m.group(1)
+    elif _YOUTH.search(hay):
+        age = "youth"
+    return age, bool(_WOMEN.search(hay))
+
+
+def category_signal(game: Mapping[str, Any], card: Mapping[str, Any]) -> Optional[str]:
+    """"same" / "diff" / None: U18, U16, juniorzy i kobiety to osobny sygnał (zgodny kod i drużyny nie ratują meczu z innej kategorii)."""
+    a = category_profile(game.get("competition"), game.get("title"))
+    b = category_profile(card.get("competition_name"), card.get("category"))
+    if a is None or b is None:
+        return None
+    (age_a, women_a), (age_b, women_b) = a, b
+    if women_a != women_b:
+        return "diff"
+    if age_a == age_b:
+        return "same"
+    if age_a and age_b and "youth" in (age_a, age_b):
+        return "same"  # "juniorzy" bez numeru pasuje do każdego U..
+    return "diff"
+
+
 def score_game(game: Mapping[str, Any], card: Mapping[str, Any]) -> Dict[str, Any]:
     """Pewność 0..100 i sygnały. `sure` = zgadza się kod meczu (co do litery), obie drużyny i dzień (wtedy 100).
 
     Kod: +40 / tylko bez wielkości liter +15 / -15 (różny). Drużyny: obie +40, jedna +15, żadna -10 (kolejność obojętna). Dzień: ten sam +20,
-    sąsiedni +10, dalszy -25. Brak danej = 0 punktów i sygnał `null` (nigdy nie zgadujemy)."""
+    sąsiedni +10, dalszy -25. Kategoria (U18/U16/juniorzy/kobiety): inna -25 i nigdy `sure`. Brak danej = 0 punktów i sygnał `null` (nigdy nie zgadujemy)."""
     # Kod meczu z Bastionu = pisownia ZPRP ("LCM/32", próba 28.10). Wielkość liter niesie kategorię (JmK != JMK),
     # więc pełny sygnał daje tylko zgodność co do litery; zgodność bez wielkości liter to wskazówka ("case").
     exact_a, exact_b = _alnum(game.get("code")), _alnum(card.get("match_code"))
@@ -189,9 +236,12 @@ def score_game(game: Mapping[str, Any], card: Mapping[str, Any]) -> Dict[str, An
     points += {True: 40, "case": 15, False: -15, None: 0}[code]
     points += {"both": 40, "one": 15, "none": -10, None: 0}[teams]
     points += {"same": 20, "near": 10, "far": -25, None: 0}[day]
-    sure = code is True and teams == "both" and day == "same"
+    category = category_signal(game, card)
+    points += {"diff": -25, "same": 0, None: 0}[category]
+    sure = code is True and teams == "both" and day == "same" and category != "diff"
     confidence = 100 if sure else max(0, min(99, points))
-    return {"confidence": confidence, "sure": sure, "signals": {"code": code, "teams": teams, "date": day}}
+    return {"confidence": confidence, "sure": sure,
+            "signals": {"code": code, "teams": teams, "date": day, "category": category}}
 
 
 def search_queries(card: Mapping[str, Any], q: Optional[str] = None) -> List[str]:
@@ -215,6 +265,7 @@ def shape_game(game: Mapping[str, Any], card: Mapping[str, Any], added: Iterable
     item = int(game["bunny_item_id"])
     keep = ("title", "home", "away", "date", "competition", "code", "score", "video_state", "video_coverage", "duration_s")
     return {"bunny_item_id": item, "url": BR.canonical_game_url(item), **{k: game.get(k) for k in keep},
+            "referees": game.get("referees") if isinstance(game.get("referees"), list) else [],
             **score_game(game, card), "added": item in set(added)}
 
 
@@ -233,9 +284,14 @@ def rank_games(games: Iterable[Mapping[str, Any]], card: Mapping[str, Any], adde
     return sorted(seen.values(), key=lambda g: (-g["confidence"], -(parse_day(g.get("date")) or date.min).toordinal()))[:MAX_GAMES]
 
 
+def has_code(game: Mapping[str, Any]) -> bool:
+    """Kod meczu zgodny co do litery - bez niego nie wskazujemy nikogo jako „Ten mecz" ani w nagraniach sezonu."""
+    return (game.get("signals") or {}).get("code") is True
+
+
 def best_of(games: List[Mapping[str, Any]]) -> Optional[int]:
     for g in games:
-        if not g.get("added") and int(g.get("confidence") or 0) >= BEST_MIN:
+        if not g.get("added") and int(g.get("confidence") or 0) >= BEST_MIN and has_code(g):
             return int(g["bunny_item_id"])
     return None
 
@@ -251,49 +307,120 @@ class _Stop(Exception):
         self.verdicts = verdicts
 
 
-class Meczoteka:
-    """Jedno połączenie na cały przebieg: pierwsze zapytanie wybiera scope (domyślne -> osobiste), kolejne go używają."""
+_search_cache: Dict[Tuple[Any, ...], Tuple[float, Tuple[List[Dict[str, Any]], bool]]] = {}
+_rate_log: Dict[str, List[float]] = {}
 
-    def __init__(self, client: CL.ConnectorClient, scopes: List[str], real: Actor):
+
+def forget_search_cache() -> None:
+    _search_cache.clear()
+    _rate_log.clear()
+
+
+def cache_get(key: Tuple[Any, ...], now: Optional[float] = None) -> Optional[Tuple[List[Dict[str, Any]], bool]]:
+    hit = _search_cache.get(key)
+    moment = time.monotonic() if now is None else now
+    if hit and moment - hit[0] < SEARCH_CACHE_TTL_S:
+        games, more = hit[1]
+        return [dict(g) for g in games], more
+    _search_cache.pop(key, None)
+    return None
+
+
+def cache_put(key: Tuple[Any, ...], games: List[Dict[str, Any]], more: bool, now: Optional[float] = None) -> None:
+    if len(_search_cache) >= SEARCH_CACHE_MAX:
+        _search_cache.clear()
+    _search_cache[key] = (time.monotonic() if now is None else now, ([dict(g) for g in games], bool(more)))
+
+
+def rate_allow(judge_id: str, now: Optional[float] = None) -> bool:
+    """Limit prawdziwych zapytań do connectora na użytkownika (okno przesuwne); trafienia w pamięci nie liczą się."""
+    moment = time.monotonic() if now is None else now
+    log = [t for t in _rate_log.get(judge_id, []) if moment - t < RATE_WINDOW_S]
+    if len(log) >= RATE_MAX:
+        _rate_log[judge_id] = log
+        return False
+    log.append(moment)
+    _rate_log[judge_id] = log
+    return True
+
+
+class Meczoteka:
+    """Jedno połączenie na cały przebieg: pierwsze zapytanie wybiera scope (domyślne -> osobiste), kolejne go używają.
+
+    Wyniki są pamiętane na serwerze ~10 minut (na użytkownika i zapytanie), prawdziwe zapytania mają limit na użytkownika,
+    a gdy pierwsza strona nie ma żadnej kasety, a portal mówi `has_more`, czytamy też drugą."""
+
+    def __init__(self, client: CL.ConnectorClient, scopes: List[str], real: Actor, *, retry_429: bool = False):
         self.client, self.scopes, self.real = client, scopes, real
         self.scope: Optional[str] = None
+        self.retry_429 = retry_429
 
     def _owner(self, scope: str) -> Optional[str]:
         return self.real.judge_id if scope == "personal" else None
 
-    async def _one(self, scope: str, q: str) -> Tuple[BR.PlaybackVerdict, Dict[str, Any]]:
+    async def _one(self, scope: str, params_extra: Dict[str, Any]) -> Tuple[BR.PlaybackVerdict, Dict[str, Any]]:
         from app.mentor_bastion import apply_verdict
 
-        params = {"scope": scope, "q": q, "limit": PAGE, "video": "with"}
+        params = {"scope": scope, "limit": PAGE, "video": "with", **params_extra}
         owner = self._owner(scope)
         if scope == "personal":
             params["judge_id"] = owner
-        try:
-            reply = await self.client.request("GET", "/games/search", params=params, timeout=20.0)
-        except CL.ConnectorUnavailable:
-            return BR.PlaybackVerdict("unavailable", "BASTION_UNAVAILABLE"), {}
-        verdict = BR.classify_playback(reply.status, reply.body)
+        for attempt in (0, 1):
+            try:
+                reply = await self.client.request("GET", "/games/search", params=params, timeout=20.0)
+            except CL.ConnectorUnavailable:
+                return BR.PlaybackVerdict("unavailable", "BASTION_UNAVAILABLE"), {}
+            verdict = BR.classify_playback(reply.status, reply.body)
+            if verdict.kind == "rate_limited" and self.retry_429 and attempt == 0:
+                await asyncio.sleep(RETRY_429_DELAY_S)  # jedno ponowienie po 429 (nagrania sezonu)
+                continue
+            break
         if verdict.kind == "ok" and not isinstance(reply.body.get("games"), list):
             verdict = BR.PlaybackVerdict("unavailable", "BASTION_BAD_RESPONSE")
         await apply_verdict(scope, owner, verdict)
         return verdict, reply.body
 
-    async def search(self, q: str) -> List[Dict[str, Any]]:
+    async def _page(self, extra: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool]:
         if self.scope:
-            verdict, body = await self._one(self.scope, q)
+            verdict, body = await self._one(self.scope, extra)
             if verdict.kind != "ok":
                 raise _Stop([(self.scope, verdict)])
-            return [g for g in body["games"] if isinstance(g, dict)]
+            return [g for g in body["games"] if isinstance(g, dict)], bool(body.get("has_more"))
         verdicts: List[Tuple[str, BR.PlaybackVerdict]] = []
         for scope in self.scopes:
-            verdict, body = await self._one(scope, q)
+            verdict, body = await self._one(scope, extra)
             if verdict.kind == "ok":
                 self.scope = scope
-                return [g for g in body["games"] if isinstance(g, dict)]
+                return [g for g in body["games"] if isinstance(g, dict)], bool(body.get("has_more"))
             verdicts.append((scope, verdict))
             if verdict.kind in ("rate_limited", "unavailable"):
                 break
         raise _Stop(verdicts)
+
+    async def _cached(self, extra: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool]:
+        key = (self.real.judge_id, tuple(sorted((k, str(v)) for k, v in extra.items())))
+        hit = cache_get(key)
+        if hit is not None:
+            return hit
+        if not rate_allow(self.real.judge_id):
+            raise _Stop([((self.scopes or ["default"])[0], BR.PlaybackVerdict("rate_limited", "BASTION_RATE_LIMITED"))])
+        games, more = await self._page(extra)
+        cache_put(key, games, more)
+        return games, more
+
+    async def _paged(self, extra: Dict[str, Any], offset: int = 0) -> List[Dict[str, Any]]:
+        games, more = await self._cached({**extra, "offset": offset} if offset else dict(extra))
+        if not games and more:
+            games, _ = await self._cached({**extra, "offset": offset + PAGE})
+        return games
+
+    async def search(self, q: str) -> List[Dict[str, Any]]:
+        return await self._paged({"q": q})
+
+    async def search_referee(self, name: str, *, video: str = "any", offset: int = 0) -> List[Dict[str, Any]]:
+        """Mecze z Meczoteki po nazwisku sędziego. Parametr portalu ustala `REFEREE_PARAM` (do potwierdzenia próbą)."""
+        return await self._paged({"referee": name, "referee_param": REFEREE_PARAM, "video": video}, offset)
+
 
 
 def _setup(real: Actor) -> Tuple[Optional[Meczoteka], Optional[str]]:
@@ -463,12 +590,18 @@ async def season_proposals(pair_id: str, response: Response, body: Optional[Seas
             added = await _added_items(ctx, ids)
             gate = asyncio.Semaphore(SEASON_CONCURRENCY)
             stopped: List[str] = []
+            mz.retry_429 = True  # jedno ponowienie po 429
+            deadline = time.monotonic() + SEASON_DEADLINE_S
+            skipped: List[str] = []
 
             async def one(card: Mapping[str, Any]) -> None:
                 if stopped:
                     return
                 async with gate:
                     if stopped:
+                        return
+                    if time.monotonic() > deadline:  # łączny czas przebiegu minął: reszty nie szukamy
+                        skipped.append(R.s(card["match_id"]))
                         return
                     try:
                         games, _ = await find_for_card(mz, card, added.get(R.s(card["match_id"]), []), max_queries=2)
@@ -477,7 +610,7 @@ async def season_proposals(pair_id: str, response: Response, body: Optional[Seas
                         kind = next((k for k in ("rate_limited", "unavailable", "forbidden") if k in kinds), "auth_required")
                         stopped.append(kind)
                         return
-                    top = next((g for g in games if not g["added"] and g["confidence"] >= SEASON_MIN), None)
+                    top = next((g for g in games if not g["added"] and g["confidence"] >= SEASON_MIN and has_code(g)), None)
                     if top:
                         found[R.s(card["match_id"])] = top
 
@@ -490,6 +623,10 @@ async def season_proposals(pair_id: str, response: Response, body: Optional[Seas
                            "partial": bool(found)}
             else:
                 bastion["scope"] = mz.scope
+            if skipped:
+                bastion["deadline"] = True
+                bastion["partial"] = True
+                bastion["skipped"] = len(skipped)
 
     items = []
     for card in cards:

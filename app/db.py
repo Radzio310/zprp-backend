@@ -4593,6 +4593,19 @@ from app.mentor_bastion_tables import define_tables as _define_mentor_bastion_ta
     mentor_clip_assets,
 ) = _define_mentor_bastion_tables(metadata)
 
+# Trybuna Mentora (28.10.2026): cudze mecze oglądane przez parę, obserwowani, kolejka, półki (`app/mentor_trybuna_tables.py`).
+from app.mentor_trybuna_tables import define_tables as _define_mentor_trybuna_tables
+(
+    mentor_watched_matches,
+    mentor_trybuna_follows,
+    mentor_trybuna_queue,
+    mentor_trybuna_shelves,
+    mentor_trybuna_shelf_clips,
+    mentor_trybuna_clip_tags,
+    mentor_trybuna_opinions,
+    mentor_trybuna_notified,
+) = _define_mentor_trybuna_tables(metadata)
+
 # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.
 from app.province_alert_tables import define_tables as _define_alert_tables
 province_alert_settings, province_alert_state = _define_alert_tables(metadata)
@@ -5232,6 +5245,19 @@ for _statement in _MENTOR_BASTION_MIGRATIONS:
         import logging as _logging
 
         _logging.getLogger("app.db").warning("Migracja Bastion nie przeszla: %s", _statement, exc_info=True)
+
+# Trybuna: klucz idempotencji nagrań i jego unikalny indeks (`app/mentor_trybuna_tables.py`) - kazda migracja osobno.
+from app.mentor_trybuna_tables import MIGRATIONS as _MENTOR_TRYBUNA_MIGRATIONS
+
+for _statement in _MENTOR_TRYBUNA_MIGRATIONS:
+    try:
+        with engine.connect() as _conn:
+            _conn.execute(text(_statement))
+            _conn.commit()
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("app.db").warning("Migracja Trybuny nie przeszla: %s", _statement, exc_info=True)
 
 # Transmisje meczow: indeksy (`app/stream_tables.py`) - kazdy osobno, brak jednego nie zatrzymuje startu.
 from app.stream_tables import MIGRATIONS as _STREAM_MIGRATIONS

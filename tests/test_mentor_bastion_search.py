@@ -60,7 +60,7 @@ def test_parse_day_formats_and_warsaw_midnight(S):
 
 def test_score_sure_needs_code_teams_and_day(S):
     full = S.score_game({"code": "ISM 1", "home": "Gliwice", "away": "Opole", "date": "2026-10-12"}, card())
-    assert full == {"confidence": 100, "sure": True, "signals": {"code": True, "teams": "both", "date": "same"}}
+    assert full == {"confidence": 100, "sure": True, "signals": {"code": True, "teams": "both", "date": "same", "category": None}}
     swapped = S.score_game({"code": "ISM/1", "home": "KS Opole", "away": "SPR Gliwice", "date": "2026-10-12"}, card())
     assert swapped["sure"] is True
     no_code = S.score_game({"home": "Gliwice", "away": "Opole", "date": "2026-10-12"}, card())
@@ -92,13 +92,16 @@ def test_rank_dedupes_marks_added_and_best_skips_added(S):
     games = [
         {"bunny_item_id": 7, "code": "ISM/1", "home": "Gliwice", "away": "Opole", "date": "2026-10-12"},
         {"bunny_item_id": 7, "code": "ISM/1", "home": "Gliwice", "away": "Opole", "date": "2026-10-12"},
-        {"bunny_item_id": 8, "home": "Gliwice", "away": "Opole", "date": "2026-10-12"},
+        {"bunny_item_id": 8, "code": "ISM/1", "home": "Gliwice", "away": "Opole", "date": "2026-10-12"},
         {"bunny_item_id": "x"},
     ]
     ranked = S.rank_games(games, card(), added=[7])
     assert [g["bunny_item_id"] for g in ranked] == [7, 8]
     assert ranked[0]["added"] is True and ranked[0]["url"] == "https://portal.handball-bastion.pl/game?bunny_item_id=7"
     assert S.best_of(ranked) == 8
+    # Bez kodu meczu nikt nie jest "Ten mecz" (28.10): wybiera człowiek.
+    no_code = S.rank_games([{"bunny_item_id": 9, "home": "Gliwice", "away": "Opole", "date": "2026-10-12"}], card(), added=[])
+    assert no_code[0]["confidence"] >= S.BEST_MIN and S.best_of(no_code) is None
 
 
 # ─── Trasy ──────────────────────────────────────────────────────────────────

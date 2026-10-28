@@ -525,12 +525,29 @@ async def add_match_video(match_id: str, body: MatchVideoRequest, actor: Actor =
     return {"ok": True, "created": created, "video": _video_shape(row, names)}
 
 
-async def insert_link_video(match_id: str, pair_key_value: str, url: str, added_by: str) -> tuple[Dict[str, Any], bool]:
+async def video_by_idempotency_key(match_id: str, pair_key_value: str, key: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Wiersz dodany wcześniej pod tym kluczem idempotencji (nagłówek `Idempotency-Key`) w tym pokoju pary."""
+    if not key:
+        return None
+    found = await database.fetch_one(
+        select(match_videos).where(match_videos.c.match_id == str(match_id), match_videos.c.pair_key == pair_key_value,
+                                   match_videos.c.idempotency_key == key)
+    )
+    return dict(found) if found else None
+
+
+async def insert_link_video(match_id: str, pair_key_value: str, url: str, added_by: str,
+                            idempotency_key: Optional[str] = None) -> tuple[Dict[str, Any], bool]:
     """Nagranie-link meczu: podgląd linku, start transmisji YouTube, jeden wiersz na adres.
 
     Wspólne dla galerii w aplikacji i panelu „Mentor" (`app/mentor_panel_media.py`).
     `url` musi być już znormalizowany (`normalized_video_url`).
+    `idempotency_key` (nagłówek klienta): powtórka tego samego żądania zwraca ten sam wiersz (`created=False`), także
+    gdy pierwsze żądanie już zdążyło się powieść; unikalny indeks (para, mecz, klucz) domyka wyścig dwóch równoległych.
     """
+    replay = await video_by_idempotency_key(match_id, pair_key_value, idempotency_key)
+    if replay:
+        return replay, False
     existing = await database.fetch_one(
         select(match_videos).where(
             match_videos.c.match_id == str(match_id),
@@ -573,6 +590,7 @@ async def insert_link_video(match_id: str, pair_key_value: str, url: str, added_
         "provider": provider,
         "added_by": str(added_by),
         "kind": "link",
+        "idempotency_key": idempotency_key or None,
         "external_id": external_id,
         "created_at": now(),
         "title": str(preview.get("title") or "")[:200] or None,
@@ -588,7 +606,10 @@ async def insert_link_video(match_id: str, pair_key_value: str, url: str, added_
     try:
         await database.execute(match_videos.insert().values(**row))
     except Exception:
-        # Wyścig obu sędziów dodających ten sam adres kończy się jednym kaflem.
+        # Wyścig obu sędziów dodających ten sam adres (albo to samo żądanie dwa razy) kończy się jednym kaflem.
+        raced = await video_by_idempotency_key(match_id, pair_key_value, idempotency_key)
+        if raced:
+            return raced, False
         existing = await database.fetch_one(
             select(match_videos).where(
                 match_videos.c.match_id == str(match_id),
