@@ -19,7 +19,7 @@ PARAMS = ("q", "referee", "referees", "referee_name", "judge", "sedzia")
 
 
 def call(base: str, token: str, scope: str, name: str, param: str) -> dict:
-    query = urllib.parse.urlencode({"scope": scope, "referee": name, "referee_param": param, "video": "any", "limit": 10})
+    query = urllib.parse.urlencode({"scope": scope, "referee": name, "referee_param": param, "video": "any", "limit": 10, "debug": "true"})
     req = urllib.request.Request(f"{base}/games/search?{query}", headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(req, timeout=40) as res:
@@ -45,6 +45,9 @@ def main() -> None:
         print(f"--- {param}: http={out['http']} wyników={len(games)} total={body.get('total')} has_more={body.get('has_more')}")
         if body.get("error"):
             print("   błąd:", body["error"])
+        print(f"   wiersze: surowe={body.get('rows_raw')} po normalizacji={body.get('rows_kept')}")
+        for raw in (body.get("raw_sample") or [])[:3]:
+            print("   SUROWY:", json.dumps({k: raw.get(k) for k in ("id", "bunny_item_id", "video_state", "video_coverage", "nominees")}, ensure_ascii=False))
         if games:
             print("   row_keys:", body.get("row_keys"))
             print("   sędziowie 1. kasety:", games[0].get("referees"))

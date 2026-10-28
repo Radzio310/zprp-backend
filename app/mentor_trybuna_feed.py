@@ -335,16 +335,16 @@ async def build_feed(real: Actor, follows: List[Dict[str, Any]], days: int, *, r
                 await asyncio.gather(*(one(n) for n in names[1:]))
         bastion = bastion_block(halted[0] if halted else "ok", mz.scope, partial=bool(halted and games))
 
-    # Kasety w oknie dat, bez powtórzeń.
-    seen_items: Dict[int, Dict[str, Any]] = {}
+    # Wiersze Meczoteki w oknie dat, bez powtórzeń (kaseta po numerze nagrania, mecz bez nagrania po numerze meczu portalu).
+    seen_items: Dict[Any, Dict[str, Any]] = {}
     for g in games:
         day = S.parse_day(g.get("date"))
         if day is None or day < start_day or day > end_day:
             continue
-        try:
-            seen_items.setdefault(int(g["bunny_item_id"]), g)
-        except (KeyError, TypeError, ValueError):
+        ident = g.get("bunny_item_id") or (f"g{g['game_id']}" if g.get("game_id") else None)
+        if ident is None:
             continue
+        seen_items.setdefault(ident, g)
 
     items: List[Dict[str, Any]] = []
     used_items: set = set()
@@ -352,21 +352,20 @@ async def build_feed(real: Actor, follows: List[Dict[str, Any]], days: int, *, r
         game = next((g for g in seen_items.values() if S.score_game(g, card)["confidence"] >= T.AUTO_MIN), None)
         refs = T.referees_of_zprp_row(row)
         if game:
-            used_items.add(int(game["bunny_item_id"]))
+            used_items.add(game.get("bunny_item_id") or f"g{game.get('game_id')}")
         items.append(_feed_item(card, row["match_id"], refs, game, follows))
-    for item, g in seen_items.items():
-        if item in used_items:
+    for ident, g in seen_items.items():
+        if ident in used_items:
             continue
         refs = T.clean_referees(g.get("referees") or [])
-        zrow = match_game_to_zprp(g, cards)
-        if zrow is not None:
+        if match_game_to_zprp(g, cards) is not None:
             continue
-        # Kaseta nieznana w obsadzie ZPRP: pokazujemy ją tylko, gdy Meczoteka sama wskazuje obserwowanego w obsadzie (albo nie
-        # niesie obsady wcale - wtedy zapytanie po nazwisku jest jedynym dowodem).
+        # Wiersz nieznany w obsadzie ZPRP: pokazujemy go, gdy obsada z portalu (`nominees`) wskazuje obserwowanego albo
+        # portal nie niesie obsady wcale (wtedy zapytanie po nazwisku jest jedynym dowodem; q trafia też w drużyny).
         matched = [f for f in follows if T.follow_matches(f, refs)] if refs else [f for f in follows if f["kind"] == "referee"]
         if not matched:
             continue
-        card = T.card_from_snapshot(f"bastion-{item}", T.snapshot_from_game(g))
+        card = T.card_from_snapshot(f"bastion-{ident}", T.snapshot_from_game(g))
         items.append(_feed_item(card, None, refs, g, follows))
     items.sort(key=lambda i: R.s(i.get("date")), reverse=True)
     items = items[:FEED_ITEMS]
@@ -382,10 +381,11 @@ async def build_feed(real: Actor, follows: List[Dict[str, Any]], days: int, *, r
 
 def _feed_item(card: Mapping[str, Any], zprp_id: Optional[str], refs: List[Dict[str, Any]], game: Optional[Mapping[str, Any]],
                follows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    state = T.feed_state((game or {}).get("video_state")) if game else "waiting"
+    has_video = bool(game and game.get("bunny_item_id"))
+    state = T.feed_state((game or {}).get("video_state")) if has_video else "waiting"
     when = card.get("scheduled_at")
     return {
-        "key": f"bastion:{game['bunny_item_id']}" if game else f"zprp:{zprp_id}",
+        "key": f"bastion:{game['bunny_item_id']}" if has_video else f"game:{game.get('game_id')}" if game and game.get("game_id") else f"zprp:{zprp_id}",
         "date": _iso(when), "home": (card.get("home") or {}).get("name"), "away": (card.get("away") or {}).get("name"),
         "score": [(card.get("home") or {}).get("score"), (card.get("away") or {}).get("score")],
         "competition": card.get("competition_name"), "code": card.get("match_code"), "zprp_match_id": zprp_id,
@@ -393,7 +393,8 @@ def _feed_item(card: Mapping[str, Any], zprp_id: Optional[str], refs: List[Dict[
         "followed": [f["id"] for f in follows if T.follow_matches(f, refs or T.clean_referees((game or {}).get("referees") or []))],
         "state": state,  # "video" = jest nagranie, "waiting" = czeka na nagranie
         "bastion": ({"bunny_item_id": int(game["bunny_item_id"]), "url": BR.canonical_game_url(int(game["bunny_item_id"])),
-                     "video_state": game.get("video_state"), "title": game.get("title")} if game else None),
+                     "video_state": game.get("video_state"), "title": game.get("title")} if has_video else None),
+        "video_state": (game or {}).get("video_state"),
     }
 
 

@@ -173,34 +173,48 @@ def _int(v: Any) -> int | None:
 
 
 REFEREE_PARAMS = ("q", "referee", "referees", "referee_name", "judge", "sedzia")
-_REFEREE_KEY_HINTS = ("referee", "judge", "sedzi", "sędzi", "arbiter")
+_REFEREE_KEY_HINTS = ("referee", "judge", "sedzi", "sędzi", "arbiter", "nominee")
 
 
-def _person_name(v: Any) -> str | None:
+def _person_name(v: Any, depth: int = 0) -> str | None:
     if isinstance(v, str):
         return _txt(v, 80)
     if isinstance(v, dict):
-        full = _txt(v.get("name") or v.get("full_name") or v.get("fullname"), 80)
+        full = _txt(v.get("name") or v.get("full_name") or v.get("fullname") or v.get("display_name"), 80)
         if full:
             return full
         first, last = _txt(v.get("first_name") or v.get("firstname"), 40), _txt(v.get("last_name") or v.get("lastname") or v.get("surname"), 40)
-        return " ".join(x for x in (first, last) if x) or None
+        joined = " ".join(x for x in (first, last) if x)
+        if joined:
+            return joined
+        if depth < 2:  # nominee: {role, referee|user|person: {...}}
+            for k in ("referee", "judge", "user", "person", "profile"):
+                if isinstance(v.get(k), dict):
+                    nested = _person_name(v[k], depth + 1)
+                    if nested:
+                        return nested
     return None
 
 
 def parse_referees(g: dict) -> list[dict]:
-    """Sedziowie z wiersza /api/games (ksztalt NIEPOTWIERDZONY): dowolny klucz z "referee"/"judge"/"sedzi" w nazwie,
-    wartosc: napis, obiekt {name|first_name+last_name, id} albo lista takich. Bez powtorzen, najwyzej 6."""
+    """Obsada z wiersza /api/games. Portal niesie ja najpewniej w `nominees` (potwierdzenie: row_keys z proby 28.10); czytamy tez
+    kazdy klucz z "referee"/"judge"/"sedzi"/"nominee". Wartosc: napis, obiekt {name | first_name+last_name | zagniezdzony
+    referee/user/person; role|type|position|function} albo lista takich. Bez powtorzen, najwyzej 6."""
     out: list[dict] = []
     seen: set[str] = set()
 
-    def add(v: Any, ident: Any = None) -> None:
+    def add(v: Any) -> None:
         name = _person_name(v)
         if not name or name.casefold() in seen or len(out) >= 6:
             return
         seen.add(name.casefold())
-        pid = ident if ident is not None else (v.get("id") or v.get("judge_id") or v.get("referee_id")) if isinstance(v, dict) else None
-        out.append({"name": name, "id": _txt(pid, 40) if pid is not None else None})
+        pid = None
+        pos = None
+        if isinstance(v, dict):
+            inner = next((v[k] for k in ("referee", "judge", "user", "person") if isinstance(v.get(k), dict)), {})
+            pid = v.get("id") if v.get("id") is not None else v.get("judge_id") or v.get("referee_id") or inner.get("id")
+            pos = _txt(v.get("role") or v.get("type") or v.get("position") or v.get("function"), 30)
+        out.append({"name": name, "id": _txt(pid, 40) if pid is not None else None, "position": pos})
 
     for key, value in g.items():
         k = str(key).lower()
@@ -215,12 +229,14 @@ def parse_referees(g: dict) -> list[dict]:
 
 
 def normalize_game(g: Any) -> dict | None:
-    """Jeden wiersz /api/games -> {bunny_item_id, title, home, away, date, competition, code, ...}. Bez bunny_item_id
-    (mecz bez dopasowanego nagrania) wiersz jest pomijany: nie ma czego proponowac."""
+    """Jeden wiersz /api/games -> {bunny_item_id|None, title, home, away, date, competition, code, ...}. Mecz bez nagrania
+    (bunny_item_id None) zostaje z video_state; konsumenci pomijaja go tam, gdzie potrzebna jest kaseta."""
     if not isinstance(g, dict):
         return None
     item = _int(g.get("bunny_item_id"))
-    if item is None or item < 1:
+    item = item if item is not None and item >= 1 else None  # mecz bez nagrania zostaje (kanal: "czeka na nagranie")
+    game_id = _int(g.get("id"))
+    if item is None and game_id is None and not (g.get("home_team") or g.get("away_team")):
         return None
     home, away = _txt(g.get("home_team")), _txt(g.get("away_team"))
     code = _txt(g.get("game_code"), 40)
@@ -229,22 +245,27 @@ def normalize_game(g: Any) -> dict | None:
     score = None
     if _int(sc.get("full_home")) is not None and _int(sc.get("full_away")) is not None:
         score = f"{_int(sc.get('full_home'))}:{_int(sc.get('full_away'))}"
-    title = " - ".join(x for x in (f"{home} - {away}" if home and away else (home or away), code) if x) or f"Mecz {item}"
-    out = {"bunny_item_id": item, "title": title, "home": home, "away": away, "date": date,
+    title = " - ".join(x for x in (f"{home} - {away}" if home and away else (home or away), code) if x) or f"Mecz {item or game_id}"
+    out = {"bunny_item_id": item, "game_id": game_id, "title": title, "home": home, "away": away, "date": date,
            "competition": _txt(g.get("type_name")) or _txt(g.get("series")), "code": code, "score": score,
            "video_state": _txt(g.get("video_state"), 20), "video_coverage": _int(g.get("video_coverage")),
            "thumbnail": None, "duration_s": None, "referees": parse_referees(g)}
     return out
 
 
-def normalize_games(body: Any, limit: int) -> dict:
+def normalize_games(body: Any, limit: int, debug: bool = False) -> dict:
     items = body.get("items") if isinstance(body, dict) else None
-    games = [n for n in (normalize_game(x) for x in (items if isinstance(items, list) else [])) if n][:limit]
+    items = items if isinstance(items, list) else []
+    games = [n for n in (normalize_game(x) for x in items) if n][:limit]
     paging = body.get("paging") if isinstance(body, dict) and isinstance(body.get("paging"), dict) else {}
-    first = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
-    # `row_keys`: nazwy pol pierwszego wiersza - do potwierdzenia ksztaltu (pole sedziow) bez ogladania calej odpowiedzi.
-    return {"games": games, "total": _int(paging.get("total")), "has_more": bool(paging.get("has_more")),
-            "row_keys": sorted(str(k) for k in first)[:40]}
+    first = items[0] if items and isinstance(items[0], dict) else {}
+    # `row_keys`: nazwy pol pierwszego wiersza; `rows_raw`/`rows_kept`: ile wierszy przed i po normalizacji.
+    out = {"games": games, "total": _int(paging.get("total")), "has_more": bool(paging.get("has_more")),
+           "row_keys": sorted(str(k) for k in first)[:40], "rows_raw": len(items), "rows_kept": len(games)}
+    if debug:
+        out["raw_sample"] = [{k: x.get(k) for k in ("id", "bunny_item_id", "video_state", "video_coverage", "nominees", "game_code",
+                                                   "home_team", "away_team", "type_name", "date")} for x in items[:3] if isinstance(x, dict)]
+    return out
 
 
 async def fetch_games(req, base_url: str, q: str, limit: int, offset: int, season_id: int | None, video: str,

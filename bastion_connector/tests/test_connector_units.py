@@ -806,17 +806,18 @@ def test_normalize_games_shape_and_skips_unmatched():
         "smiec", {"bunny_item_id": "77", "home_team": "X"},
     ], "paging": {"total": 120, "has_more": True}}
     r = normalize_games(body, 10)
-    assert [g["bunny_item_id"] for g in r["games"]] == [5632, 77]
+    assert [g["bunny_item_id"] for g in r["games"]] == [5632, None, 77]  # mecz bez nagrania zostaje ("czeka na nagranie")
+    assert r["rows_raw"] == 4 and r["rows_kept"] == 3
     g = r["games"][0]
     assert g["home"] == "Orlen Wisla" and g["code"] == "LCM/32" and g["score"] == "30:28"
     assert g["competition"] == "Liga Centralna" and g["title"] == "Orlen Wisla - Industria - LCM/32"
     assert r["total"] == 120 and r["has_more"] is True
-    assert r["games"][1]["title"] == "X"
+    assert r["games"][2]["title"] == "X"
 
 
 def test_normalize_games_limit_and_garbage():
     from connector.bastion import normalize_games
-    assert normalize_games(None, 5) == {"games": [], "total": None, "has_more": False, "row_keys": []}
+    assert normalize_games(None, 5) == {"games": [], "total": None, "has_more": False, "row_keys": [], "rows_raw": 0, "rows_kept": 0}
     body = {"items": [{"bunny_item_id": i} for i in range(1, 9)]}
     assert len(normalize_games(body, 3)["games"]) == 3
 
@@ -825,7 +826,7 @@ def test_normalize_games_parses_referee_fields_tolerantly():
     from connector.bastion import normalize_games, parse_referees
     row = {"bunny_item_id": 9, "referees": [{"first_name": "Jan", "last_name": "Kowalski", "id": 12}, "Adam Nowak"],
            "referee_ids": [1, 2], "home_team": "A"}
-    assert parse_referees(row) == [{"name": "Jan Kowalski", "id": "12"}, {"name": "Adam Nowak", "id": None}]
+    assert parse_referees(row) == [{"name": "Jan Kowalski", "id": "12", "position": None}, {"name": "Adam Nowak", "id": None, "position": None}]
     r = normalize_games({"items": [row]}, 5)
     assert r["games"][0]["referees"][0]["name"] == "Jan Kowalski"
     assert "referees" in r["row_keys"]
@@ -854,3 +855,14 @@ def test_fetch_games_sends_referee_in_whitelisted_param():
     sent.clear()
     asyncio.run(fetch_games(Req(), "https://x", "", 20, 0, None, "any", "Jan Kowalski", "evil"))
     assert sent == {"limit": "20", "offset": "0", "video": "any", "q": "Jan Kowalski"} or sent["q"] == "Jan Kowalski"
+
+
+def test_nominees_are_parsed_as_referees_and_debug_sample():
+    from connector.bastion import normalize_games
+    row = {"id": 9, "bunny_item_id": None, "video_state": "NONE", "home_team": "A", "away_team": "B",
+           "nominees": [{"role": "referee", "user": {"first_name": "Jakub", "last_name": "Rawicki", "id": 7}}, {"name": "Adam Nowak", "role": "delegate"}, "Ewa Lis"]}
+    r = normalize_games({"items": [row]}, 5, debug=True)
+    refs = r["games"][0]["referees"]
+    assert [x["name"] for x in refs] == ["Jakub Rawicki", "Adam Nowak", "Ewa Lis"] and refs[0]["id"] == "7" and refs[0]["position"] == "referee"
+    assert r["games"][0]["video_state"] == "NONE" and r["raw_sample"][0]["nominees"][2] == "Ewa Lis"
+    assert "raw_sample" not in normalize_games({"items": [row]}, 5)
