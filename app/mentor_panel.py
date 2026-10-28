@@ -337,10 +337,14 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
         found = await C.rows(select(mentor_clips).where(mentor_clips.c.pair_id == ctx["pair_id"])
                              .where(mentor_clips.c.match_id == mid).where(mentor_clips.c.deleted_at.is_(None))
                              .order_by(mentor_clips.c.start_s.asc()))
-        # Klipy z MP4 po usuniętym nagraniu zostają w Bibliotece, nie w pokoju tego meczu.
+        # Klipy zostają w pokoju także po wyrzuceniu nagrania do kosza (oznaczone video_trashed), nigdy nie znikają po cichu.
         gone = {r["id"] for r in await C.rows(select(mentor_match_videos.c.id).where(mentor_match_videos.c.match_id == mid)
                                               .where(mentor_match_videos.c.deleted_at.is_not(None)))}
-        return await C.clips_payload(ctx, [c for c in found if c.get("video_id") not in gone])
+        shaped = await C.clips_payload(ctx, found)
+        for c in shaped:
+            if c.get("video_id") in gone:
+                c["video_trashed"] = True
+        return shaped
 
     async def load_delegate():
         return [r for r in await C.delegate_sheet_rows(ctx["judge_ids"], [mid]) if R.s(r.get("match_id")) == mid]

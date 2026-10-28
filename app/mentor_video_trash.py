@@ -3,10 +3,10 @@
 Usunięcie nagrania (link YouTube/Vimeo/Bastion) nie kasuje wiersza: `deleted_at` + `trash_json`
 (co dokładnie zniknęło razem z nim) na 30 dni. W tym czasie można je przywrócić.
 
-Razem z nagraniem znikają: klipy wirtualne (bez gotowego MP4), komentarze zakotwiczone w tym nagraniu
-i wątki, które przez to opustoszały (wiersz wątku trafia do `trash_json` i wraca przy przywróceniu).
-Klipy z gotowym MP4 w magazynie zostają w Bibliotece jako samodzielne - wiersz nagrania zostaje jako
-ukryty nagrobek, żeby ich odtwarzanie i opisy dalej działały.
+Razem z nagraniem znikają: komentarze zakotwiczone w tym nagraniu i wątki, które przez to opustoszały
+(wiersz wątku trafia do `trash_json` i wraca przy przywróceniu). Klipy NIE znikają nigdy (od 28.10): zostają
+w pokoju meczu i w Bibliotece, także te bez MP4 (wtedy nie da się ich odtworzyć, dopóki nagranie nie wróci);
+wiersz nagrania zostaje jako ukryty nagrobek, żeby opisy dalej działały.
 """
 
 from __future__ import annotations
@@ -90,7 +90,9 @@ async def plan(ctx: Dict[str, Any], video: Dict[str, Any]) -> Dict[str, Any]:
     kept, virtual = [], []
     for c in clips:
         has_file = (c["id"], int(c.get("media_rev") or 1)) in ready or (c.get("mp4_status") == "ready" and c.get("mp4_key"))
-        (kept if has_file else virtual).append(c["id"])
+        # 28.10: klip nie znika razem z nagraniem (zniknął klip ręcznie zaznaczony przy błędnym linku). Zostaje w meczu
+        # i w Bibliotece także bez pliku; bez MP4 po prostu nie ma co odtworzyć, dopóki nagranie nie wróci.
+        kept.append(c["id"])
     # Wątki klipów, które zostają, nie są ruszane. Reszta: komentarze z kotwicą w tym nagraniu + wątki klipów wirtualnych.
     thread_rows = await C.rows(select(mentor_threads).where(mentor_threads.c.pair_id == ctx["pair_id"]))
     keep_threads = {t["id"] for t in thread_rows if t.get("target_kind") == "clip" and t.get("target_id") in set(kept)}

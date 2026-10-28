@@ -52,7 +52,7 @@ def test_ostrzezenie_liczy_skutki(env):
         return await env.media.video_delete_impact(PAIR, "m1", "v1", pair)
 
     got = env.run(go)
-    assert (got["virtual_clips"], got["kept_clips"], got["comments"], got["threads"]) == (1, 1, 3, 2)
+    assert (got["virtual_clips"], got["kept_clips"], got["comments"], got["threads"]) == (0, 2, 2, 1)
     assert got["restorable"] and got["retention_days"] == 30
 
 
@@ -73,15 +73,16 @@ def test_usuniecie_i_przywrocenie(env):
         return out, room, clips, threads, comments, again, back, room2, after, twice
 
     out, room, clips, threads, comments, again, back, room2, after, twice = env.run(go)
-    assert out["trashed"] and out["virtual_clips"] == 1 and out["kept_clips"] == 1
+    assert out["trashed"] and out["virtual_clips"] == 0 and out["kept_clips"] == 2
     assert room["videos"] == [] and [v["id"] for v in room["trashed_videos"]] == ["v1"]
-    assert room["trashed_videos"][0]["kept_clips"] == 1
-    assert [c["id"] for c in room["clips"]] == []  # klip z MP4 jedzie do Biblioteki, nie do pokoju
-    assert clips["c1"] is not None and clips["c2"] is None
-    assert threads == {"t3", "t4"}  # t1 i t2 opustoszaly, t3 ma jeszcze komentarz bez kotwicy
-    assert comments["k1"] and comments["k2"] and comments["k4"] and comments["k3"] is None and comments["k5"] is None
+    assert room["trashed_videos"][0]["kept_clips"] == 2
+    assert sorted(c["id"] for c in room["clips"]) == ["c1", "c2"]  # klipy zostaja w pokoju (video_trashed)
+    assert all(c["video_trashed"] for c in room["clips"])
+    assert clips["c1"] is None and clips["c2"] is None
+    assert threads == {"t1", "t3", "t4"}  # t2 opustoszal, t3 ma jeszcze komentarz bez kotwicy
+    assert comments["k2"] and comments["k4"] and comments["k1"] is None and comments["k3"] is None and comments["k5"] is None
     assert again == 404
-    assert back["clips"] == 1 and back["video"]["id"] == "v1"
+    assert back["clips"] == 0 and back["video"]["id"] == "v1"
     assert [v["id"] for v in room2["videos"]] == ["v1"] and room2["trashed_videos"] == []
     assert after[0] == {"t1", "t2", "t3", "t4"}
     assert all(v is None for v in after[1].values()) and all(v is None for v in after[2].values())
@@ -152,7 +153,7 @@ def test_usun_na_zawsze_z_kosza(env):
 
     not_in_trash, komisja, out, tomb, room, again = env.run(go)
     assert not_in_trash == 409 and komisja == 403 and again == 409
-    assert out["purged"] and out["tombstone"] and (out["virtual_clips"], out["kept_clips"], out["comments"]) == (1, 1, 3)
+    assert out["purged"] and out["tombstone"] and (out["virtual_clips"], out["kept_clips"], out["comments"]) == (0, 2, 2)
     assert tomb is not None and room["trashed_videos"] == []  # nagrobek trzyma klip z MP4, kosz pusty
 
 
