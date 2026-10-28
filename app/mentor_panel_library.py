@@ -35,6 +35,16 @@ router = APIRouter(prefix="/mentor-panel", tags=["Mentor"])
 Actor = C.MentorActor
 
 
+async def _watched_lookup(pair_id: str, match_ids: List[Any]) -> Dict[str, Dict[str, Any]]:
+    """Karty meczów z Trybuny (przedrostek `tr_`) do podpisów klipów - Biblioteka, Zestawienia, publiczne klipy."""
+    ids = [R.s(m) for m in match_ids if R.s(m).startswith("tr_")]
+    if not ids:
+        return {}
+    from app.mentor_trybuna import lookup_cards
+
+    return await lookup_cards(pair_id, ids)
+
+
 async def _ctx_for(table, row_id: str, actor: Actor, *, action: str = "view", missing: str = "Nie znaleziono.") -> tuple:
     row = await C.one(select(table).where(table.c.id == row_id))
     if not row or row.get("deleted_at") is not None:
@@ -634,6 +644,7 @@ async def compilation_payload(ctx: Dict[str, Any], compilation_id: str) -> Dict[
     shaped = {c["id"]: c for c in await C.clips_payload(ctx, [clips[i["clip_id"]] for i in live])}
     # Sekcje meczów w playliście (herby, numer, data, wynik) - skrót karty meczu przy klipie.
     cards = {c["match_id"]: c for c in await C.pair_match_cards(ctx["judge_ids"])} if live else {}
+    cards.update(await _watched_lookup(ctx["pair_id"], [c.get("match_id") for c in shaped.values()]))
     for clip in shaped.values():
         clip["match"] = R.slim_match(cards.get(clip.get("match_id")))
     names = await C.people([comp.get("created_by"), comp.get("acted_by")])
@@ -1111,6 +1122,7 @@ async def _youth(ctx: Dict[str, Any], kind: str, row: Dict[str, Any]) -> bool:
     if not match_ids:
         return False
     cards = {c["match_id"]: c for c in await C.pair_match_cards(ctx["judge_ids"])}
+    cards.update(await _watched_lookup(ctx["pair_id"], match_ids))
     return any(R.is_youth(cards.get(m, {}).get("category"), cards.get(m, {}).get("competition_name")) for m in match_ids)
 
 
@@ -1181,6 +1193,7 @@ async def public_view(token: str):
     if clip:
         pair = await _public_pair(clip["pair_id"])
         cards = {c["match_id"]: c for c in await C.pair_match_cards(pair["judge_ids"])}
+        cards.update(await _watched_lookup(clip["pair_id"], [clip["match_id"]]))
         cats = await C.rows(select(mentor_categories).where((mentor_categories.c.pair_id == clip["pair_id"]) | mentor_categories.c.pair_id.is_(None)))
         return {"kind": "clip", **await _public_clip(clip, cards, cats)}
     comp = await C.one(select(mentor_compilations).where(mentor_compilations.c.public_token == token))
@@ -1190,6 +1203,7 @@ async def public_view(token: str):
         cats = await C.rows(select(mentor_categories).where((mentor_categories.c.pair_id == comp["pair_id"]) | mentor_categories.c.pair_id.is_(None)))
         items = await _items(comp["id"])
         clips = await _live_clips(comp["pair_id"], [i["clip_id"] for i in items])
+        cards.update(await _watched_lookup(comp["pair_id"], [c["match_id"] for c in clips.values()]))
         out_items = []
         for i in items:
             if i["clip_id"] in clips:

@@ -685,6 +685,11 @@ async def enriched_pair_cards(ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 async def match_card(ctx: Dict[str, Any], match_id: str, *, required: bool = True) -> Optional[Dict[str, Any]]:
+    if R.s(match_id).startswith("tr_"):
+        # Mecz z Trybuny (cudzy mecz oglądany przez parę): ta sama karta, inne źródło (`mentor_watched_matches`).
+        from app.mentor_trybuna import watched_card
+
+        return await watched_card(ctx, match_id, required=required)
     cards = [c for c in await pair_match_cards(ctx["judge_ids"]) if c["match_id"] == R.s(match_id)]
     if not cards:
         if required:

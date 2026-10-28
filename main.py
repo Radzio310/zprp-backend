@@ -376,6 +376,11 @@ app.include_router(mentor_panel_router)
 # Mentor x Bastion: „Szukaj w Bastionie” (Archiwista) i nagrania sezonu - `docs/mentor-panel.md` 8.10.
 from app.mentor_bastion_search import router as mentor_bastion_search_router
 app.include_router(mentor_bastion_search_router)
+# Trybuna Mentora: cudze mecze oglądane przez parę, obserwowani, kolejka - `docs/mentor-panel.md` 8.11.
+from app.mentor_trybuna import router as mentor_trybuna_router
+from app.mentor_trybuna_feed import router as mentor_trybuna_feed_router
+app.include_router(mentor_trybuna_router)
+app.include_router(mentor_trybuna_feed_router)
 app.include_router(short_result_records_router)
 # Dodatkowy raport sędziów/delegata: treść, PDF i adresaci.
 app.include_router(extra_report_router)
@@ -1631,6 +1636,9 @@ async def startup():
         for _n in (1, 2):
             asyncio.create_task(run_bastion_worker(_n))
         logger.info("✅ Mentor Bastion: worker klipów MP4 wystartował (2 pętle)")
+        # Trybuna: dzienny cichy push o nowych nagraniach obserwowanych sędziów (ślad w mentor_trybuna_notified).
+        from app.mentor_trybuna_feed import run_trybuna_notifier
+        asyncio.create_task(run_trybuna_notifier())
     logger.info("✅ Mentor panel: media worker, retencja i e-maile wystartowały")
     logger.info("✅ Publiczna hurtownia ZPRP wystartowała (lekki cykl 2/15 min + katalog 24 h)")
     logger.info("✅ MP protocol snapshot scheduler started")

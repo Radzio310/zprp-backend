@@ -18,6 +18,7 @@ from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, String, Table, 
 from app.mentor_bastion_tables import define_tables as define_bastion
 from app.mentor_evaluation_tables import define_tables as define_evaluations
 from app.mentor_panel_tables import define_tables as define_panel
+from app.mentor_trybuna_tables import define_tables as define_trybuna
 from app.mentoring_tables import define_tables as define_mentoring
 from app.stream_tables import define_tables as define_streams
 from app.zprp_public_tables import define_tables as define_public
@@ -27,6 +28,7 @@ MODULES = (
     "app.mentor_panel_media", "app.mentor_panel_reports", "app.mentor_panel_notify", "app.mentor_evaluations",
     "app.mentor_panel_handoff", "app.mentor_bastion", "app.mentor_bastion_jobs", "app.mentor_bastion_client",
     "app.mentoring", "app.proel_auth", "app.streams.store", "app.streams.worker", "app.mentor_panel_streams", "app.mentor_video_trash",
+    "app.mentor_bastion_search", "app.mentor_trybuna", "app.mentor_trybuna_rules", "app.mentor_trybuna_feed",
 )
 
 PAIR = "pair-1"
@@ -75,6 +77,8 @@ class Env:
             tables[table.name] = table
         for table in define_bastion(metadata):
             tables[table.name] = table
+        for table in define_trybuna(metadata):
+            tables[table.name] = table
         for table in define_public(metadata):
             tables[table.name] = table
         for table in define_streams(metadata):
@@ -115,6 +119,9 @@ class Env:
         self.bastion = importlib.import_module("app.mentor_bastion")
         self.bastion_client = importlib.import_module("app.mentor_bastion_client")
         self.bastion_jobs = importlib.import_module("app.mentor_bastion_jobs")
+        self.trybuna = importlib.import_module("app.mentor_trybuna")
+        self.trybuna_feed = importlib.import_module("app.mentor_trybuna_feed")
+        self.trybuna_rules = importlib.import_module("app.mentor_trybuna_rules")
         self.sent = []
 
         async def fake_notify(ctx, actor_id, title, body, **kwargs):

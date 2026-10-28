@@ -321,6 +321,7 @@ async def _timeline(match_id: str, code: str) -> Dict[str, Any]:
 async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(pair_id, actor)
     card = await C.match_card(ctx, match_id)
+    watched = bool(card.get("watched"))
     from app.mentor_panel_media import video_list
     from app.mentor_panel_streams import room_streams
     from app.mentor_video_trash import trash_payload
@@ -347,9 +348,13 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
         return shaped
 
     async def load_delegate():
+        if watched:
+            return []  # Trybuna: bez arkuszy i ocen
         return [r for r in await C.delegate_sheet_rows(ctx["judge_ids"], [mid]) if R.s(r.get("match_id")) == mid]
 
     async def load_mentor():
+        if watched:
+            return []
         found = [r for r in await C.mentor_sheet_rows(ctx["pair_key"]) if R.s(r.get("match_id")) == mid]
         return await mentor_sheet_shapes(found)
 
@@ -361,7 +366,7 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
     # Niezależne odczyty pokoju (w tym oś ProEla) równolegle zamiast kolejno.
     (videos, raw_videos, streams), clips, delegate, mentor_shapes, threads, timeline = await asyncio.gather(
         load_videos(), load_clips(), load_delegate(), load_mentor(), load_threads(),
-        _timeline(mid, R.s(card.get("match_code"))))
+        _timeline(R.s(card.get("zprp_match_id")) if watched else mid, R.s(card.get("proel_key") or card.get("match_code"))))
     markers: List[Dict[str, Any]] = []
     for video in raw_videos:
         markers += R.markers_as_clips(video, clean_markers(R.json_value(video.get("markers_json"), [])))
@@ -391,6 +396,7 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
         "delegate_sheets": [delegate_sheet_shape(r) for r in delegate], "mentor_sheets": mentor_shapes,
         "threads": threads, "rev": ctx["rev"],
         "can": {action: C.may(ctx, action) for action in ("flag", "video", "create", "categories", "publish")},
+        "watched": watched,
         "trashed_videos": await trash_payload(ctx, mid),
         "suggested_streams": streams["streams"],
         "stream_search": streams["search"],
@@ -427,6 +433,10 @@ def _evaluation_actor(actor: Actor):
 
 async def _evaluation_ctx(pair_id: str, match_id: str, actor: Actor, action: str) -> str:
     ctx = await C.pair_context(pair_id, actor, action=action)
+    if R.s(match_id).startswith("tr_"):
+        from app.mentor_trybuna import no_evaluation
+
+        raise no_evaluation()  # mecz z Trybuny: bez oceny (ani mentora, ani pary)
     return (await C.match_card(ctx, match_id))["match_id"]
 
 
