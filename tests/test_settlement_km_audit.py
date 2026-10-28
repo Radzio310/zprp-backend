@@ -158,3 +158,34 @@ def test_dabrowa_pod_opolem_a_nie_gornicza():
     good = {"distance_km": 118.0, "home_city": "Siemianowice Śląskie", "city": "Dąbrowa",
             "distance_source": "google", "teams": teams}
     assert A.audit_row(good, g, province="slaskie") == []
+
+
+def test_resolve_distances_rownolegle_i_raz_na_pare():
+    calls = []
+    inflight = {"now": 0, "max": 0}
+
+    class R:
+        def json(self):
+            return {"routes": [{"overview_polyline": {"points": "p"},
+                                "legs": [{"distance": {"value": 10000}}]}]}
+
+    class C:
+        async def get(self, url, params):
+            calls.append(params["origin"])
+            inflight["now"] += 1
+            inflight["max"] = max(inflight["max"], inflight["now"])
+            await asyncio.sleep(0.01)
+            inflight["now"] -= 1
+            return R()
+
+    SD.GOOGLE_MAPS_API_KEY = "x"
+    ticks = []
+    pairs = [(f"Miasto{i}", "Gliwice") for i in range(10)] + [("Miasto0", "Gliwice")] * 3
+    out = asyncio.run(
+        SD.resolve_distances(pairs, SD.DistanceIndex(None), client=C(), on_progress=lambda d, t: ticks.append((d, t)))
+    )
+    assert len(out) == 10
+    assert all(v == (10.0, "google") for v in out.values())
+    assert len(calls) == 10 * 4  # cztery warianty na UNIKALNA pare, powtorki z pamieci
+    assert inflight["max"] > 4  # kilka par naraz, nie jedna po drugiej
+    assert ticks[-1] == (10, 10)

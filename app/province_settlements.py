@@ -989,6 +989,11 @@ async def status(province: str = Query(...)):
             # Jakie sezony objal przebieg - pierwszy i reczny potrafia ich
             # miec kilkanascie, zwykly tylko biezacy.
             "seasons": [s for s in str(run.get("seasons") or "").split(",") if s],
+            # Prawdziwy postep: klucz etapu (login, judges, matches, venues, km,
+            # save, done) i licznik w jego obrebie (null = etap bez licznika).
+            "stage": run.get("stage"),
+            "stage_done": run.get("stage_done"),
+            "stage_total": run.get("stage_total"),
         } if run else None,
     }
 

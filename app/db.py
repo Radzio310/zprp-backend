@@ -860,6 +860,10 @@ province_settlement_runs = Table(
     Column("heartbeat_at", DateTime(timezone=True), nullable=True),
     # Jakie sezony objal przebieg, np. „2026/2027" albo „2026/2027,2025/2026".
     Column("seasons", String, nullable=True),
+    # Prawdziwy postep: klucz etapu (np. "km") i licznik w jego obrebie.
+    Column("stage", String, nullable=True),
+    Column("stage_done", Integer, nullable=True),
+    Column("stage_total", Integer, nullable=True),
 )
 
 
@@ -5131,6 +5135,9 @@ with engine.connect() as _conn:
     # Tabela przebiegow istnieje na produkcji, wiec `create_all` ich nie doloży.
     _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS heartbeat_at timestamptz"))
     _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS seasons varchar"))
+    _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS stage varchar"))
+    _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS stage_done integer"))
+    _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS stage_total integer"))
     _conn.execute(text("ALTER TABLE province_zprp_write_journal ADD COLUMN IF NOT EXISTS date_before varchar"))
     _conn.execute(text("ALTER TABLE province_zprp_write_journal ADD COLUMN IF NOT EXISTS date_after varchar"))
     # Dziennik giełdy powstał później niż sama giełda, więc oferty sprzed jego

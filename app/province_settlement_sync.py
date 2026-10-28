@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -98,6 +99,14 @@ logger = logging.getLogger(__name__)
 #: zwiazku, a nie API z limitem - walenie w nia setka rownoleglych polaczen
 #: jest niegrzeczne i konczy sie odcieciem.
 JUDGE_REQUEST_DELAY = 0.35
+
+#: Ilu sedziow czytamy naraz. Odstep `JUDGE_REQUEST_DELAY` zostaje w KAZDYM
+#: watku, wiec ZPRP widzi najwyzej kilka zapytan jednoczesnie (nie setke), a
+#: przejscie po ~300 sedziach nie idzie juz jeden po drugim.
+JUDGE_CONCURRENCY = 4
+
+#: Ile stron listy sedziow okregu czytamy naraz.
+JUDGE_PAGES_CONCURRENCY = 4
 
 SYNC_INTERVAL_HOURS = 24
 
@@ -360,6 +369,7 @@ async def _collect_outside(
     beat: Any,
     own_prefixes: Optional[set[str]] = None,
     lists_sink: Optional[dict[str, list]] = None,
+    tick: Optional[Any] = None,
 ) -> tuple[list[dict], dict[str, bool]]:
     """
     Mecze z prywatnych list sedziow - sezon po sezonie, sedzia po sedzi.
@@ -383,13 +393,18 @@ async def _collect_outside(
     archiwum meczow (`app/zprp_archive.py`). Ten sam przebieg zasila wtedy
     Rozliczenia i Statystyki, zamiast drugi raz chodzic po listach.
     """
-    collected: list[dict] = []
     season_ok = {label: True for label in seasons}
+    semaphore = asyncio.Semaphore(JUDGE_CONCURRENCY)
+    finished = 0
+    total = len(judges)
 
-    for judge_id, judge in judges.items():
+    async def one_judge(judge_id: str, judge: dict) -> tuple[list[dict], dict[str, list]]:
+        """Mecze jednego sedziego i jego listy dla archiwum (sklejane potem w kolejnosci)."""
+        collected: list[dict] = []
+        sink: dict[str, list] = {}
         name = _s(judge.get("full_name"))
         if not name:
-            continue
+            return collected, sink
         try:
             entry_soup, options, selected = await _judge_season_pages(client, cookies, judge_id)
         except Exception as exc:
@@ -398,14 +413,12 @@ async def _collect_outside(
             logger.warning("[settlement] lista meczow sedziego %s: %s", judge_id, exc)
             for label in seasons:
                 season_ok[label] = False
-            await beat()
-            continue
+            return collected, sink
         if not options:
             logger.warning("[settlement] lista meczow sedziego %s bez wyboru sezonu", judge_id)
             for label in seasons:
                 season_ok[label] = False
-            await beat()
-            continue
+            return collected, sink
 
         for label in seasons:
             value = options.get(label)
@@ -431,7 +444,7 @@ async def _collect_outside(
                 season_ok[label] = False
                 continue
             if lists_sink is not None and label in lists_sink:
-                lists_sink[label].append((judge_id, list(records.values())))
+                sink.setdefault(label, []).append((judge_id, list(records.values())))
 
             past = label != current
             for key, record in records.items():
@@ -480,10 +493,27 @@ async def _collect_outside(
                     "approved": None,
                 })
             await asyncio.sleep(JUDGE_REQUEST_DELAY)
+        return collected, sink
 
+    async def guarded(judge_id: str, judge: dict) -> tuple[list[dict], dict[str, list]]:
+        nonlocal finished
+        async with semaphore:
+            result = await one_judge(judge_id, judge)
         # Znak zycia po kazdym sedzim - pobranie wstecz trwa dluzej niz regula
         # „trup po 25 min" liczona od startu.
+        finished += 1
         await beat()
+        if tick is not None:
+            await tick(finished, total)
+        return result
+
+    results = await asyncio.gather(*(guarded(jid, j) for jid, j in judges.items()))
+    collected: list[dict] = []
+    for rows, sink in results:  # kolejnosc sedziow jak przy petli szeregowej
+        collected.extend(rows)
+        if lists_sink is not None:
+            for label, items in sink.items():
+                lists_sink[label].extend(items)
 
     return collected, season_ok
 
@@ -544,12 +574,21 @@ async def _load_judges(client: AsyncClient, cookies: dict, province: str) -> dic
         base_qs["a"] = "sedzia"
         base_qs.setdefault("Filtr_archiwum", "1")
         base_qs["count"] = str(int(paging.get("count") or 10))
-        for offset in range(1, int(paging.get("max_offset") or 0) + 1):
+        page_gate = asyncio.Semaphore(JUDGE_PAGES_CONCURRENCY)
+
+        async def read_page(offset: int) -> tuple[int, str]:
             qs = dict(base_qs)
             qs["offset"] = str(offset)
-            _, extra = await fetch_with_correct_encoding(
-                client, "/index.php?" + urlencode(qs, doseq=True), method="GET", cookies=cookies
-            )
+            async with page_gate:
+                _, extra = await fetch_with_correct_encoding(
+                    client, "/index.php?" + urlencode(qs, doseq=True), method="GET", cookies=cookies
+                )
+            return offset, extra
+
+        pages = await asyncio.gather(
+            *(read_page(offset) for offset in range(1, int(paging.get("max_offset") or 0) + 1))
+        )
+        for offset, extra in sorted(pages, key=lambda item: item[0]):
             absorb(await asyncio.to_thread(_parse_officials_page, extra, current_offset=offset))
     except Exception as exc:
         logger.warning("[settlement] lista sedziow okregu %s: %s", province, exc)
@@ -609,7 +648,7 @@ async def _store_judges(province: str, judges: dict[str, dict]) -> None:
 # ---------------------------------------------------------------------------
 
 #: Ile zapytan o hale naraz. Publiczne API rozgrywek to jedna maszyna zwiazku.
-VENUE_CONCURRENCY = 6
+VENUE_CONCURRENCY = 8
 
 #: Po tylu dniach pytamy o hale drugi raz - ale TYLKO przy meczach, ktore
 #: dopiero maja sie odbyc. Hali rozegranego meczu nikt juz nie zmieni.
@@ -617,7 +656,7 @@ VENUE_TTL_DAYS = 14
 
 
 async def _resolve_venues(
-    client: AsyncClient, wanted: dict[str, Optional[datetime]]
+    client: AsyncClient, wanted: dict[str, Optional[datetime]], tick: Optional[Any] = None
 ) -> dict[str, dict]:
     """
     Miasto i nazwa hali kazdego meczu - z publicznego API, z pamiecia w bazie.
@@ -651,8 +690,16 @@ async def _resolve_venues(
     stale: list[str] = []
     for match_id, match_at in wanted.items():
         hit = cached.get(match_id)
-        if not hit or not _s(hit.get("city")):
+        if not hit:
             stale.append(match_id)
+            continue
+        if not _s(hit.get("city")):
+            # Wpis bez miasta pytamy ponownie tylko wtedy, gdy zapisano go PRZED
+            # meczem (API moglo jeszcze nie znac hali). Rozegranego meczu, o ktory
+            # pytalismy juz po fakcie, nie pytamy w kolko.
+            stamp = hit.get("fetched_at")
+            if stamp is None or match_at is None or stamp < match_at:
+                stale.append(match_id)
             continue
         fetched_at = hit.get("fetched_at")
         upcoming = match_at is None or match_at >= now - timedelta(days=1)
@@ -662,7 +709,17 @@ async def _resolve_venues(
     if stale:
         semaphore = asyncio.Semaphore(VENUE_CONCURRENCY)
 
+        total = len(stale)
+        finished = 0
+
         async def one(match_id: str) -> None:
+            nonlocal finished
+            await one_inner(match_id)
+            finished += 1
+            if tick is not None:
+                await tick(finished, total)
+
+        async def one_inner(match_id: str) -> None:
             # Zapytanie I zapis pod tym samym semaforem: bez tego kilkaset zadan
             # naraz siadaloby na pule polaczen do bazy.
             async with semaphore:
@@ -1155,7 +1212,42 @@ async def refresh_province(
 
     pulse_task = asyncio.create_task(pulse())
 
+    # --- prawdziwy postep + czasy etapow ---
+    # Etap i licznik ida do wiersza przebiegu (`stage`, `stage_done`,
+    # `stage_total`); klient czyta je przez /status. Zapis co najwyzej raz na
+    # sekunde (poza zmiana etapu i ostatnim krokiem), zeby setki rownoleglych
+    # zadan nie zalewaly bazy. Czas kazdego etapu laduje w logu.
+    clock = {"stage": "", "since": time.monotonic(), "start": time.monotonic(), "written": 0.0}
+
+    async def write_stage(done: Optional[int], total: Optional[int]) -> None:
+        clock["written"] = time.monotonic()
+        try:
+            await database.execute(
+                update(province_settlement_runs)
+                .where(province_settlement_runs.c.id == int(run_id))
+                .values(
+                    stage=clock["stage"], stage_done=done, stage_total=total, heartbeat_at=_now()
+                )
+            )
+        except Exception:
+            pass  # postep to wygoda, nie warunek przebiegu
+
+    async def stage(key: str) -> None:
+        now_t = time.monotonic()
+        if clock["stage"]:
+            logger.info(
+                "[settlement] %s: etap %s trwal %d ms",
+                province, clock["stage"], int((now_t - clock["since"]) * 1000),
+            )
+        clock["stage"], clock["since"] = key, now_t
+        await write_stage(None, None)
+
+    async def tick(done: int, total: int) -> None:
+        if done >= total or time.monotonic() - clock["written"] >= 1.0:
+            await write_stage(done, total)
+
     try:
+        await stage("login")
         # Nasze przedrostki numerow i poprawka historii zapisanej stara regula -
         # sama baza, bez ZPRP (patrz `fix_history`).
         own = await _own_prefixes(province)
@@ -1169,11 +1261,13 @@ async def refresh_province(
         ) as client, AsyncClient(follow_redirects=True, timeout=30.0) as public:
             cookies = await _login_zprp_and_get_cookies(client, credentials[0], credentials[1])
 
+            await stage("judges")
             judges = await _load_judges(client, cookies, province)
             if not judges:
                 return await finish(False, error="Nie udało się odczytać listy sędziów okręgu")
             await _store_judges(province, judges)
 
+            await stage("matches")
             # --- ktore sezony ---
             current = season_of(_now())
             # Reczne odswiezenie jest tez momentem na jednorazowe nadrobienie
@@ -1230,6 +1324,7 @@ async def refresh_province(
                     beat=beat,
                     own_prefixes=own,
                     lists_sink=archive_lists,
+                    tick=tick,
                 )
 
             rows = district + outside
@@ -1242,7 +1337,8 @@ async def refresh_province(
                 match_id = _s(str(row["match_key"]).split(":", 1)[-1])
                 if match_id and match_id not in wanted_ids:
                     wanted_ids[match_id] = row.get("match_at")
-            venues = await _resolve_venues(public, wanted_ids)
+            await stage("venues")
+            venues = await _resolve_venues(public, wanted_ids, tick=tick)
             for row in rows:
                 match_id = _s(str(row["match_key"]).split(":", 1)[-1])
                 venue = venues.get(match_id) or {}
@@ -1268,6 +1364,7 @@ async def refresh_province(
                     judges[judge_id]["city"] = city
 
             # --- odleglosci ---
+            await stage("km")
             distance_row = await database.fetch_one(
                 select(okreg_distances.c.content).where(okreg_distances.c.province.in_(spellings(province)))
             )
@@ -1327,6 +1424,11 @@ async def refresh_province(
                     origin_region=province_label(region_slug),
                     locate=_route_locator(province),
                     shapes=shapes,
+                    on_progress=tick,
+                )
+                logger.info(
+                    "[settlement] %s: Google zmierzyl %d par (pamiec z geometria: %d)",
+                    province, len(cache) - len(before), len(before),
                 )
                 await _google_memory_save(
                     region_slug,
@@ -1343,6 +1445,7 @@ async def refresh_province(
                 row["distance_km"] = hit[0] if hit else None
                 row["distance_source"] = hit[1] if hit else "none"
 
+            await stage("save")
             await _store(province, rows, judges, scope=scope, current=current)
 
             # Nazwiska dla sedziow, ktorych lista okregu nie nazwala (w zestawieniu
@@ -1380,6 +1483,11 @@ async def refresh_province(
                     )
                 )
 
+        await stage("done")
+        logger.info(
+            "[settlement] %s: przebieg %d lacznie %d ms (sedziow %d, wierszy %d)",
+            province, int(run_id), int((time.monotonic() - clock["start"]) * 1000), len(judges), len(rows),
+        )
         result = await finish(
             True,
             judges=len(judges),

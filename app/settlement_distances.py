@@ -336,6 +336,12 @@ async def google_distance(
     return km
 
 
+#: Ile par miast mierzymy w Google naraz. Kazda para to cztery zapytania
+#: Directions, wiec 6 par = 24 zapytania w locie - z duzym zapasem pod limitem
+#: Google (50 zapytan/s), a pomiar setek par nie trwa juz minut po kolei.
+GOOGLE_PAIR_CONCURRENCY = 6
+
+
 async def resolve_distances(
     pairs: Iterable[tuple[str, str]],
     index: DistanceIndex,
@@ -345,6 +351,7 @@ async def resolve_distances(
     origin_region: str = "",
     locate: Optional[Any] = None,
     shapes: Optional[dict] = None,
+    on_progress: Optional[Any] = None,
 ) -> dict[tuple[str, str], tuple[Optional[float], str]]:
     """
     Para miast -> (kilometry, zrodlo).
@@ -352,17 +359,30 @@ async def resolve_distances(
     Zrodlo: "same-city" | "table" | "google" | "none". Brak wyniku NIE jest
     zerem: mecz bez odleglosci dostaje status „brak dojazdu" i widac, ze kwoty
     trzeba uzupelnic, zamiast po cichu placic 0 zl.
+
+    Pary, ktorych nie zna ani pamiec, ani tabela, mierzymy w Google RAZ na
+    unikalny klucz (po normalizacji miast) i rownolegle, z limitem
+    `GOOGLE_PAIR_CONCURRENCY`. `on_progress(done, total)` (opcjonalne, moze byc
+    korutyna) dostaje licznik pomiarow Google.
     """
+    import asyncio
+
     cache = cache if cache is not None else {}
     out: dict[tuple[str, str], tuple[Optional[float], str]] = {}
+    #: klucz -> pierwsza para surowa (do pomiaru) i wszystkie surowe warianty
+    pending: dict[tuple[str, str], tuple[str, str]] = {}
+    waiters: dict[tuple[str, str], list[tuple[str, str]]] = {}
 
     for origin, destination in pairs:
-        key = (normalize_city(origin)[0], normalize_city(destination)[0])
-        if key in out:
+        if (origin, destination) in out:
             continue
+        key = (normalize_city(origin)[0], normalize_city(destination)[0])
         if key in cache:
             value = cache[key]
             out[(origin, destination)] = (value, "google" if value is not None else "none")
+            continue
+        if key in pending:
+            waiters[key].append((origin, destination))
             continue
 
         table_hit = index.lookup(origin, destination)
@@ -370,15 +390,40 @@ async def resolve_distances(
             out[(origin, destination)] = (table_hit, "same-city" if table_hit == 0 else "table")
             continue
 
-        value, encoded = (None, "")
-        if client is not None:
-            value, encoded = await google_route(
-                client, origin, destination, origin_region,
-                *(locate(origin, destination) if locate else (None, None)),
-            )
-        cache[key] = value
-        if shapes is not None and value is not None and encoded:
-            shapes[key] = encoded
-        out[(origin, destination)] = (value, "google" if value is not None else "none")
+        pending[key] = (origin, destination)
+        waiters[key] = [(origin, destination)]
+
+    if pending:
+        semaphore = asyncio.Semaphore(GOOGLE_PAIR_CONCURRENCY)
+        total = len(pending)
+        done = 0
+
+        async def measure(key: tuple[str, str], origin: str, destination: str) -> None:
+            nonlocal done
+            value, encoded = (None, "")
+            async with semaphore:
+                if client is not None:
+                    value, encoded = await google_route(
+                        client, origin, destination, origin_region,
+                        *(locate(origin, destination) if locate else (None, None)),
+                    )
+            cache[key] = value
+            if shapes is not None and value is not None and encoded:
+                shapes[key] = encoded
+            done += 1
+            if on_progress is not None:
+                try:
+                    result = on_progress(done, total)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    pass  # postep to wygoda, nie warunek pomiaru
+
+        await asyncio.gather(*(measure(key, *raw) for key, raw in pending.items()))
+
+        for key, raw_pairs in waiters.items():
+            value = cache[key]
+            for raw in raw_pairs:
+                out[raw] = (value, "google" if value is not None else "none")
 
     return out
