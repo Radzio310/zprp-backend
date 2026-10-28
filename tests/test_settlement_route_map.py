@@ -68,3 +68,39 @@ def test_przymiotnik_bez_przewagi_ludnosci_nie_zgaduje():
         (P.Place("2", "Nakło", 50.6, 19.7, "slaskie", 900), []),
     ])
     assert RM.unique_point(g, "Nakło Śląskie", "śląskie") is None
+
+
+def _dabrowa_gaz():
+    return P.Gazetteer([
+        (P.Place("1", "Dąbrowa", 53.65, 23.35, "podlaskie", 500), []),
+        (P.Place("2", "Dąbrowa", 50.6835, 17.7496, "opolskie", 1100), []),
+        (P.Place("3", "Dąbrowa", 50.0, 20.2, "malopolskie", 3000), []),
+        (P.Place("4", "Dąbrowa Górnicza", 50.327, 19.203, "slaskie", 120000), []),
+        (P.Place("5", "Opole", 50.671, 17.926, "opolskie", 127000), []),
+    ])
+
+
+def test_iim1_8_hala_w_dabrowie_pod_opolem_do_google_z_wojewodztwem():
+    # Zawody=210953: Hala_miasto „Dąbrowa", ul. Szkolna 9, gospodarz GTV BUS Gwardia II Opole.
+    teams = "GTV BUS Gwardia II Opole - Sowie Żagiew Dzierżoniów"
+    dest = RM.hall_destination(_dabrowa_gaz(), "Dąbrowa", "Szkolna 9", teams)
+    assert dest == "Szkolna 9, Dąbrowa, woj. opolskie"
+    assert "Górnicza" not in dest
+
+
+def test_wieloznaczna_hala_bez_kontekstu_albo_daleko_od_gospodarza():
+    g = _dabrowa_gaz()
+    assert RM.hall_destination(g, "Dąbrowa", "Szkolna 9", None) == "Szkolna 9 Dąbrowa"
+    # gospodarz z Białegostoku: najbliższa Dąbrowa podlaska
+    g2 = P.Gazetteer([*[(p, []) for p in g.places.values()],
+                      (P.Place("9", "Białystok", 53.13, 23.16, "podlaskie", 290000), [])])
+    assert RM.hall_destination(g2, "Dąbrowa", "", "Jagiellonia Białystok - X").endswith("woj. podlaskie")
+    # nazwa jednoznaczna zostaje sama
+    assert RM.hall_destination(g, "Opole", "Szkolna 9", "X Opole - Y") == "Opole"
+
+
+def test_nakło_śląskie_jawny_alias_w_domyslnym_skorowidzu():
+    gaz = P.default_gazetteer()
+    found = gaz.candidates("Nakło Śląskie")
+    assert len(found) == 1 and abs(found[0].lat - 50.4369) < 0.01 and found[0].province == "slaskie"
+    assert RM.unique_point(gaz, "Nakło Śląskie", "śląskie") == (found[0].lat, found[0].lon)

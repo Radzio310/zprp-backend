@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Optional
 
-from app.national_place_rules import Gazetteer, haversine_km, province_slug
+from app.national_place_rules import Gazetteer, haversine_km, province_label, province_slug
 
 
 def _plain(value: Any) -> str:
@@ -135,3 +135,57 @@ def locator(gaz: Gazetteer, province: Any):
         return unique_point(gaz, origin, province), unique_point(gaz, destination)
 
     return locate
+
+
+#: Największa odległość hali od miasta gospodarza, przy której ufamy, że wieloznaczna
+#: nazwa hali („Dąbrowa" x96) to miejscowość z okolicy klubu.
+HOST_RADIUS_KM = 60.0
+
+
+def host_place(gaz: Gazetteer, teams: Any):
+    """
+    Miejscowość gospodarza z nazwy drużyny („GTV BUS Gwardia II Opole" -> Opole).
+    Próbujemy końcówek nazwy (1-3 słowa), największa miejscowość wygrywa.
+    """
+    host = str(teams or "").split(" - ")[0].strip()
+    words = host.replace(",", " ").split()
+    for size in (3, 2, 1):
+        if len(words) < size:
+            continue
+        tail = " ".join(words[-size:])
+        pool = _strict(gaz.candidates(tail), tail)
+        if pool:
+            return max(pool, key=lambda p: p.population)
+    return None
+
+
+def hall_place(gaz: Gazetteer, city: Any, teams: Any):
+    """
+    Wieloznaczna nazwa hali rozstrzygnięta kontekstem: imiennik NAJBLIŻSZY
+    miasta gospodarza (do HOST_RADIUS_KM). None = brak podstaw, nie zgadujemy.
+    """
+    pool = _strict(gaz.candidates(city) if city else [], city)
+    if len({(round(p.lat, 1), round(p.lon, 1)) for p in pool}) < 2:
+        return pool[0] if pool else None
+    host = host_place(gaz, teams)
+    if host is None:
+        return None
+    best = min(pool, key=lambda p: haversine_km(p.point, host.point))
+    return best if haversine_km(best.point, host.point) <= HOST_RADIUS_KM else None
+
+
+def hall_destination(gaz: Gazetteer, city: Any, address: Any, teams: Any = None) -> str:
+    """
+    Cel dla Google. Nazwa jednoznaczna zostaje sama. Wieloznaczna dostaje
+    województwo imiennika bliskiego gospodarzowi: „Szkolna 9, Dąbrowa, opolskie".
+    Bez kontekstu - jak dotąd: adres + miasto (albo samo miasto).
+    """
+    name = str(city or "").strip()
+    street = str(address or "").strip()
+    if unique_point(gaz, name) is not None:
+        return name
+    place = hall_place(gaz, name, teams)
+    region = province_label(place.province) if place else ""
+    if region:
+        return ", ".join(x for x in (street, name, f"woj. {region}") if x)
+    return f"{street} {name}" if street else name

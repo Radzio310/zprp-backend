@@ -140,18 +140,21 @@ def test_resolve_distances_zbiera_geometrie():
     assert shapes == {("tychy", "gliwice"): "abc"}
 
 
-def test_dabrowa_gornicza_to_nie_falszywy_alarm():
-    # Hala „Dąbrowa" z adresem w Dąbrowie Górniczej: 12,4 km z Siemianowic i
-    # 68,7 km z Bielska-Białej są dobre, audyt nie może liczyć linii do imiennika.
+def test_dabrowa_pod_opolem_a_nie_gornicza():
+    # IIM1/8 (Zawody=210953): hala w Dąbrowie pod Opolem. 12,4 km z Siemianowic i
+    # 68,7 km z Bielska-Białej to Dąbrowa Górnicza - audyt ma to wytknąć.
     g = P.Gazetteer([
         (P.Place("1", "Dąbrowa", 53.65, 23.35, "podlaskie", 500), []),
-        (P.Place("2", "Dąbrowa", 50.01, 20.25, "malopolskie", 600), []),
+        (P.Place("2", "Dąbrowa", 50.6835, 17.7496, "opolskie", 1100), []),
         (P.Place("3", "Dąbrowa Górnicza", 50.327, 19.203, "slaskie", 120000), []),
         (P.Place("4", "Siemianowice Śląskie", 50.327, 19.029, "slaskie", 66000), []),
         (P.Place("5", "Bielsko-Biała", 49.822, 19.047, "slaskie", 170000), []),
+        (P.Place("6", "Opole", 50.671, 17.926, "opolskie", 127000), []),
     ])
+    teams = "GTV BUS Gwardia II Opole - Sowie Żagiew Dzierżoniów"
     for home, km in (("Siemianowice Śląskie", 12.4), ("Bielsko-Biała", 68.7)):
-        row = {"distance_km": km, "home_city": home, "city": "Dąbrowa", "distance_source": "google"}
-        assert A.audit_row(row, g, province="slaskie") == []
-    far = {"distance_km": 454, "home_city": "Bielsko-Biała", "city": "Dąbrowa", "distance_source": "google"}
-    assert A.audit_row(far, g, province="slaskie")
+        row = {"distance_km": km, "home_city": home, "city": "Dąbrowa", "distance_source": "google", "teams": teams}
+        assert A.audit_row(row, g, province="slaskie")
+    good = {"distance_km": 118.0, "home_city": "Siemianowice Śląskie", "city": "Dąbrowa",
+            "distance_source": "google", "teams": teams}
+    assert A.audit_row(good, g, province="slaskie") == []

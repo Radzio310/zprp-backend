@@ -42,7 +42,7 @@ def main() -> None:
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     names = list(spellings(args.province))
     cur.execute(
-        "SELECT m.judge_id, j.full_name, m.match_key, m.match_at, m.match_code, m.home_city, m.city,"
+        "SELECT m.judge_id, j.full_name, m.match_key, m.match_at, m.match_code, m.home_city, m.city, m.teams,"
         " m.distance_km, m.distance_source FROM province_settlement_matches m"
         " LEFT JOIN province_settlement_judges j ON j.province = m.province AND j.judge_id = m.judge_id"
         " WHERE m.province = ANY(%s) AND m.active AND m.match_at >= %s AND m.distance_km IS NOT NULL",

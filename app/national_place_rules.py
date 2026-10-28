@@ -311,18 +311,6 @@ class Gazetteer:
                 found.extend(self._by_key[other])
         return _dedupe(found)
 
-    def extended(self, name: object) -> list[Place]:
-        """Miejscowości o tej nazwie ORAZ te, których nazwa zaczyna się od niej
-        („Dąbrowa" -> także „Dąbrowa Górnicza"). Do oceny wieloznacznej nazwy hali."""
-        key = name_key(name)
-        if not key:
-            return []
-        found = list(self.candidates(name))
-        for other in self._by_first.get(key.split(" ")[0], []):
-            if other.startswith(key + " "):
-                found.extend(self._by_key[other])
-        return _dedupe(found)
-
     def nearest(self, lat: float, lon: float, max_km: float = 25.0) -> Optional[Place]:
         """Najbliższa miejscowość skorowidza (do opisu starego położenia)."""
         cy, cx = self._cell(lat, lon)
@@ -337,9 +325,36 @@ class Gazetteer:
         return best
 
 
+#: Oficjalne nazwy z przymiotnikiem, których GeoNames nie ma pod pełnym brzmieniem
+#: (jest samo „Nakło" x6): (klucz nazwy, szerokość, długość) miejscowości, której
+#: nazwa jest ich skrótem. Klucz dostaje ten wpis, który leży w promieniu 1 km od
+#: punktu. Jawna pozycja zamiast zgadywania po przymiotniku.
+MANUAL_ALIASES: tuple[tuple[str, float, float], ...] = (
+    # gm. Świerklaniec, pow. tarnogórski
+    ("Nakło Śląskie", 50.4369, 18.9106),
+    # gm. Oława (tabela odległości dolnośląskiego pisze „Siedlce k. Oławy")
+    ("Siedlce k. Oławy", 50.998, 17.278),
+)
+
+
+def _with_manual_aliases(gaz: "Gazetteer") -> "Gazetteer":
+    for alias, lat, lon in MANUAL_ALIASES:
+        key = name_key(alias)
+        near = [p for p in gaz.places.values() if abs(p.lat - lat) < 0.02 and abs(p.lon - lon) < 0.02
+                and haversine_km(p.point, (lat, lon)) <= 1.0]
+        if not near:
+            continue
+        place = max(near, key=lambda p: p.population)
+        gaz._by_key[key] = _dedupe([*gaz._by_key.get(key, []), place])
+        gaz._by_first.setdefault(key.split(" ")[0], [])
+        if key not in gaz._by_first[key.split(" ")[0]]:
+            gaz._by_first[key.split(" ")[0]].append(key)
+    return gaz
+
+
 @lru_cache(maxsize=1)
 def default_gazetteer() -> Gazetteer:
-    return Gazetteer.from_file(GAZETTEER_PATH)
+    return _with_manual_aliases(Gazetteer.from_file(GAZETTEER_PATH))
 
 
 # ---------------------------------------------------------------------------

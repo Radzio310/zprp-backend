@@ -1308,7 +1308,7 @@ async def refresh_province(
                 if picked is not None:
                     hits[position] = picked
                 else:
-                    google_rows.append((position, home, _google_destination(city, row.get("venue_address"))))
+                    google_rows.append((position, home, _google_destination(city, row.get("venue_address"), row.get("teams"))))
 
             if google_rows:
                 region_slug = province_slug(province)
@@ -1411,20 +1411,17 @@ async def refresh_province(
 #: wersji (np. starej trasy domyślnej, source „google") są ignorowane i liczone
 #: od nowa - podbić przy każdej zmianie sposobu pomiaru (jak
 #: `GOOGLE_DISTANCE_REVISION` w aplikacji).
-def _google_destination(city: str, address: Any) -> str:
+def _google_destination(city: str, address: Any, teams: Any = None) -> str:
     """
-    Cel dla Google. Miejscowość wieloznaczna („Dąbrowa" ma ich 96) + adres hali
-    z API => „ulica numer miejscowość", żeby Google trafił w prawdziwą halę,
-    a nie w imiennika sprzed setek kilometrów (IIM1/8: 454 km zamiast kilkudziesięciu).
-    Nazwa jednoznaczna zostaje sama. Napis jest też kluczem pamięci pomiarów.
+    Cel dla Google. Miejscowość wieloznaczna („Dąbrowa" ma ich 96) rozstrzygamy
+    kontekstem: imiennik najbliższy miastu gospodarza (IIM1/8: hala w Dąbrowie
+    pod Opolem, nie w Dąbrowie Górniczej), wysyłamy „ulica nr, miejscowość,
+    woj. X". Napis jest też kluczem pamięci pomiarów.
     """
     from app import national_place_rules as NP
     from app import settlement_route_map_rules as RM
 
-    street = _s(address)
-    if street and RM.unique_point(NP.default_gazetteer(), city) is None:
-        return f"{street} {city}"
-    return city
+    return RM.hall_destination(NP.default_gazetteer(), city, address, teams)
 
 
 def _route_locator(province: str):
