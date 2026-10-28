@@ -72,7 +72,7 @@ def clean_referees(raw: Any, limit: int = 6) -> List[Dict[str, Any]]:
         if not name:
             continue
         entry = {"name": name, "judge_id": R.s(item.get("judge_id") or item.get("id")) or None, "position": R.plain(item.get("position"), 20) or None,
-                 "role": "delegate" if R.s(item.get("role")) == "delegate" else "referee"}
+                 "role": R.s(item.get("role")) if R.s(item.get("role")) in ("delegate", "table") else "referee"}
         if any(same_referee(entry, e) and e["role"] == entry["role"] for e in out):
             continue
         out.append(entry)
@@ -247,6 +247,10 @@ def referees_of_zprp_row(row: Mapping[str, Any]) -> List[Dict[str, Any]]:
         jid = R.s(row.get(f"delegate_{slot}_id"))
         if name or jid:
             out.append({"name": name or f"Delegat {jid}", "judge_id": jid or None, "position": f"D{slot}", "role": "delegate"})
+    for pos, field in (("S1", "secretary"), ("S2", "timekeeper")):  # stolikowi: sekretarz i czasowy
+        name, jid = R.s(row.get(f"{field}_name")), R.s(row.get(f"{field}_id"))
+        if name or jid:
+            out.append({"name": name or f"Stolikowy {jid}", "judge_id": jid or None, "position": pos, "role": "table"})
     return out
 
 

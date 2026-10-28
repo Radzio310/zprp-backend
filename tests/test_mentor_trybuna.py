@@ -668,3 +668,24 @@ def test_zakres_dat_z_nagraniem_i_niemonotoniczne_sortowanie(env):
     with_video, meta, rows, meta2, first = env.run(go)
     assert len(with_video) == 2 and all(r["bunny_item_id"] for r in with_video) and first["video"] == "with" and meta["mode"] == "binary"
     assert meta2["mode"] == "linear" and meta2["truncated"] is True  # nie ufamy sortowaniu: skan z truncated
+
+
+def test_stolikowi_w_obsadzie_i_tryb_q_z_data_oraz_rozegrane(env, monkeypatch):
+    from datetime import date
+
+    T = env.trybuna_rules
+    refs = T.referees_of_zprp_row({"referee_1_name": "A B", "secretary_name": "Julia Padula", "timekeeper_name": "Mateusz Kubicki"})
+    assert [(r["position"], r["role"]) for r in refs] == [("A", "referee"), ("S1", "table"), ("S2", "table")]
+    assert not T.follow_matches({"kind": "referee", "name": "Julia Padula", "judge_ids": [], "names": []}, refs)  # stolikowy to nie sędzia
+
+    async def go():
+        S, portal, mz = scanner(env, portal_rows(days=40))
+        monkeypatch.setattr(S, "QUERY_DATE_FORMAT", "%Y-%m-%d")
+        monkeypatch.setattr(S, "PORTAL_PLAYED_PARAM", ("status", "played"))
+        rows, meta = await mz.scan(d_from=date(2027, 4, 28), d_to=date(2027, 4, 29))
+        return rows, meta, portal.calls[0]
+
+    rows, meta, first = env.run(go)
+    assert first["q"] == "2027-04-28 OR 2027-04-29" and meta["mode"] == "linear"
+    assert "status=played" not in first.get("portal", "")  # zakres sięga przyszłości: bez filtra "rozegrane"
+    assert len(rows) == 6

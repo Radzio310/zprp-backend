@@ -17,7 +17,7 @@ import asyncio
 import re
 import time
 import unicodedata
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Response
@@ -315,6 +315,14 @@ def has_person(game: Mapping[str, Any], name: Any, role: str = "referee") -> boo
 SCAN_PAGE = 50
 SCAN_MAX_PAGES = 10
 PORTAL_DATE_PARAMS: Optional[Tuple[str, str]] = None
+#: Ustalane próbą (`scripts/probe_meczoteka_referee.py`, sekcja FILTRY), domyślnie wyłączone:
+#:  - `PORTAL_PLAYED_PARAM`: ("parametr", "wartość") dla "Rozegrane" - lista zaczyna się wtedy od przeszłości, nie od przyszłości,
+#:  - `QUERY_DATE_FORMAT`: np. "%Y-%m-%d" - jeśli `q` zna datę i składnię OR, zakres do 14 dni idzie jako q="d1 OR d2 ...",
+#:  - `PORTAL_FILTER_PARAMS`: {"category": "parametr", "gender": "parametr"} - kategoria i płeć z portalu zasilają sygnał `category`.
+PORTAL_PLAYED_PARAM: Optional[Tuple[str, str]] = None
+QUERY_DATE_FORMAT: Optional[str] = None
+QUERY_DATE_MAX_DAYS = 14
+PORTAL_FILTER_PARAMS: Dict[str, str] = {}
 
 
 def parse_hm(value: Any) -> Optional[int]:
@@ -495,9 +503,19 @@ class Meczoteka:
             extra.update(referee=referee, referee_param=REFEREE_PARAM)
         elif q:
             extra["q"] = q
+        parts: List[str] = []
         if PORTAL_DATE_PARAMS and (d_from or d_to):
-            extra["portal"] = "&".join(f"{k}={v}" for k, v in ((PORTAL_DATE_PARAMS[0], d_from), (PORTAL_DATE_PARAMS[1], d_to)) if v)
-        if q or referee:
+            parts += [f"{k}={v}" for k, v in ((PORTAL_DATE_PARAMS[0], d_from), (PORTAL_DATE_PARAMS[1], d_to)) if v]
+        if PORTAL_PLAYED_PARAM and not (d_to and d_to >= date.today()):
+            parts.append(f"{PORTAL_PLAYED_PARAM[0]}={PORTAL_PLAYED_PARAM[1]}")  # lista od przeszłości, nie od przyszłości
+        if parts:
+            extra["portal"] = "&".join(parts)
+        q_dates = bool(QUERY_DATE_FORMAT and d_from and d_to and not referee and (d_to - d_from).days < QUERY_DATE_MAX_DAYS)
+        if q_dates:
+            # Portal zna datę i składnię OR w polu szukania: zakres do 14 dni to jedno zapytanie, total małe.
+            days_q = " OR ".join((d_from + timedelta(days=i)).strftime(QUERY_DATE_FORMAT) for i in range((d_to - d_from).days + 1))
+            extra["q"] = days_q if not q else f"{q} {days_q}"
+        if q or referee or q_dates:
             max_pages = min(max_pages, 5)  # z tekstem lub sędzią total jest małe: czytamy wszystko (do 5 stron)
         elif d_from or d_to:
             # Lista portalu jest posortowana MALEJĄCO po dacie i zaczyna od przyszłości: stron zakresu szukamy binarnie po offsecie.

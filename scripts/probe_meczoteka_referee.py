@@ -18,8 +18,10 @@ import urllib.request
 PARAMS = ("q", "referee", "referees", "referee_name", "judge", "sedzia")
 
 
-def call(base: str, token: str, scope: str, name: str, param: str, portal: str = "", limit: int = 10, offset: int = 0, video: str = "any") -> dict:
+def call(base: str, token: str, scope: str, name: str, param: str, portal: str = "", limit: int = 10, offset: int = 0, video: str = "any", q: str = "") -> dict:
     args = {"scope": scope, "video": video, "limit": limit, "offset": offset, "debug": "true"}
+    if q:
+        args["q"] = q
     if name:
         args.update(referee=name, referee_param=param)
     if portal:
@@ -78,6 +80,64 @@ def probe_dates(base: str, token: str, scope: str, d1: str, d2: str) -> None:
     print("Wniosek: portal filtruje, gdy total jest wyraznie mniejszy niz bez parametrow i prawie wszystkie wiersze sa w zakresie.")
 
 
+def _summ(out: dict) -> tuple:
+    body = out["body"] if isinstance(out["body"], dict) else {}
+    games = body.get("games") or []
+    days = [str(g.get("date"))[:10] for g in games]
+    return body.get("total"), len(games), days, games, out["http"]
+
+
+def probe_filters(base: str, token: str, scope: str, name: str, d1: str, d2: str) -> None:
+    """FILTRY: czy `q` zna date / OR / cudzyslow / -wylaczenie oraz czy portal zna parametry Rozegrane, Kategoria, Plec, Okreg, Rozgrywki."""
+    from datetime import date, timedelta
+
+    y, m, d = (int(x) for x in d1.split("-"))
+    mid = (date(y, m, d) + timedelta(days=1)).isoformat()
+    print("=== FILTRY: q z data, OR, sedzia+data (czy total spada i czy wiersze maja te daty) ===")
+    base_total = _summ(call(base, token, scope, "", "q", "", 50))[0]
+    print(f"--- baza (bez q): total={base_total}")
+    parts = name.split()
+    surname = parts[-1] if parts else name
+    tests = [
+        d1,
+        f"{d1} OR {d2}",
+        f"{d1} OR {mid} OR {d2}",
+        f"{d1[8:]}.{d1[5:7]}.{d1[:4]}",
+        f'"{name}" {d1}',
+        f"{surname} {d1}",
+        f"{surname} -{d2}",
+    ]
+    for q in tests:
+        total, n, days, games, http = _summ(call(base, token, scope, "", "q", "", 50, 0, "any", q))
+        want = {d1, mid, d2}
+        inside = sum(1 for x in days if x in want)
+        print(f"--- q={q!r}: http={http} total={total} wierszy={n} w_dniach={inside} daty={sorted(set(days))[:6]}")
+    print("=== PARAMETRY filtrow portalu (total wobec bazy; pierwsza data = od kiedy zaczyna sie lista) ===")
+    base_first = _summ(call(base, token, scope, "", "q", "", 50))[2][:1]
+    print(f"--- baza: total={base_total} pierwsza_data={base_first}")
+    candidates = []
+    for k in ("status", "state", "played", "when", "games", "scope", "period", "time", "mode"):
+        for v in ("played", "past", "finished", "rozegrane"):
+            candidates.append(f"{k}={v}")
+    for k in ("category", "kategoria", "age", "age_group"):
+        for v in ("Senior", "senior"):
+            candidates.append(f"{k}={v}")
+    for k in ("gender", "sex", "plec"):
+        for v in ("K", "M"):
+            candidates.append(f"{k}={v}")
+    for k in ("district", "okreg", "region"):
+        candidates.append(f"{k}=Departament Rozgrywek Krajowych")
+    for k in ("competition", "league", "rozgrywki", "type_id", "series"):
+        candidates.append(f"{k}=1")
+    candidates += [f"season_id={s}" for s in (2026, 2025)] + ["role=referee", "role=delegate"]
+    for portal in candidates:
+        total, n, days, games, http = _summ(call(base, token, scope, "", "q", portal, 50))
+        changed = total is not None and base_total is not None and total != base_total
+        if changed or http != 200:
+            print(f"--- {portal}: http={http} total={total} (baza {base_total}) wierszy={n} pierwsza_data={days[:1]}  <== ZMIENIA")
+    print("Pokazane sa TYLKO parametry, ktore zmieniaja total (albo daja blad). Brak wiersza = portal go ignoruje.")
+
+
 def probe_order(base: str, token: str, scope: str) -> None:
     """Czy lista jest monotonicznie malejaca po dacie (podstawa wyszukiwania binarnego) i czy video=with zmienia total?"""
     print("=== PORZADEK: daty wierszy z offsetow 0, total/2, total-50 (limit 50) ===")
@@ -105,3 +165,5 @@ if __name__ == "__main__":
         probe_dates(os.environ.get("BASTION_CONNECTOR_URL", "").rstrip("/"), os.environ.get("BASTION_CONNECTOR_TOKEN", ""),
                     sys.argv[2], sys.argv[3], sys.argv[4])
         probe_order(os.environ.get("BASTION_CONNECTOR_URL", "").rstrip("/"), os.environ.get("BASTION_CONNECTOR_TOKEN", ""), sys.argv[2])
+        probe_filters(os.environ.get("BASTION_CONNECTOR_URL", "").rstrip("/"), os.environ.get("BASTION_CONNECTOR_TOKEN", ""),
+                      sys.argv[2], sys.argv[1], sys.argv[3], sys.argv[4])

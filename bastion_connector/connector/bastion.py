@@ -201,14 +201,22 @@ def _int(v: Any) -> int | None:
 
 #: Parametry dat portalu do prob (nieznane, czy portal je zna): `portal=date_from=2026-10-01&date_to=2026-10-31`.
 PORTAL_DATE_PARAMS = ("date_from", "date_to", "from", "to", "date_start", "date_end", "since", "until", "date")
+#: Kandydaci filtrow portalu (UI Meczoteki: Rozegrane, Kategoria, Plec, Okreg, Rozgrywki, Sezon, Wideo) - tylko do prob i,
+#: po potwierdzeniu, do stalych w `mentor_bastion_search.py`.
+PORTAL_FILTER_PARAMS = (
+    "status", "state", "played", "when", "games", "scope", "period", "time",
+    "category", "kategoria", "age", "age_group", "gender", "sex", "plec",
+    "district", "okreg", "region", "competition", "league", "rozgrywki", "type_id", "series", "season_id", "role", "mode",
+)
+PORTAL_PARAMS = PORTAL_DATE_PARAMS + PORTAL_FILTER_PARAMS
 
 
 def parse_portal_params(raw: str) -> dict | None:
-    """"k=v&k2=v2" -> {k: v}, tylko klucze z PORTAL_DATE_PARAMS i wartosci YYYY-MM-DD / HH:MM; inaczej None (zly format)."""
+    """"k=v&k2=v2" -> {k: v}: klucze tylko z PORTAL_PARAMS, wartosci krotkie (<= 80 znakow, bez znakow sterujacych); inaczej None."""
     out: dict = {}
     for part in [p for p in (raw or "").split("&") if p]:
         k, _, v = part.partition("=")
-        if k not in PORTAL_DATE_PARAMS or not re.fullmatch(r"\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?", v):
+        if k not in PORTAL_PARAMS or not v or len(v) > 80 or any(ord(c) < 32 for c in v):
             return None
         out[k] = v
     return out
@@ -248,9 +256,17 @@ def _person_name(v: Any, depth: int = 0) -> str | None:
     return None
 
 
+_TABLE_HINTS = ("table", "secretar", "timek", "stolik", "sekretar", "czasowy", "zegar")
+
+
 def _role_of(raw: Any) -> str:
+    """Rola grupy z `nominees`: referee | delegate | table (stolikowi: sekretarz i czasowy)."""
     r = str(raw or "").lower()
-    return "delegate" if ("deleg" in r) else "referee"
+    if "deleg" in r:
+        return "delegate"
+    if any(h in r for h in _TABLE_HINTS):
+        return "table"
+    return "referee"
 
 
 def parse_referees(g: dict) -> list[dict]:
@@ -261,7 +277,7 @@ def parse_referees(g: dict) -> list[dict]:
     Bez powtorzen, najwyzej 8."""
     out: list[dict] = []
     seen: set[tuple] = set()
-    counters = {"referee": 0, "delegate": 0}
+    counters = {"referee": 0, "delegate": 0, "table": 0}
 
     def put(name: str | None, role: str, pid: Any = None, pos: str | None = None) -> None:
         if not name or len(out) >= 8:
@@ -272,7 +288,7 @@ def parse_referees(g: dict) -> list[dict]:
         seen.add((name.casefold(), role))
         counters[role] += 1
         n = counters[role]
-        auto = ("A", "B", "C", "D")[n - 1] if role == "referee" and n <= 4 else (f"D{n}" if role == "delegate" else None)
+        auto = ("A", "B", "C", "D")[n - 1] if role == "referee" and n <= 4 else (f"D{n}" if role == "delegate" else f"S{n}" if role == "table" else None)
         out.append({"name": name, "id": _txt(pid, 40) if pid is not None else None, "role": role, "position": pos or auto})
 
     def add(v: Any, role: str = "referee") -> None:
@@ -312,6 +328,11 @@ def normalize_game(g: Any) -> dict | None:
     code = _txt(g.get("game_code"), 40)
     date = _txt(g.get("date"), 40)
     sc = g.get("score") if isinstance(g.get("score"), dict) else {}
+    half = None  # polowa "(15:11)" z wiersza portalu: nazwy pol NIEPOTWIERDZONE, czytamy tolerancyjnie
+    for hk in (("half_home", "half_away"), ("ht_home", "ht_away"), ("first_half_home", "first_half_away"), ("half1_home", "half1_away")):
+        if _int(sc.get(hk[0])) is not None and _int(sc.get(hk[1])) is not None:
+            half = f"{_int(sc.get(hk[0]))}:{_int(sc.get(hk[1]))}"
+            break
     score = None
     if _int(sc.get("full_home")) is not None and _int(sc.get("full_away")) is not None:
         score = f"{_int(sc.get('full_home'))}:{_int(sc.get('full_away'))}"
@@ -319,6 +340,7 @@ def normalize_game(g: Any) -> dict | None:
     out = {"bunny_item_id": item, "game_id": game_id, "title": title, "home": home, "away": away, "date": date,
            "competition": _txt(g.get("type_name")) or _txt(g.get("series")), "code": code, "score": score,
            "video_state": _txt(g.get("video_state"), 20), "video_coverage": _int(g.get("video_coverage")),
+           "halftime": half, "series": _txt(g.get("series")), "type_id": _int(g.get("type_id")), "type_code": _txt(g.get("type_code"), 40),
            "thumbnail": None, "duration_s": None, "referees": parse_referees(g),
            "unscheduled": bool(g.get("unscheduled"))}
     return out

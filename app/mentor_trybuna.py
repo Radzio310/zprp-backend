@@ -83,8 +83,9 @@ def extras_of(row: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "watched": True, "origin": row.get("origin"), "bunny_item_id": row.get("bunny_item_id"), "title": row.get("title"),
         "zprp_match_id": row.get("zprp_match_id"), "proel_key": row.get("proel_key"),
-        "referees": [r for r in _refs(row) if r.get("role") != "delegate"],
+        "referees": [r for r in _refs(row) if r.get("role") not in ("delegate", "table")],
         "delegates": [r for r in _refs(row) if r.get("role") == "delegate"],
+        "tables": [r for r in _refs(row) if r.get("role") == "table"],
         "note": row.get("note"), "added_by": row.get("created_by"), "added_at": row.get("created_at"),
         "link_state": {kind: (links.get(kind) or {}).get("state", "none") for kind in T.LINK_KINDS},
         "can_evaluate": False,

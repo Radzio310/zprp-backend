@@ -875,7 +875,7 @@ def test_portal_date_params_whitelist_and_forwarding():
     import asyncio
     from connector.bastion import fetch_games, parse_portal_params
     assert parse_portal_params("date_from=2026-10-01&date_to=2026-10-31") == {"date_from": "2026-10-01", "date_to": "2026-10-31"}
-    assert parse_portal_params("") == {} and parse_portal_params("evil=2026-10-01") is None and parse_portal_params("date=x") is None
+    assert parse_portal_params("") == {} and parse_portal_params("evil=2026-10-01") is None and parse_portal_params("date=") is None
     sent = {}
 
     class Resp:
@@ -902,3 +902,15 @@ def test_video_extras_thumbnail_host_whitelist_and_duration():
     bad = classify(200, {"video": {"embed_url": "https://iframe.mediadelivery.net/embed/1/x", "thumbnail": "https://evil.example/t.jpg", "duration": -4}}, sfx)
     assert bad.thumbnail_url is None and bad.duration_s is None
     assert classify(200, {"video": {}}, sfx).thumbnail_url is None
+
+
+def test_nominees_tables_halftime_and_filter_params():
+    from connector.bastion import normalize_games, parse_portal_params
+    row = {"id": 1, "bunny_item_id": 5, "home_team": "A", "away_team": "B", "score": {"full_home": 30, "full_away": 28, "half_home": 15, "half_away": 11},
+           "series": "Seria 1", "type_id": 12,
+           "nominees": [{"role": "referees", "names": ["A B"]}, {"role": "table_officials", "names": ["PADULA Julia", "KUBICKI Mateusz"]}]}
+    g = normalize_games({"items": [row]}, 5)["games"][0]
+    assert [(r["name"], r["role"], r["position"]) for r in g["referees"]] == [("A B", "referee", "A"), ("Julia Padula", "table", "S1"), ("Mateusz Kubicki", "table", "S2")]
+    assert g["halftime"] == "15:11" and g["score"] == "30:28" and g["type_id"] == 12 and g["series"] == "Seria 1"
+    assert parse_portal_params("status=played&gender=K&okreg=Departament Rozgrywek Krajowych") == {"status": "played", "gender": "K", "okreg": "Departament Rozgrywek Krajowych"}
+    assert parse_portal_params("evil=1") is None and parse_portal_params("status=") is None
