@@ -426,3 +426,68 @@ def test_dzienny_push_bez_powtorek_i_okno_dat(env):
     first = [g["bunny_item_id"] for g in F.new_games_for(row, games, set(), today)]
     second = [g["bunny_item_id"] for g in F.new_games_for(row, games, {1, 5}, today)]
     assert first == [1, 5] and second == []
+
+
+# ─── nominees: filtr po obsadzie, role, kalendarz przyszłych meczów ────────
+
+
+def test_q_po_sedzi_zostawia_tylko_mecze_z_nim_w_obsadzie_i_rozroznia_role(env):
+    async def go():
+        ref = [{"name": "Jakub Rawicki", "role": "referee", "position": "B"}, {"name": "Michał Fabryczny", "role": "referee", "position": "A"},
+               {"name": "Jakub Tarczykowski", "role": "delegate", "position": "D1"}]
+        pages = [(200, {"games": [
+            {"bunny_item_id": 1, "referees": ref},
+            {"bunny_item_id": 2, "referees": [{"name": "Ktoś Inny", "role": "referee"}]},   # q trafiło drużynę
+            {"bunny_item_id": 3, "referees": []},                                          # brak obsady = brak dowodu
+            {"bunny_item_id": None, "game_id": 8, "referees": ref, "video_state": "NONE"},
+        ], "has_more": False})]
+        S, client, mz = meczoteka(env, pages)
+        as_ref = await mz.search_referee("RAWICKI Jakub")
+        S.forget_search_cache()
+        as_delegate = await mz.search_referee("jakub tarczykowski", role="delegate")
+        S.forget_search_cache()
+        wrong_role = await mz.search_referee("Jakub Tarczykowski")
+        return as_ref, as_delegate, wrong_role
+
+    as_ref, as_delegate, wrong_role = env.run(go)
+    assert [g.get("bunny_item_id") for g in as_ref] == [1, None]
+    assert [g.get("bunny_item_id") for g in as_delegate] == [1, None] and wrong_role == []
+
+
+def test_obsada_zprp_i_obserwowanie_delegata(env):
+    T = env.trybuna_rules
+    refs = T.referees_of_zprp_row({"referee_1_name": "Anna Nowak", "referee_1_id": "101", "referee_2_name": "Piotr Lis", "delegate_1_name": "Delegat Dobry"})
+    assert [(r["position"], r["role"]) for r in refs] == [("A", "referee"), ("B", "referee"), ("D1", "delegate")]
+    assert T.follow_matches({"kind": "delegate", "name": "dobry delegat", "judge_ids": [], "names": ["dobry delegat"]}, refs)
+    assert not T.follow_matches({"kind": "referee", "name": "Delegat Dobry", "judge_ids": [], "names": []}, refs)  # delegat to nie sędzia
+    assert T.same_referee({"name": "RAWICKI Jakub"}, {"name": "Jakub Rawicki"})
+
+
+def test_kalendarz_ma_przyszle_i_bez_terminu_a_kanal_ich_nie(env, monkeypatch):
+    async def go():
+        from datetime import date, timedelta
+
+        actor = await env.actor(JUDGES[0])
+        await env.trybuna_feed.follow(env.trybuna_feed.FollowBody(kind="referee", name="Piotr Lis"), actor)
+        ref = [{"name": "Piotr Lis", "role": "referee", "position": "A"}]
+        day = lambda n: (date.today() + timedelta(days=n)).isoformat()
+        pages = [(200, {"games": [
+            {"bunny_item_id": None, "game_id": 5, "date": f"{day(10)} 00:00:00", "unscheduled": True, "home": "X", "away": "Y", "video_state": "NONE", "referees": ref},
+            {"bunny_item_id": None, "game_id": 6, "date": f"{day(12)} 18:00:00", "home": "Z", "away": "W", "video_state": "NONE", "referees": ref},
+            {"bunny_item_id": 77, "game_id": 7, "date": f"{day(-2)} 18:00:00", "home": "Stary", "away": "Mecz", "video_state": "READY", "referees": ref},
+        ], "has_more": False})]
+        S, client, mz = meczoteka(env, pages)
+        monkeypatch.setattr(env.trybuna_feed.S, "_setup", lambda real: (mz, None))
+        cal = await env.trybuna_feed.calendar(30, actor)
+        S.forget_search_cache()
+        feed = await env.trybuna_feed.feed(_Resp(), 14, "", actor)
+        return cal, feed
+
+    cal, feed = env.run(go)
+    bastion_items = [i for i in cal["items"] if i["source"] == "bastion"]
+    assert sorted(i["home"] for i in bastion_items) == ["X", "Z"]
+    by_home = {i["home"]: i for i in bastion_items}
+    assert by_home["X"]["unscheduled"] is True and by_home["X"]["time_known"] is False and by_home["Z"]["time_known"] is True
+    assert "m2" in [i["zprp_match_id"] for i in cal["items"]]
+    homes = [i["home"] for i in feed["items"]]
+    assert "Stary" in homes and "X" not in homes and "Z" not in homes

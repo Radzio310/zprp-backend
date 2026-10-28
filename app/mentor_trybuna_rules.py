@@ -71,8 +71,9 @@ def clean_referees(raw: Any, limit: int = 6) -> List[Dict[str, Any]]:
         name = R.plain(item.get("name") or item.get("full_name"), 80)
         if not name:
             continue
-        entry = {"name": name, "judge_id": R.s(item.get("judge_id") or item.get("id")) or None, "position": R.plain(item.get("position"), 20) or None}
-        if any(same_referee(entry, e) for e in out):
+        entry = {"name": name, "judge_id": R.s(item.get("judge_id") or item.get("id")) or None, "position": R.plain(item.get("position"), 20) or None,
+                 "role": "delegate" if R.s(item.get("role")) == "delegate" else "referee"}
+        if any(same_referee(entry, e) and e["role"] == entry["role"] for e in out):
             continue
         out.append(entry)
         if len(out) >= limit:
@@ -160,6 +161,8 @@ def snapshot_from_game(game: Mapping[str, Any]) -> Dict[str, Any]:
     when = None
     raw = str(game.get("date") or "")
     m = re.search(r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})", raw)
+    if m and (game.get("unscheduled") or (m.group(4), m.group(5)) == ("00", "00")):
+        m = None  # godzina 00:00 przy mecz bez terminu = brak godziny: tylko dzień (południe jako znacznik)
     if m:
         # Bastion podaje czas polski bez strefy; zapisujemy jako czas lokalny -> UTC.
         from app.mentor_panel_rules import _local_naive_to_utc
@@ -232,18 +235,25 @@ def merge_snapshot(base: Mapping[str, Any], over: Mapping[str, Any]) -> Dict[str
 
 
 def referees_of_zprp_row(row: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Obsada meczu z hurtowni: sędziowie (`role: referee`, pozycje A, B) i delegaci (`role: delegate`, D1, D2)."""
     out = []
     for slot in (1, 2):
         name = R.s(row.get(f"referee_{slot}_name"))
         jid = R.s(row.get(f"referee_{slot}_id"))
         if name or jid:
-            out.append({"name": name or f"Sędzia {jid}", "judge_id": jid or None, "position": f"S{slot}"})
+            out.append({"name": name or f"Sędzia {jid}", "judge_id": jid or None, "position": "AB"[slot - 1], "role": "referee"})
+    for slot in (1, 2):
+        name = R.s(row.get(f"delegate_{slot}_name"))
+        jid = R.s(row.get(f"delegate_{slot}_id"))
+        if name or jid:
+            out.append({"name": name or f"Delegat {jid}", "judge_id": jid or None, "position": f"D{slot}", "role": "delegate"})
     return out
 
 
 def follow_matches(follow: Mapping[str, Any], referees: Iterable[Mapping[str, Any]]) -> bool:
     """Czy obsada meczu zawiera obserwowanego sędziego (albo oboje sędziów obserwowanej pary)."""
-    refs = list(referees)
+    role = "delegate" if follow.get("kind") == "delegate" else "referee"
+    refs = [r for r in referees if (r.get("role") or "referee") == role]
     if follow.get("kind") == "pair":
         parts = [{"name": n, "judge_id": j} for n, j in zip(follow.get("names") or [], list(follow.get("judge_ids") or []) + [None, None])]
         return len(parts) == 2 and all(any(same_referee(p, r) for r in refs) for p in parts)

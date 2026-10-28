@@ -87,11 +87,22 @@ async def stop_state(stop: "S._Stop") -> str:
 # ─── Szukanie (po sędzi, drużynie, kodzie) ──────────────────────────────────
 
 
+def game_time_known(game: Mapping[str, Any]) -> bool:
+    """Godzina 00:00:00 przy meczu bez terminu (`unscheduled`) to brak godziny."""
+    return not (game.get("unscheduled") or R.s(game.get("date")).endswith("00:00:00"))
+
+
+def is_upcoming(game: Mapping[str, Any], today) -> bool:
+    day = S.parse_day(game.get("date"))
+    return bool(game.get("unscheduled")) or day is None or day > today
+
+
 def game_row(game: Mapping[str, Any], watched: Mapping[int, str]) -> Dict[str, Any]:
     item = int(game["bunny_item_id"])
     keep = ("title", "home", "away", "date", "competition", "code", "score", "video_state", "video_coverage", "duration_s")
     return {"bunny_item_id": item, "url": BR.canonical_game_url(item), **{k: game.get(k) for k in keep},
             "referees": T.clean_referees(game.get("referees") or []), "state": T.feed_state(game.get("video_state")),
+            "unscheduled": bool(game.get("unscheduled")), "time_known": game_time_known(game),
             "added": item in watched, "match_id": watched.get(item)}
 
 
@@ -191,7 +202,7 @@ async def resolve_judge(name: str) -> Optional[str]:
 
 
 class FollowBody(BaseModel):
-    kind: str = Field(default="referee", pattern="^(referee|pair)$")
+    kind: str = Field(default="referee", pattern="^(referee|pair|delegate)$")
     name: Optional[str] = Field(default=None, max_length=80)
     judge_id: Optional[str] = Field(default=None, max_length=20)
     #: Para: dwie nazwy i (opcjonalnie) dwa numery.
@@ -253,16 +264,20 @@ def follow_names(follow: Mapping[str, Any]) -> List[str]:
 async def zprp_rows_for(follows: List[Dict[str, Any]], start: datetime, end: datetime) -> List[Dict[str, Any]]:
     """Mecze z obsady ZPRP w oknie czasu (czas lokalny bez strefy), w których jest ktoś z obserwowanych."""
     M = zprp_public_matches
-    ids = sorted({i for f in follows for i in f.get("judge_ids") or []})
     conds = []
-    if ids:
-        conds += [M.c.referee_1_id.in_(ids), M.c.referee_2_id.in_(ids)]
-    for f in follows:
-        if len(f.get("judge_ids") or []) < len(follow_names(f)):
-            for nm in follow_names(f):
-                word = max(T.name_key(nm).split() or [""], key=len)
-                if len(word) >= 3:
-                    conds += [M.c.referee_1_name.ilike(f"%{word}%"), M.c.referee_2_name.ilike(f"%{word}%")]
+    for delegate in (False, True):
+        group = [f for f in follows if (f["kind"] == "delegate") == delegate]
+        ids = sorted({i for f in group for i in f.get("judge_ids") or []})
+        c1, c2 = (M.c.delegate_1_id, M.c.delegate_2_id) if delegate else (M.c.referee_1_id, M.c.referee_2_id)
+        n1, n2 = (M.c.delegate_1_name, M.c.delegate_2_name) if delegate else (M.c.referee_1_name, M.c.referee_2_name)
+        if ids:
+            conds += [c1.in_(ids), c2.in_(ids)]
+        for f in group:
+            if len(f.get("judge_ids") or []) < len(follow_names(f)):
+                for nm in follow_names(f):
+                    word = max(T.name_key(nm).split() or [""], key=len)
+                    if len(word) >= 3:
+                        conds += [n1.ilike(f"%{word}%"), n2.ilike(f"%{word}%")]
     if not conds:
         return []
     try:
@@ -307,20 +322,22 @@ async def build_feed(real: Actor, follows: List[Dict[str, Any]], days: int, *, r
         mz.retry_429 = retry_429
         gate = asyncio.Semaphore(FEED_CONCURRENCY)
         halted: List[str] = []
-        names = []
+        names: List[Tuple[str, str]] = []
         for f in follows:
             for nm in follow_names(f):
-                if T.name_key(nm) not in {T.name_key(x) for x in names}:
-                    names.append(nm)
+                role = "delegate" if f["kind"] == "delegate" else "referee"
+                if (T.name_key(nm), role) not in {(T.name_key(x), r) for x, r in names}:
+                    names.append((nm, role))
 
-        async def one(name: str) -> None:
+        async def one(pair: Tuple[str, str]) -> None:
+            name, role = pair
             if halted:
                 return
             async with gate:
                 if halted:
                     return
                 try:
-                    found = await mz.search_referee(name, video="any")
+                    found = await mz.search_referee(name, video="any", role=role)
                 except S._Stop as stop:
                     halted.append(await stop_state(stop))
                     return
@@ -339,8 +356,8 @@ async def build_feed(real: Actor, follows: List[Dict[str, Any]], days: int, *, r
     seen_items: Dict[Any, Dict[str, Any]] = {}
     for g in games:
         day = S.parse_day(g.get("date"))
-        if day is None or day < start_day or day > end_day:
-            continue
+        if day is None or day < start_day or day > end_day or g.get("unscheduled"):
+            continue  # przyszłe i bez terminu mecze idą do kalendarza, nie do kanału
         ident = g.get("bunny_item_id") or (f"g{g['game_id']}" if g.get("game_id") else None)
         if ident is None:
             continue
@@ -449,7 +466,7 @@ async def harvest(follow_id: str, body: HarvestBody, response: Response, real: A
             partial = True
             break
         try:
-            found = await mz.search_referee(name, video="any", offset=page * S.PAGE)
+            found = await mz.search_referee(name, video="any", offset=page * S.PAGE, role="delegate" if follow_["kind"] == "delegate" else "referee")
         except S._Stop as stop:
             block = bastion_block(await stop_state(stop), mz.scope)
             partial = bool(games)
@@ -489,14 +506,50 @@ async def calendar(days: int = Query(30, ge=1, le=90), real: Actor = Depends(bas
     now = _naive_local_now()
     rows = await zprp_rows_for(follows, now, now + timedelta(days=days)) if follows else []
     items = []
+    cards = []
     for r in sorted(rows, key=lambda x: x["scheduled_at"]):
         card = R.card_from_public(r)
+        cards.append((r, card))
         refs = T.referees_of_zprp_row(r)
-        items.append({"zprp_match_id": R.s(r["match_id"]), "date": _iso(card.get("scheduled_at")), "home": (card.get("home") or {}).get("name"),
+        items.append({"source": "zprp", "zprp_match_id": R.s(r["match_id"]), "date": _iso(card.get("scheduled_at")), "time_known": True,
+                      "unscheduled": False, "home": (card.get("home") or {}).get("name"),
                       "away": (card.get("away") or {}).get("name"), "competition": card.get("competition_name"),
                       "code": card.get("match_code"), "venue_city": card.get("venue_city"), "referees": refs,
-                      "followed": [f["id"] for f in follows if T.follow_matches(f, refs)]})
-    return {"items": items, "follows": len(follows), "days": days,
+                      "followed": [f["id"] for f in follows if T.follow_matches(f, refs)], "bunny_item_id": None})
+    # Przyszłe i bez terminu mecze z Meczoteki (portal pokazuje je przed obsadą ZPRP): tylko te, których nie ma w obsadzie.
+    bastion = bastion_block("ok")
+    mz, state = S._setup(real) if follows else (None, None)
+    if follows and mz is None:
+        bastion = bastion_block(state or "unconfigured")
+    elif mz is not None:
+        today = now.date()
+        horizon = today + timedelta(days=days)
+        pairs: List[Tuple[str, str]] = []
+        for f in follows:
+            for nm in follow_names(f):
+                pr = (nm, "delegate" if f["kind"] == "delegate" else "referee")
+                if (T.name_key(pr[0]), pr[1]) not in {(T.name_key(x), r) for x, r in pairs}:
+                    pairs.append(pr)
+        try:
+            for nm, role in pairs[:FEED_FOLLOWS]:
+                for g in await mz.search_referee(nm, video="any", role=role):
+                    day = S.parse_day(g.get("date"))
+                    if not is_upcoming(g, today) or (day and day > horizon) or match_game_to_zprp(g, cards) is not None:
+                        continue
+                    refs = T.clean_referees(g.get("referees") or [])
+                    key = f"bastion:{g.get('bunny_item_id')}" if g.get("bunny_item_id") else f"game:{g.get('game_id')}"
+                    if any(i.get("key") == key for i in items):
+                        continue
+                    items.append({"source": "bastion", "key": key, "zprp_match_id": None, "date": g.get("date") if day else None,
+                                  "time_known": game_time_known(g), "unscheduled": bool(g.get("unscheduled")), "home": g.get("home"),
+                                  "away": g.get("away"), "competition": g.get("competition"), "code": g.get("code"), "venue_city": None,
+                                  "referees": refs, "followed": [f["id"] for f in follows if T.follow_matches(f, refs)],
+                                  "bunny_item_id": g.get("bunny_item_id")})
+            bastion = bastion_block("ok", mz.scope)
+        except S._Stop as stop:
+            bastion = bastion_block(await stop_state(stop), mz.scope)
+    items.sort(key=lambda i: (i.get("date") is None, R.s(i.get("date"))))
+    return {"items": items, "follows": len(follows), "days": days, "bastion": bastion,
             "unresolved": [f["name"] for f in follows if len(f.get("judge_ids") or []) < len(follow_names(f))]}
 
 
@@ -743,15 +796,15 @@ async def notify_once(now: Optional[datetime] = None) -> Dict[str, int]:
         return counts
     system = C.MentorActor("0", display_name="Trybuna")
     mz = S.Meczoteka(client, ["default"], system)
-    by_name: Dict[str, str] = {}
+    by_name: Dict[Tuple[str, str], str] = {}
     for r in rows:
         for nm in R.json_value(r.get("names"), []):
-            by_name.setdefault(T.name_key(nm), R.s(nm))
+            by_name.setdefault((T.name_key(nm), "delegate" if r["kind"] == "delegate" else "referee"), R.s(nm))
     today = (now or datetime.now(timezone.utc)).astimezone(WARSAW).date()
-    games_by_name: Dict[str, List[Dict[str, Any]]] = {}
+    games_by_name: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for key, nm in list(by_name.items())[:NOTIFY_MAX_REFEREES]:
         try:
-            games_by_name[key] = [g for g in await mz.search_referee(nm, video="with") if g.get("bunny_item_id")]
+            games_by_name[key] = [g for g in await mz.search_referee(nm, video="with", role=key[1]) if g.get("bunny_item_id")]
         except S._Stop:
             break
         counts["referees"] += 1
@@ -761,7 +814,7 @@ async def notify_once(now: Optional[datetime] = None) -> Dict[str, int]:
     for r in rows:
         mine = {i for (j, i) in done if j == r["judge_id"]}
         for nm in R.json_value(r.get("names"), []):
-            for g in new_games_for(r, games_by_name.get(T.name_key(nm), []), mine, today):
+            for g in new_games_for(r, games_by_name.get((T.name_key(nm), "delegate" if r["kind"] == "delegate" else "referee"), []), mine, today):
                 item = int(g["bunny_item_id"])
                 if any(int(x[1]["bunny_item_id"]) == item for x in per_judge.get(r["judge_id"], [])):
                     continue

@@ -176,6 +176,16 @@ REFEREE_PARAMS = ("q", "referee", "referees", "referee_name", "judge", "sedzia")
 _REFEREE_KEY_HINTS = ("referee", "judge", "sedzi", "sędzi", "arbiter", "nominee")
 
 
+def display_name(raw: str) -> str:
+    """"RAWICKI Jakub" -> "Jakub Rawicki" (portal: NAZWISKO wielkimi, potem imie). Nazwy bez wielkich czlonow zostaja."""
+    words = raw.split()
+    sur = [w for w in words if len(w) > 1 and w.isupper()]
+    rest = [w for w in words if w not in sur]
+    if not sur or not rest:
+        return raw
+    return " ".join(rest + [w.capitalize() if "-" not in w else "-".join(p.capitalize() for p in w.split("-")) for w in sur])
+
+
 def _person_name(v: Any, depth: int = 0) -> str | None:
     if isinstance(v, str):
         return _txt(v, 80)
@@ -187,7 +197,7 @@ def _person_name(v: Any, depth: int = 0) -> str | None:
         joined = " ".join(x for x in (first, last) if x)
         if joined:
             return joined
-        if depth < 2:  # nominee: {role, referee|user|person: {...}}
+        if depth < 2:  # {role, referee|user|person: {...}}
             for k in ("referee", "judge", "user", "person", "profile"):
                 if isinstance(v.get(k), dict):
                     nested = _person_name(v[k], depth + 1)
@@ -196,35 +206,53 @@ def _person_name(v: Any, depth: int = 0) -> str | None:
     return None
 
 
-def parse_referees(g: dict) -> list[dict]:
-    """Obsada z wiersza /api/games. Portal niesie ja najpewniej w `nominees` (potwierdzenie: row_keys z proby 28.10); czytamy tez
-    kazdy klucz z "referee"/"judge"/"sedzi"/"nominee". Wartosc: napis, obiekt {name | first_name+last_name | zagniezdzony
-    referee/user/person; role|type|position|function} albo lista takich. Bez powtorzen, najwyzej 6."""
-    out: list[dict] = []
-    seen: set[str] = set()
+def _role_of(raw: Any) -> str:
+    r = str(raw or "").lower()
+    return "delegate" if ("deleg" in r) else "referee"
 
-    def add(v: Any) -> None:
-        name = _person_name(v)
-        if not name or name.casefold() in seen or len(out) >= 6:
+
+def parse_referees(g: dict) -> list[dict]:
+    """Obsada wiersza /api/games. POTWIERDZONY ksztalt (proba 28.10): `nominees` = grupy po rolach
+    `[{"role":"referees","names":["FABRYCZNY Michal","RAWICKI Jakub"]},{"role":"delegates","names":["TARCZYKOWSKI Jakub"]}]`,
+    nazwy "NAZWISKO Imie". Wynik: `{name: "Imie Nazwisko", id, role: referee|delegate, position}`; sedziowie dostaja
+    pozycje A, B (z kolejnosci), delegaci D1, D2. Czytamy tez inne klucze z "referee"/"judge"/"sedzi" (napisy, obiekty, listy).
+    Bez powtorzen, najwyzej 8."""
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    counters = {"referee": 0, "delegate": 0}
+
+    def put(name: str | None, role: str, pid: Any = None, pos: str | None = None) -> None:
+        if not name or len(out) >= 8:
             return
-        seen.add(name.casefold())
-        pid = None
-        pos = None
+        name = display_name(name)
+        if (name.casefold(), role) in seen:
+            return
+        seen.add((name.casefold(), role))
+        counters[role] += 1
+        n = counters[role]
+        auto = ("A", "B", "C", "D")[n - 1] if role == "referee" and n <= 4 else (f"D{n}" if role == "delegate" else None)
+        out.append({"name": name, "id": _txt(pid, 40) if pid is not None else None, "role": role, "position": pos or auto})
+
+    def add(v: Any, role: str = "referee") -> None:
+        if isinstance(v, dict) and isinstance(v.get("names"), list):  # grupa {role, names[]}
+            grole = _role_of(v.get("role"))
+            for n in v["names"]:
+                put(_person_name(n), grole)
+            return
+        pid = pos = None
         if isinstance(v, dict):
             inner = next((v[k] for k in ("referee", "judge", "user", "person") if isinstance(v.get(k), dict)), {})
             pid = v.get("id") if v.get("id") is not None else v.get("judge_id") or v.get("referee_id") or inner.get("id")
-            pos = _txt(v.get("role") or v.get("type") or v.get("position") or v.get("function"), 30)
-        out.append({"name": name, "id": _txt(pid, 40) if pid is not None else None, "position": pos})
+            pos = _txt(v.get("position"), 30)
+            role = _role_of(v.get("role") or v.get("type") or v.get("function")) if (v.get("role") or v.get("type") or v.get("function")) else role
+        put(_person_name(v), role, pid, pos)
 
     for key, value in g.items():
         k = str(key).lower()
         if not any(h in k for h in _REFEREE_KEY_HINTS) or k.endswith("_id") or k.endswith("_ids"):
             continue
-        if isinstance(value, list):
-            for item in value:
-                add(item)
-        else:
-            add(value)
+        for item in value if isinstance(value, list) else [value]:
+            add(item)
     return out
 
 
@@ -249,7 +277,8 @@ def normalize_game(g: Any) -> dict | None:
     out = {"bunny_item_id": item, "game_id": game_id, "title": title, "home": home, "away": away, "date": date,
            "competition": _txt(g.get("type_name")) or _txt(g.get("series")), "code": code, "score": score,
            "video_state": _txt(g.get("video_state"), 20), "video_coverage": _int(g.get("video_coverage")),
-           "thumbnail": None, "duration_s": None, "referees": parse_referees(g)}
+           "thumbnail": None, "duration_s": None, "referees": parse_referees(g),
+           "unscheduled": bool(g.get("unscheduled"))}
     return out
 
 
@@ -258,13 +287,13 @@ def normalize_games(body: Any, limit: int, debug: bool = False) -> dict:
     items = items if isinstance(items, list) else []
     games = [n for n in (normalize_game(x) for x in items) if n][:limit]
     paging = body.get("paging") if isinstance(body, dict) and isinstance(body.get("paging"), dict) else {}
-    first = items[0] if items and isinstance(items[0], dict) else {}
-    # `row_keys`: nazwy pol pierwszego wiersza; `rows_raw`/`rows_kept`: ile wierszy przed i po normalizacji.
-    out = {"games": games, "total": _int(paging.get("total")), "has_more": bool(paging.get("has_more")),
-           "row_keys": sorted(str(k) for k in first)[:40], "rows_raw": len(items), "rows_kept": len(games)}
-    if debug:
-        out["raw_sample"] = [{k: x.get(k) for k in ("id", "bunny_item_id", "video_state", "video_coverage", "nominees", "game_code",
-                                                   "home_team", "away_team", "type_name", "date")} for x in items[:3] if isinstance(x, dict)]
+    out = {"games": games, "total": _int(paging.get("total")), "has_more": bool(paging.get("has_more"))}
+    if debug:  # tylko proba: ksztalt wierszy portalu, liczniki i surowa probka
+        first = items[0] if items and isinstance(items[0], dict) else {}
+        out.update(row_keys=sorted(str(k) for k in first)[:40], rows_raw=len(items), rows_kept=len(games),
+                   raw_sample=[{k: x.get(k) for k in ("id", "bunny_item_id", "video_state", "video_coverage", "nominees", "game_code",
+                                                      "home_team", "away_team", "type_name", "date", "unscheduled")}
+                               for x in items[:3] if isinstance(x, dict)])
     return out
 
 

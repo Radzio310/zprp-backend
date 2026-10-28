@@ -299,6 +299,17 @@ def best_of(games: List[Mapping[str, Any]]) -> Optional[int]:
 # ─── Połączenie i zapytania ─────────────────────────────────────────────────
 
 
+def person_key(name: Any) -> str:
+    """Klucz osoby niezależny od wielkości liter, polskich znaków i kolejności słów ("RAWICKI Jakub" == "Jakub Rawicki")."""
+    return " ".join(sorted(w for w in re.split(r"[^0-9a-z]+", _plain(name)) if w))
+
+
+def has_person(game: Mapping[str, Any], name: Any, role: str = "referee") -> bool:
+    key = person_key(name)
+    return bool(key) and any(person_key(r.get("name")) == key and (r.get("role") or "referee") == role
+                             for r in game.get("referees") or [] if isinstance(r, Mapping))
+
+
 class _Stop(Exception):
     """Werdykt, po którym dalsze zapytania nie mają sensu (brak sesji, limit, awaria)."""
 
@@ -417,9 +428,12 @@ class Meczoteka:
     async def search(self, q: str) -> List[Dict[str, Any]]:
         return await self._paged({"q": q})
 
-    async def search_referee(self, name: str, *, video: str = "any", offset: int = 0) -> List[Dict[str, Any]]:
-        """Mecze z Meczoteki po nazwisku sędziego. Parametr portalu ustala `REFEREE_PARAM` (do potwierdzenia próbą)."""
-        return await self._paged({"referee": name, "referee_param": REFEREE_PARAM, "video": video}, offset)
+    async def search_referee(self, name: str, *, video: str = "any", offset: int = 0, role: str = "referee") -> List[Dict[str, Any]]:
+        """Mecze z Meczoteki po nazwisku sędziego (`role="delegate"`: delegata). Portal szuka w `q` (próba 28.10), więc trafia
+        też drużyny: zostają tylko wiersze, w których `nominees` zawierają tę osobę w tej roli (kolejność słów i polskie znaki
+        bez znaczenia). Wiersze bez obsady portalu odpadają (nie ma dowodu)."""
+        games = await self._paged({"referee": name, "referee_param": REFEREE_PARAM, "video": video}, offset)
+        return [g for g in games if has_person(g, name, role)]
 
 
 

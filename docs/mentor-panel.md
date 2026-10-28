@@ -397,3 +397,11 @@ Kod: `app/mentor_trybuna.py` (mecz, bilet, półki, oznaczenia, głosy), `app/me
 
 #### Do sprawdzenia próbą na produkcji
 Kształt wiersza Meczoteki po sędzi (nazwa parametru wyszukiwania i pole z sędziami) jest NIEPOTWIERDZONY: connector przekazuje nazwisko w parametrze z listy (`q|referee|referees|referee_name|judge|sedzia`, `REFEREE_PARAM` w `mentor_bastion_search.py`) i zwraca `row_keys` (nazwy pól pierwszego wiersza) oraz `games[].referees` (tolerancyjny parser pól `referee*/judge*/sedzi*`). Polecenie próby: `bastion-integration.md`, sekcja „Meczoteka po sędzi".
+
+#### Uzupełnienie 28.10 (kształt `nominees`, delegaci, przyszłe mecze)
+- Obsada z portalu (`nominees` = grupy `{role: referees|delegates, names: ["NAZWISKO Imię"]}`) jest zamieniana na `referees: [{name: "Imię Nazwisko", id, role: referee|delegate, position}]` (sędziowie A, B; delegaci D1, D2). Porównania osób nie zależą od wielkości liter, polskich znaków i kolejności słów. `MatchCard` meczu z Trybuny: `referees` (tylko sędziowie) i `delegates`; obsada ZPRP też niesie delegatów (`role`).
+- Szukanie po sędzi: `q` z nazwiskiem; wynik zostaje tylko dla wierszy, w których `nominees` zawierają tę osobę w tej roli (brak obsady portalu = odpada). Mecze bez nagrania (`bunny_item_id` null, `video_state` NONE) zostają: `TGame.bunny_item_id` bywa null, doszły `unscheduled` i `time_known` (00:00:00 przy `unscheduled` = brak godziny).
+- `Follow.kind` ma też `delegate` (obserwowanie delegata: te same trasy, porównanie po roli delegata).
+- Kanał (`/trybuna/feed`) pokazuje tylko mecze rozegrane (data <= dziś, nie `unscheduled`); przyszłe i bez terminu idą do `GET /trybuna/calendar`, którego `items[]` mają teraz `source: zprp|bastion`, `time_known`, `unscheduled`, `bunny_item_id`, a odpowiedź blok `bastion` (mecz z Meczoteki, którego nie ma w obsadzie ZPRP, pokazuje się z `source:"bastion"`).
+- Connector zwraca `row_keys`, `rows_raw`, `rows_kept`, `raw_sample` tylko przy `debug=true`.
+
