@@ -373,6 +373,9 @@ app.include_router(mentor_evaluations_router)
 # Panel „Mentor" pary (web BAZA pod Ręką + aplikacja) - kontrakt `docs/mentor-panel.md`.
 from app.mentor_panel import panel_router as mentor_panel_router
 app.include_router(mentor_panel_router)
+# Mentor x Bastion: „Szukaj w Bastionie” (Archiwista) i nagrania sezonu - `docs/mentor-panel.md` 8.10.
+from app.mentor_bastion_search import router as mentor_bastion_search_router
+app.include_router(mentor_bastion_search_router)
 app.include_router(short_result_records_router)
 # Dodatkowy raport sędziów/delegata: treść, PDF i adresaci.
 app.include_router(extra_report_router)
