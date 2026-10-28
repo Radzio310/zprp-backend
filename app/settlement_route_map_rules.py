@@ -23,13 +23,50 @@ def _strict(candidates: list, name: Any) -> list:
     return exact or candidates
 
 
+#: Przymiotniki regionu doklejane do nazwy miejscowości („Nakło Śląskie").
+_REGION_QUALIFIERS = frozenset({
+    "slaskie", "slaska", "slaski", "wielkopolskie", "mazowieckie", "malopolskie",
+    "podlaskie", "lubelskie", "pomorskie", "opolskie", "lubuskie",
+})
+#: Ile razy największa miejscowość musi przeważać nad drugą, by uznać ją za tę właściwą.
+_DOMINANCE = 3
+
+
+def _qualified_point(gaz: Gazetteer, name: Any, province: Any) -> Optional[tuple[float, float]]:
+    """
+    „Nakło Śląskie" nie ma w skorowidzu pod pełną nazwą (jest „Nakło" x2 w
+    województwie), a goły tekst do Google trafiał w imiennika ok. 80 km dalej.
+    Przymiotnik regionu zdejmujemy i bierzemy miejscowość z województwa
+    sędziego, ale TYLKO gdy wyraźnie przeważa ludnością nad imiennikiem.
+    """
+    slug = province_slug(province)
+    tokens = _plain(name).split(" ")
+    if not slug or len(tokens) < 2:
+        return None
+    from app.national_place_rules import name_key
+
+    if name_key(tokens[-1]) not in _REGION_QUALIFIERS:
+        return None
+    base = " ".join(tokens[:-1])
+    pool = [p for p in _strict(gaz.candidates(base), base) if p.province == slug]
+    if not pool:
+        return None
+    pool.sort(key=lambda p: p.population, reverse=True)
+    if len(pool) > 1 and pool[0].population < _DOMINANCE * max(pool[1].population, 1):
+        return None
+    return (pool[0].lat, pool[0].lon)
+
+
 def unique_point(gaz: Gazetteer, name: Any, province: Any = None) -> Optional[tuple[float, float]]:
     """
     Środek miejscowości TYLKO gdy nazwa wskazuje jedno miejsce (w województwie
     sędziego, gdy je podano). Imiennik = None: wołający pyta Google tekstem
     z adresem/województwem, zamiast zgadywać punkt.
     """
-    candidates = _strict(gaz.candidates(name) if name else [], name)
+    found = gaz.candidates(name) if name else []
+    if name and not found:
+        return _qualified_point(gaz, name, province)
+    candidates = _strict(found, name)
     slug = province_slug(province)
     pool = [p for p in candidates if slug and p.province == slug] or candidates
     places = {(round(p.lat, 1), round(p.lon, 1)) for p in pool}

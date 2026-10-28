@@ -1436,6 +1436,11 @@ def _route_locator(province: str):
 
 GOOGLE_MEMORY_SOURCE = "google-shortest-r3"
 
+#: Domy (klucz znormalizowany), których stare pomiary zrobił goły tekst i trafiły w
+#: imiennika („Nakło Śląskie" -> Nakło spod Lelowa, 82 km zamiast 8). Pamięć ich
+#: nie oddaje, więc pomiar idzie od nowa już z punktem ze skorowidza.
+REMEASURE_ORIGINS = frozenset({"naklo slaskie"})
+
 
 async def _google_memory(region_slug: str) -> dict:
     """Zapamiętane najkrótsze trasy Google okręgu: {(dom, hala): km}."""
@@ -1450,7 +1455,7 @@ async def _google_memory(region_slug: str) -> dict:
     return {
         (r["from_key"][: -len(suffix)], r["to_key"]): float(r["km"])
         for r in rows
-        if r["from_key"].endswith(suffix)
+        if r["from_key"].endswith(suffix) and r["from_key"][: -len(suffix)] not in REMEASURE_ORIGINS
     }
 
 

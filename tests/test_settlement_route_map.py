@@ -43,3 +43,28 @@ def test_wieloznaczna_hala_bez_punktu_i_dokladna_nazwa_bije_zblizona():
     ])
     assert RM.unique_point(g, "Grodków") == (50.698, 17.384)
     assert RM.unique_point(g, "Dąbrowa") is None
+
+
+def _naklo_gaz():
+    return P.Gazetteer([
+        (P.Place("1", "Nakło", 50.4369, 18.9106, "slaskie", 3824), []),
+        (P.Place("2", "Nakło", 50.656, 19.726, "slaskie", 614), []),
+        (P.Place("3", "Piekary Śląskie", 50.38, 18.95, "slaskie", 55000), []),
+    ])
+
+
+def test_nakło_śląskie_dostaje_punkt_a_nie_imiennika():
+    # Pełnej nazwy nie ma w skorowidzu; goły tekst do Google trafiał w Nakło spod Lelowa.
+    point = RM.unique_point(_naklo_gaz(), "Nakło Śląskie", "śląskie")
+    assert point == (50.4369, 18.9106)
+    origin, dest = RM.locator(_naklo_gaz(), "śląskie")("Nakło Śląskie", "Piekary Śląskie")
+    assert origin == (50.4369, 18.9106)
+    assert dest is not None
+
+
+def test_przymiotnik_bez_przewagi_ludnosci_nie_zgaduje():
+    g = P.Gazetteer([
+        (P.Place("1", "Nakło", 50.4, 18.9, "slaskie", 1000), []),
+        (P.Place("2", "Nakło", 50.6, 19.7, "slaskie", 900), []),
+    ])
+    assert RM.unique_point(g, "Nakło Śląskie", "śląskie") is None

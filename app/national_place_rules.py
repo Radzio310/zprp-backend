@@ -311,6 +311,18 @@ class Gazetteer:
                 found.extend(self._by_key[other])
         return _dedupe(found)
 
+    def extended(self, name: object) -> list[Place]:
+        """Miejscowości o tej nazwie ORAZ te, których nazwa zaczyna się od niej
+        („Dąbrowa" -> także „Dąbrowa Górnicza"). Do oceny wieloznacznej nazwy hali."""
+        key = name_key(name)
+        if not key:
+            return []
+        found = list(self.candidates(name))
+        for other in self._by_first.get(key.split(" ")[0], []):
+            if other.startswith(key + " "):
+                found.extend(self._by_key[other])
+        return _dedupe(found)
+
     def nearest(self, lat: float, lon: float, max_km: float = 25.0) -> Optional[Place]:
         """Najbliższa miejscowość skorowidza (do opisu starego położenia)."""
         cy, cx = self._cell(lat, lon)

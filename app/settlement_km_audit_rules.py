@@ -46,6 +46,17 @@ def _strict(candidates: list, name: Any) -> list:
     return exact or candidates
 
 
+def _dedupe_places(places: list) -> list:
+    seen: set = set()
+    out: list = []
+    for p in places:
+        key = (p.name, p.province, round(p.lat, 3), round(p.lon, 3))
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
+
+
 def audit_row(
     row: Mapping[str, Any],
     gaz: Gazetteer,
@@ -80,6 +91,11 @@ def audit_row(
     # imiennik blisko (Kalisz małopolski) udawał „oczekiwane 114 km".
     ends_a = own_homes or homes
     ends_b = _strict(gaz.candidates(city), city)
+    # Wieloznaczna nazwa hali („Dąbrowa" x96): rozliczenie pyta Google adresem
+    # hali, a my adresu nie mamy. Hala bywa „Dąbrowa Górnicza", więc oceniamy
+    # km wobec WSZYSTKICH miejscowości zaczynających się od tej nazwy.
+    if len({(round(p.lat, 1), round(p.lon, 1)) for p in ends_b}) > 1:
+        ends_b = _dedupe_places(list(ends_b) + gaz.extended(city))
     if ends_a and ends_b and not (table_km is not None and abs(km - table_km) < 1):
         best = None
         for a in ends_a:

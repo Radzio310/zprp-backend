@@ -138,3 +138,20 @@ def test_resolve_distances_zbiera_geometrie():
     out = asyncio.run(SD.resolve_distances([("Tychy", "Gliwice")], SD.DistanceIndex(None), client=C(), shapes=shapes))
     assert out[("Tychy", "Gliwice")] == (20.0, "google")
     assert shapes == {("tychy", "gliwice"): "abc"}
+
+
+def test_dabrowa_gornicza_to_nie_falszywy_alarm():
+    # Hala „Dąbrowa" z adresem w Dąbrowie Górniczej: 12,4 km z Siemianowic i
+    # 68,7 km z Bielska-Białej są dobre, audyt nie może liczyć linii do imiennika.
+    g = P.Gazetteer([
+        (P.Place("1", "Dąbrowa", 53.65, 23.35, "podlaskie", 500), []),
+        (P.Place("2", "Dąbrowa", 50.01, 20.25, "malopolskie", 600), []),
+        (P.Place("3", "Dąbrowa Górnicza", 50.327, 19.203, "slaskie", 120000), []),
+        (P.Place("4", "Siemianowice Śląskie", 50.327, 19.029, "slaskie", 66000), []),
+        (P.Place("5", "Bielsko-Biała", 49.822, 19.047, "slaskie", 170000), []),
+    ])
+    for home, km in (("Siemianowice Śląskie", 12.4), ("Bielsko-Biała", 68.7)):
+        row = {"distance_km": km, "home_city": home, "city": "Dąbrowa", "distance_source": "google"}
+        assert A.audit_row(row, g, province="slaskie") == []
+    far = {"distance_km": 454, "home_city": "Bielsko-Biała", "city": "Dąbrowa", "distance_source": "google"}
+    assert A.audit_row(far, g, province="slaskie")
