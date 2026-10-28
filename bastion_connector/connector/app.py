@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
+from .bastion import REFEREE_PARAMS
 from .config import Settings
 from .service import ConnectorError, Service
 from .tickets import TicketError
@@ -206,15 +207,18 @@ async def clip_download_url(remote_id: str, scope: str, judge_id: str | None = N
 
 @app.get("/games/search", dependencies=[Depends(auth)])
 async def games_search(scope: str, q: str = "", judge_id: str | None = None, limit: int = 20, offset: int = 0,
-                       season_id: int | None = None, video: str = "with"):
-    """Meczoteka: lista meczow z nagraniem (bunny_item_id) pasujacych do tekstu (druzyny/kod/data). Tylko odczyt."""
+                       season_id: int | None = None, video: str = "with", referee: str = "", referee_param: str = "q"):
+    """Meczoteka: lista meczow z nagraniem (bunny_item_id) pasujacych do tekstu (druzyny/kod/data) albo do sedziego
+    (`referee` = imie i nazwisko, `referee_param` = nazwa parametru portalu do prob: q|referee|referees|referee_name|judge|sedzia).
+    Tylko odczyt."""
     _scope(scope, judge_id)
     q = q.strip()
-    if len(q) > 80 or any(ord(c) < 32 for c in q):
+    referee = referee.strip()
+    if len(q) > 80 or len(referee) > 80 or any(ord(c) < 32 for c in q + referee) or referee_param not in REFEREE_PARAMS:
         raise ConnectorError("BAD_QUERY", 400)
     if not 1 <= limit <= 50 or not 0 <= offset <= 5000 or video not in ("with", "without", "any"):
         raise ConnectorError("BAD_PARAMS", 400)
-    res = await svc.games_search(scope, judge_id, q, limit, offset, season_id, video)
+    res = await svc.games_search(scope, judge_id, q, limit, offset, season_id, video, referee, referee_param)
     return JSONResponse(res, headers={"Cache-Control": "no-store"})
 
 

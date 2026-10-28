@@ -816,6 +816,41 @@ def test_normalize_games_shape_and_skips_unmatched():
 
 def test_normalize_games_limit_and_garbage():
     from connector.bastion import normalize_games
-    assert normalize_games(None, 5) == {"games": [], "total": None, "has_more": False}
+    assert normalize_games(None, 5) == {"games": [], "total": None, "has_more": False, "row_keys": []}
     body = {"items": [{"bunny_item_id": i} for i in range(1, 9)]}
     assert len(normalize_games(body, 3)["games"]) == 3
+
+
+def test_normalize_games_parses_referee_fields_tolerantly():
+    from connector.bastion import normalize_games, parse_referees
+    row = {"bunny_item_id": 9, "referees": [{"first_name": "Jan", "last_name": "Kowalski", "id": 12}, "Adam Nowak"],
+           "referee_ids": [1, 2], "home_team": "A"}
+    assert parse_referees(row) == [{"name": "Jan Kowalski", "id": "12"}, {"name": "Adam Nowak", "id": None}]
+    r = normalize_games({"items": [row]}, 5)
+    assert r["games"][0]["referees"][0]["name"] == "Jan Kowalski"
+    assert "referees" in r["row_keys"]
+    assert parse_referees({"bunny_item_id": 1}) == []
+
+
+def test_fetch_games_sends_referee_in_whitelisted_param():
+    import asyncio
+    from connector.bastion import fetch_games
+
+    sent = {}
+
+    class Resp:
+        status = 200
+
+        async def json(self):
+            return {"items": []}
+
+    class Req:
+        async def get(self, url, params=None, **kw):
+            sent.update(params)
+            return Resp()
+
+    asyncio.run(fetch_games(Req(), "https://x", "", 20, 0, None, "any", "Jan Kowalski", "referee"))
+    assert sent["referee"] == "Jan Kowalski" and "q" not in sent
+    sent.clear()
+    asyncio.run(fetch_games(Req(), "https://x", "", 20, 0, None, "any", "Jan Kowalski", "evil"))
+    assert sent == {"limit": "20", "offset": "0", "video": "any", "q": "Jan Kowalski"} or sent["q"] == "Jan Kowalski"

@@ -172,6 +172,48 @@ def _int(v: Any) -> int | None:
     return None
 
 
+REFEREE_PARAMS = ("q", "referee", "referees", "referee_name", "judge", "sedzia")
+_REFEREE_KEY_HINTS = ("referee", "judge", "sedzi", "sędzi", "arbiter")
+
+
+def _person_name(v: Any) -> str | None:
+    if isinstance(v, str):
+        return _txt(v, 80)
+    if isinstance(v, dict):
+        full = _txt(v.get("name") or v.get("full_name") or v.get("fullname"), 80)
+        if full:
+            return full
+        first, last = _txt(v.get("first_name") or v.get("firstname"), 40), _txt(v.get("last_name") or v.get("lastname") or v.get("surname"), 40)
+        return " ".join(x for x in (first, last) if x) or None
+    return None
+
+
+def parse_referees(g: dict) -> list[dict]:
+    """Sedziowie z wiersza /api/games (ksztalt NIEPOTWIERDZONY): dowolny klucz z "referee"/"judge"/"sedzi" w nazwie,
+    wartosc: napis, obiekt {name|first_name+last_name, id} albo lista takich. Bez powtorzen, najwyzej 6."""
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def add(v: Any, ident: Any = None) -> None:
+        name = _person_name(v)
+        if not name or name.casefold() in seen or len(out) >= 6:
+            return
+        seen.add(name.casefold())
+        pid = ident if ident is not None else (v.get("id") or v.get("judge_id") or v.get("referee_id")) if isinstance(v, dict) else None
+        out.append({"name": name, "id": _txt(pid, 40) if pid is not None else None})
+
+    for key, value in g.items():
+        k = str(key).lower()
+        if not any(h in k for h in _REFEREE_KEY_HINTS) or k.endswith("_id") or k.endswith("_ids"):
+            continue
+        if isinstance(value, list):
+            for item in value:
+                add(item)
+        else:
+            add(value)
+    return out
+
+
 def normalize_game(g: Any) -> dict | None:
     """Jeden wiersz /api/games -> {bunny_item_id, title, home, away, date, competition, code, ...}. Bez bunny_item_id
     (mecz bez dopasowanego nagrania) wiersz jest pomijany: nie ma czego proponowac."""
@@ -191,7 +233,7 @@ def normalize_game(g: Any) -> dict | None:
     out = {"bunny_item_id": item, "title": title, "home": home, "away": away, "date": date,
            "competition": _txt(g.get("type_name")) or _txt(g.get("series")), "code": code, "score": score,
            "video_state": _txt(g.get("video_state"), 20), "video_coverage": _int(g.get("video_coverage")),
-           "thumbnail": None, "duration_s": None}
+           "thumbnail": None, "duration_s": None, "referees": parse_referees(g)}
     return out
 
 
@@ -199,14 +241,21 @@ def normalize_games(body: Any, limit: int) -> dict:
     items = body.get("items") if isinstance(body, dict) else None
     games = [n for n in (normalize_game(x) for x in (items if isinstance(items, list) else [])) if n][:limit]
     paging = body.get("paging") if isinstance(body, dict) and isinstance(body.get("paging"), dict) else {}
-    return {"games": games, "total": _int(paging.get("total")), "has_more": bool(paging.get("has_more"))}
+    first = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
+    # `row_keys`: nazwy pol pierwszego wiersza - do potwierdzenia ksztaltu (pole sedziow) bez ogladania calej odpowiedzi.
+    return {"games": games, "total": _int(paging.get("total")), "has_more": bool(paging.get("has_more")),
+            "row_keys": sorted(str(k) for k in first)[:40]}
 
 
-async def fetch_games(req, base_url: str, q: str, limit: int, offset: int, season_id: int | None, video: str) -> tuple[str, int | None, Any]:
-    """Zwraca (kod, http, cialo). Kody jak w classify; 200 z nie-obiektem = BASTION_BAD_RESPONSE."""
+async def fetch_games(req, base_url: str, q: str, limit: int, offset: int, season_id: int | None, video: str,
+                      referee: str = "", referee_param: str = "q") -> tuple[str, int | None, Any]:
+    """Zwraca (kod, http, cialo). Kody jak w classify; 200 z nie-obiektem = BASTION_BAD_RESPONSE.
+    `referee` = nazwisko sedziego; trafia do parametru `referee_param` (z listy REFEREE_PARAMS, domyslnie zwykle `q`)."""
     params: dict[str, Any] = {"limit": str(limit), "offset": str(offset)}
     if q:
         params["q"] = q
+    if referee:
+        params[referee_param if referee_param in REFEREE_PARAMS else "q"] = referee
     if season_id is not None:
         params["season_id"] = str(season_id)
     if video in ("with", "without"):

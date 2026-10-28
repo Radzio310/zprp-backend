@@ -168,6 +168,17 @@ Wyniki lokalne uzyskane 26.10.2026 na Windows 11, Python 3.14, Playwright 1.63 (
 | Tożsamość konta (`external_identity_id`) | **wdrożone, do potwierdzenia na Railway** | Z `viewer` w game-context: pole id, jeśli jest, inaczej odcisk `viewer.display_name` (`dn:<sha256[:16]>`; publiczne skrypty portalu czytają tylko `display_name`). `GET /connections/check` zwraca `viewer_keys` pośrednio w `identity_source`; kształt `viewer` sprawdzić na żywo |
 | Meczoteka `GET /games/search` (q=LCM/32, scope default) | **zweryfikowane (Railway, 28.10)** | 1 wynik: `{bunny_item_id:5632, home:"AZS AGH Kraków", away:"ENERGA GWARDIA Koszalin", date:"2026-10-10 19:00:00" (czas polski, bez strefy, spacja zamiast T), competition:"Liga Centralna Mężczyzn", code:"LCM/32" (pisownia ZPRP co do litery), score:"37:32", video_state:"READY", video_coverage:2}`. Zaraz potem `/playback` 5632 = 200 OK (wyszukiwanie nie psuje sesji). Na tym kształcie stoi ocena pewności Archiwisty (`app/mentor_bastion_search.py`, mentor-panel 8.10) |
 
+### Meczoteka po sędzi (Trybuna, 28.10.2026, do potwierdzenia próbą)
+
+`GET /games/search` przyjmuje też `referee` (imię i nazwisko, do 80 znaków) oraz `referee_param` (nazwa parametru portalu: `q|referee|referees|referee_name|judge|sedzia`, domyślnie `q`). Wiersz wyniku ma `referees: [{name, id}]` (tolerancyjny parser pól o nazwie z `referee`/`judge`/`sedzi`) a odpowiedź `row_keys` (nazwy pól pierwszego wiersza portalu). Właściciel potwierdził, że portal szuka po imieniu i nazwisku sędziego; NIEZNANE jest dokładne pole, więc backend używa `REFEREE_PARAM` (`app/mentor_bastion_search.py`, domyślnie `q`). Próba (po wdrożeniu connectora z tą zmianą; skrypt tylko do odczytu `scripts/probe_meczoteka_referee.py`, uruchamiany w kontenerze `zprp-backend`):
+
+```
+$b = [Convert]::ToBase64String([IO.File]::ReadAllBytes("scripts\probe_meczoteka_referee.py"))
+railway ssh -s zprp-backend "echo $b | base64 -d | python - 'Jan Kowalski'"
+```
+
+Wynik pokazuje dla każdego parametru liczbę wyników, `row_keys` i sędziów z pierwszej kasety. Parametr, który zwęża listę do meczów tego sędziego, wpisujemy w `REFEREE_PARAM`; jeśli żaden nie zawęża, szukanie po sędzi działa przez `q` (nazwisko jako zwykły tekst) i filtr po stronie BAZY (`referees` w wierszach), a pole z obsadą dopisujemy do `parse_referees` w `bastion_connector/connector/bastion.py`.
+
 ## 8. Ryzyka i otwarte kwestie
 
 - Trwałość sesji Bastionu nieznana; może wymagać cyklicznego logowania przez człowieka (MFA nie omijamy).
