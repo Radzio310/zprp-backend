@@ -214,3 +214,31 @@ def restrict_to_district(rows: List[Dict[str, Any]], district_ids: set) -> List[
         row for row in rows
         if district_ids & {str(x).strip() for x in (row.get("referee_ids") or [])}
     ]
+
+
+#: Powody ukrycia arkuszy w ocenach okręgu (pole `hidden.reason` w /overview i /forms).
+HIDDEN_NO_DISTRICT_JUDGES = "no_district_judges"
+HIDDEN_OTHER_DISTRICT = "other_district"
+
+
+def hidden_summary(rows: List[Dict[str, Any]], district_ids: set) -> Dict[str, Any]:
+    """Ile arkuszy z meczów okręgu odpadło w `restrict_to_district` i dlaczego.
+
+    Same liczby: ekran tłumaczy pustkę, ale nazwiska ukrytych par zostają
+    tylko w ich okręgach. Pusta lista sędziów okręgu to osobny powód, bo
+    wtedy lekarstwo jest po stronie okręgu (uzupełnić `province_judges`).
+    """
+    hidden = [
+        row for row in rows
+        if not district_ids & {str(x).strip() for x in (row.get("referee_ids") or [])}
+    ]
+    pairs = {
+        "|".join(sorted(str(x).strip() for x in (row.get("referee_ids") or []) if str(x).strip()))
+        for row in hidden
+    }
+    pairs.discard("")
+    return {
+        "sheets": len(hidden),
+        "pairs": len(pairs),
+        "reason": HIDDEN_OTHER_DISTRICT if district_ids else HIDDEN_NO_DISTRICT_JUDGES,
+    }

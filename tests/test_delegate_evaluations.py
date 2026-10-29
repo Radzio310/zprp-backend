@@ -217,3 +217,25 @@ def test_pisownia_wojewodztwa_odporna():
     from app.settlement_province import spellings
 
     assert set(spellings("DOLNOSLASKIE")) & set(spellings("Dolnośląskie"))
+
+
+def test_licznik_ukrytych_arkuszy_bez_nazwisk():
+    from app.delegate_evaluation_utils import hidden_summary
+
+    rows = [
+        {"id": 1, "referee_ids": ["10", "11"], "referee_names": ["NASZ", "NASZ"]},
+        {"id": 2, "referee_ids": ["98", "99"], "referee_names": ["PARKITNY", "ZAJĄC"]},
+        {"id": 3, "referee_ids": ["99", "98"], "referee_names": ["ZAJĄC", "PARKITNY"]},
+        {"id": 4, "referee_ids": ["97", "96"], "referee_names": ["OBCY", "OBCY"]},
+    ]
+    hidden = hidden_summary(rows, {"10"})
+    assert hidden == {"sheets": 3, "pairs": 2, "reason": "other_district"}
+    assert "PARKITNY" not in str(hidden)
+
+
+def test_okreg_bez_listy_sedziow_ma_wlasny_powod():
+    from app.delegate_evaluation_utils import hidden_summary
+
+    rows = [{"id": 1, "referee_ids": ["10", "11"]}, {"id": 2, "referee_ids": []}]
+    assert hidden_summary(rows, set()) == {"sheets": 2, "pairs": 1, "reason": "no_district_judges"}
+    assert hidden_summary([], set())["sheets"] == 0

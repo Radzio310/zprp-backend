@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -20,6 +20,7 @@ from app.delegate_evaluation_utils import (
     canonical_hash,
     finalize_bucket,
     grade_values,
+    hidden_summary,
     new_bucket,
     pair_names,
     resolve_access,
@@ -224,11 +225,12 @@ async def district_judge_ids(province: str) -> set:
 
 async def _all_rows(
     judge_id: str, province: str, season: str, source: str, district_ids: Optional[set] = None
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Arkusze delegatów i/lub opublikowane oceny mentora w JEDNYM kształcie wiersza.
 
     Ocena mentora niesie `kind: "mentor"` i `source_kind: "mentor"` - ekrany
-    liczą ją tak samo, a rysują z innym oznaczeniem.
+    liczą ją tak samo, a rysują z innym oznaczeniem. Drugi element to licznik
+    arkuszy ukrytych filtrem okręgu (`None`, gdy filtra nie ma - admin, własne).
     """
     source = source if source in SOURCES else "delegate"
     rows: List[Dict[str, Any]] = []
@@ -239,9 +241,11 @@ async def _all_rows(
 
         rows += await mentor_form_rows(judge_id, province, season)
         rows.sort(key=lambda r: str(r.get("match_date") or ""), reverse=True)
+    hidden = None
     if district_ids is not None:
+        hidden = hidden_summary(rows, district_ids)
         rows = restrict_to_district(rows, district_ids)
-    return rows
+    return rows, hidden
 
 
 async def _national_rows(judge_id: str, season: str, source: str) -> List[Dict[str, Any]]:
@@ -287,7 +291,7 @@ async def overview(
         raise HTTPException(403, access.get("reason") or "Brak dostępu do statystyk ocen")
     # Okręg widzi tylko pary ze swoim sędzią; administrator - wszystko.
     district_ids = await district_judge_ids(province) if province and not access.get("admin") else None
-    rows = await _all_rows(actor, province, season, source, district_ids)
+    rows, hidden = await _all_rows(actor, province, season, source, district_ids)
     people: Dict[str, Dict[str, Any]] = {}
     pairs: Dict[str, Dict[str, Any]] = {}
     # Worek „Łącznie": WSZYSTKIE arkusze z tego zapytania w jednym zbiorze, więc
@@ -344,6 +348,8 @@ async def overview(
         "seasons": sorted((value for value in available_seasons if value), reverse=True),
         "grade_scale": GRADE_POINTS,
     }
+    if hidden is not None:
+        result["hidden"] = hidden
     if access.get("admin"):
         # Licznik arkuszy w każdym okręgu - z tego admin składa wybór województw.
         # Liczymy BEZ filtra sezonu: inaczej okręg mający arkusze tylko w innym
@@ -386,7 +392,8 @@ async def forms(
     if province and not access["full"]:
         raise HTTPException(403, access.get("reason") or "Brak dostępu do pełnych arkuszy")
     district_ids = await district_judge_ids(province) if province and not access.get("admin") else None
-    items = [dict(row) for row in await _all_rows(actor, province, season, source, district_ids)]
+    rows, hidden = await _all_rows(actor, province, season, source, district_ids)
+    items = [dict(row) for row in rows]
     if comparisons:
         national = await _national_rows(actor, season, source) if province and access.get("admin") else None
         metric_cache: Dict[str, Dict[str, Any]] = {}
@@ -399,7 +406,10 @@ async def forms(
                 include_combined=source == "all",
                 metric_cache=metric_cache,
             )
-    return {"items": items}
+    result: Dict[str, Any] = {"items": items}
+    if hidden is not None:
+        result["hidden"] = hidden
+    return result
 
 
 @admin_router.get("/access/{province}")
