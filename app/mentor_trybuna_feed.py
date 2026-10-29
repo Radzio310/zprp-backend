@@ -951,6 +951,7 @@ async def trybuna_days(pair_id: str, response: Response, from_: str = Query(...,
         counts[d_from + timedelta(days=i)] = {"with_video": 0, "total": 0, "followed": 0}
     followed_keys: Dict[date, set] = {d: set() for d in counts}
     bastion: Dict[str, Any] = {"state": "ok", "truncated": False}
+    auth_lost = False
     mz, state = S._setup(real)
     games: List[Dict[str, Any]] = []
     if mz is None:
@@ -960,9 +961,8 @@ async def trybuna_days(pair_id: str, response: Response, from_: str = Query(...,
             games, meta = await mz.scan(video="any", d_from=d_from, d_to=d_to)
             bastion["truncated"] = bool(meta["truncated"])
         except S._Stop as stop:
-            if stop_is_auth(stop):
-                raise_stop(real, stop)
             bastion = {"state": await stop_state(stop), "truncated": False}
+            auth_lost = stop_is_auth(stop)
     for g in games:
         day = S.parse_day(g.get("date"))
         if day not in counts:
@@ -986,6 +986,9 @@ async def trybuna_days(pair_id: str, response: Response, from_: str = Query(...,
     for d, keys in followed_keys.items():
         counts[d]["followed"] = len(keys)
     out = {"days": [{"date": d.isoformat(), **c} for d, c in sorted(counts.items())], "bastion": bastion}
+    if auth_lost:
+        out["bastion_error"] = "BASTION_AUTH_REQUIRED"
+        return out   # dane częściowe (followed z ZPRP) bez zapisu w pamięci
     if len(_days_cache) > 300:
         _days_cache.clear()
     _days_cache[key] = (time.monotonic(), out)
@@ -1163,6 +1166,7 @@ async def referee_card(response: Response, name: str = Query("", max_length=80),
     mz, state = S._setup(real)
     all_games: List[Dict[str, Any]] = []
     cache_info = {"hit": False, "age_s": 0, "refreshing": False}
+    auth_lost = False
     if mz is None:
         available["bastion"] = bastion_block(state or "unconfigured")
     else:
@@ -1180,15 +1184,15 @@ async def referee_card(response: Response, name: str = Query("", max_length=80),
             await S.enrich_media(real, scope, available["games"])
             available["bastion"] = bastion_block("ok", scope)
         except S._Stop as stop:
-            if stop_is_auth(stop):
-                raise_stop(real, stop)
+            auth_lost = stop_is_auth(stop)
             available["bastion"] = bastion_block(await stop_state(stop), mz.scope)
     await S.attach_crests(zprp["recent"] + zprp["upcoming"])
     extras = await card_extras(judge_id, name, zprp_rows if judge_id else [], all_games, zprp["matches"], zprp.get("season_matches", 0))
 
     # Moje klipy z udziałem sędziego.
     my_clips = await clips_with_referee(real, me, key)
-    return {"referee": me, "follow": mine, "zprp": zprp, "available": available, "my_clips": my_clips, "cache": cache_info, **extras}
+    return {"referee": me, "follow": mine, "zprp": zprp, "available": available, "my_clips": my_clips, "cache": cache_info, **extras,
+            **({"bastion_error": "BASTION_AUTH_REQUIRED"} if auth_lost else {})}
 
 
 ROLE_LABELS = {"referee": "sędzia", "delegate": "delegat", "table": "stolikowy"}
