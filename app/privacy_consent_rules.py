@@ -27,7 +27,7 @@ from typing import Any, Iterable, Optional
 #:
 #: ⚠ Ta sama liczba stoi w `BAZA/utils/privacyConsent.ts`. Rozjazd oznacza, że
 #: telefon i serwer liczą różne wersje tej samej zgody - pilnuje tego test.
-CURRENT_CLAUSE_VERSION = 2
+CURRENT_CLAUSE_VERSION = 3
 
 #: Kto jest administratorem danych. Zmiana tych danych to zmiana klauzuli,
 #: więc idzie w parze z podniesieniem wersji wyżej.
