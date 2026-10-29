@@ -281,6 +281,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     if isinstance(exc.detail, dict):
         # nie pozwalamy nadpisać samego "error"
         content.update({k: v for k, v in exc.detail.items() if k != "error"})
+        # Wyjątek może wprost wskazać kod jako napis w "error" (np. BASTION_AUTH_REQUIRED w Trybunie).
+        if isinstance(getattr(exc, "error_code", None), str):
+            content["error"] = exc.error_code
     return JSONResponse(status_code=exc.status_code, content=content)
 
 # -------------------------

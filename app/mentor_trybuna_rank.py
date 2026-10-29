@@ -191,6 +191,53 @@ def source_info(entry: Mapping[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _entry_teams(entry: Mapping[str, Any]) -> Tuple[Any, Any]:
+    return entry.get("home"), entry.get("away")
+
+
+def _same_teams(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    """Obie drużyny pasują (kolejność obojętna, progi jak w `score_game`)."""
+    ah, aa = _entry_teams(a)
+    bh, ba = _entry_teams(b)
+    if not (ah and aa and bh and ba):
+        return False
+    straight = min(S.team_similarity(ah, bh), S.team_similarity(aa, ba))
+    swapped = min(S.team_similarity(ah, ba), S.team_similarity(aa, bh))
+    return max(straight, swapped) >= 0.8
+
+
+def _is_codeless_youtube(members: List[Dict[str, Any]]) -> bool:
+    return all(m.get("source") == "youtube" and not S._alnum(m.get("code")) for m in members)
+
+
+def attach_codeless_youtube(groups: Dict[str, List[Dict[str, Any]]], order: List[str]) -> List[str]:
+    """Film z YouTube BEZ kodu meczu (tożsamość po drużynach i dniu nie trafia w grupę z kodem) dołączamy do wpisu meczu, gdy obie
+    drużyny pasują, a dzień różni się o najwyżej 1, i tylko gdy jest DOKŁADNIE jeden taki kandydat. Inaczej zostaje osobnym wpisem.
+    Zwraca nową kolejność grup (dołączone znikają jako osobne)."""
+    orphans = [g for g in order if _is_codeless_youtube(groups[g])]
+    if not orphans:
+        return order
+    taken: set = set()
+    for gid in orphans:
+        first = groups[gid][0]
+        day = S.parse_day(first.get("match_day")) or S.parse_day(first.get("date"))
+        if not day:
+            continue
+        found = []
+        for cid in order:
+            if cid == gid or cid in taken or cid in orphans:
+                continue
+            for m in groups[cid]:
+                mday = S.parse_day(m.get("match_day")) or S.parse_day(m.get("date"))
+                if mday and abs((mday - day).days) <= 1 and _same_teams(first, m):
+                    found.append(cid)
+                    break
+        if len(found) == 1:
+            groups[found[0]].extend(groups[gid])
+            taken.add(gid)
+    return [g for g in order if g not in taken]
+
+
 def merge_ranked(ranked: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Ten sam mecz z kilku źródeł (kaseta z nagraniem, ta sama bez nagrania, film YouTube, wpis z "bazy") = JEDEN wpis z listą
     `sources`. Wersja główna: kaseta Bastionu Z NAGRANIEM, inaczej pierwsza w kolejności trafności. Wpis ma `in_baza` / `baza_match_id`,
@@ -203,6 +250,7 @@ def merge_ranked(ranked: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             groups[gid] = []
             order.append(gid)
         groups[gid].append(e)
+    order = attach_codeless_youtube(groups, order)
     merged: List[Dict[str, Any]] = []
     for gid in order:
         members = groups[gid]

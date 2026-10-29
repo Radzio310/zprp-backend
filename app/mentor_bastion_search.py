@@ -20,7 +20,7 @@ import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, select
 
@@ -356,6 +356,74 @@ def in_range(game: Mapping[str, Any], d_from: Optional[date], d_to: Optional[dat
     return lo <= minutes <= hi if lo <= hi else (minutes >= lo or minutes <= hi)
 
 
+class BastionAuthRequired(HTTPException):
+    """Brak albo wygasła sesja Bastionu w Trybunie: 409 (nigdy 401) i `{"error": "BASTION_AUTH_REQUIRED", code, message, connections, ...}`
+    (napis w `error` ustawia handler w main.py przez `error_code`)."""
+
+    error_code = "BASTION_AUTH_REQUIRED"
+
+
+def auth_aware(exc: HTTPException) -> HTTPException:
+    """Błąd `_playback_failure` o braku sesji zamienia na `BastionAuthRequired`, inne zostawia."""
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict) and detail.get("code") == "BASTION_AUTH_REQUIRED":
+        return BastionAuthRequired(exc.status_code, detail=detail)
+    return exc
+
+
+#: Pamięć "stale-while-revalidate" dla szukania po sędzi i karty sędziego: do 1 h, po 10 min wpis jest nieświeży
+#: (zwracamy go od razu, odświeżamy w tle, jedno odświeżanie naraz na klucz). Per proces, klucze zawierają użytkownika.
+SWR_TTL_S = 3600.0
+SWR_FRESH_S = 600.0
+SWR_MAX = 400
+_swr: Dict[Tuple[Any, ...], Tuple[float, Any]] = {}
+_swr_busy: set = set()
+_swr_tasks: set = set()
+
+
+def forget_swr() -> None:
+    _swr.clear()
+    _swr_busy.clear()
+
+
+async def swr_get(key: Tuple[Any, ...], loader, now: Optional[float] = None) -> Tuple[Any, Dict[str, Any]]:
+    """Wartość z pamięci albo z `loader()` (async, bez argumentów). -> (wartość, {hit, age_s, refreshing}).
+    Brak wpisu: czeka na `loader` (błąd leci dalej, nic się nie zapisuje). Wpis nieświeży (> 10 min): zwracany od razu, odświeżanie w tle
+    (błąd odświeżania zostawia stary wpis). Wpis starszy niż 1 h jest wyrzucany."""
+    moment = time.monotonic() if now is None else now
+    hit = _swr.get(key)
+    if hit and moment - hit[0] >= SWR_TTL_S:
+        _swr.pop(key, None)
+        hit = None
+    if hit is None:
+        value = await loader()
+        if len(_swr) >= SWR_MAX:
+            _swr.clear()
+        _swr[key] = (time.monotonic() if now is None else now, value)
+        return value, {"hit": False, "age_s": 0, "refreshing": False}
+    age = moment - hit[0]
+    refreshing = key in _swr_busy
+    if age >= SWR_FRESH_S and not refreshing:
+        _swr_busy.add(key)
+        refreshing = True
+
+        async def refresh() -> None:
+            try:
+                fresh = await loader()
+                _swr[key] = (time.monotonic(), fresh)
+            except asyncio.CancelledError:
+                raise
+            except BaseException:  # noqa: BLE001 - stary wpis zostaje
+                pass
+            finally:
+                _swr_busy.discard(key)
+
+        task = asyncio.ensure_future(refresh())
+        _swr_tasks.add(task)
+        task.add_done_callback(_swr_tasks.discard)
+    return hit[1], {"hit": True, "age_s": int(age), "refreshing": refreshing}
+
+
 class _Stop(Exception):
     """Werdykt, po którym dalsze zapytania nie mają sensu (brak sesji, limit, awaria)."""
 
@@ -376,6 +444,7 @@ def forget_search_cache() -> None:
     _totals.clear()
     _bound_cache.clear()
     _rate_log.clear()
+    forget_swr()
 
 
 def cache_get(key: Tuple[Any, ...], now: Optional[float] = None) -> Optional[Tuple[List[Dict[str, Any]], bool]]:

@@ -1097,3 +1097,125 @@ def test_karta_sedziego_liczy_prawdziwie_nazwiska_okreg_i_role(env):
     assert delegate["role_label"] == "delegat" and delegate["position"] == "D1"
     referee = next(f for f in card["season_form"] if f["role"] == "referee" and f["score"])
     assert referee["score"] == "30:28" and referee["role_label"] == "sędzia"
+
+
+# ─── Pamięć szukania po sędzi (SWR), paczka dzienna, YouTube bez kodu, brak sesji Bastionu ─────────────
+
+
+def test_swr_swieze_nieswieze_i_wygasle(env):
+    S = importlib.import_module("app.mentor_bastion_search")
+    S.forget_search_cache()
+
+    async def go():
+        import asyncio
+
+        calls = []
+
+        async def loader():
+            calls.append(1)
+            return f"v{len(calls)}"
+
+        v1, m1 = await S.swr_get(("k",), loader)
+        v2, m2 = await S.swr_get(("k",), loader)
+        stamp, val = S._swr[("k",)]
+        S._swr[("k",)] = (stamp - 700, val)                       # 11 min: nieświeży
+        v3, m3 = await S.swr_get(("k",), loader)
+        v4, m4 = await S.swr_get(("k",), loader)                   # drugie odświeżenie naraz nie startuje
+        await asyncio.sleep(0.05)
+        v5, m5 = await S.swr_get(("k",), loader)
+        S._swr[("k",)] = (S._swr[("k",)][0] - 4000, S._swr[("k",)][1])   # > 1 h: wyrzucony, czekamy na loader
+        v6, m6 = await S.swr_get(("k",), loader)
+        return (v1, m1), (v2, m2), (v3, m3), (v4, m4), (v5, m5), (v6, m6), len(calls)
+
+    r1, r2, r3, r4, r5, r6, n = env.run(go)
+    assert r1 == ("v1", {"hit": False, "age_s": 0, "refreshing": False})
+    assert r2[0] == "v1" and r2[1]["hit"] is True and r2[1]["refreshing"] is False
+    assert r3[0] == "v1" and r3[1]["hit"] is True and r3[1]["age_s"] >= 700 and r3[1]["refreshing"] is True   # stary od razu, odświeżanie w tle
+    assert r4[0] in ("v1", "v2") and r5[0] == "v2" and r5[1]["age_s"] < 5 and r5[1]["refreshing"] is False
+    assert r6[0] == "v3" and r6[1]["hit"] is False and n == 3
+
+
+def test_szukanie_po_sedzi_z_pamieci_nie_liczy_sie_do_limitu(env, monkeypatch):
+    async def go():
+        actor = await env.actor(JUDGES[0])
+        ref = [{"name": "Jakub Rawicki", "role": "referee"}]
+        page = [{"bunny_item_id": 1, "date": "2026-10-12 18:00:00", "referees": ref, "home": "A", "away": "B", "video_state": "READY"}]
+        S, client, mz = meczoteka(env, [(200, {"games": page, "has_more": False})])
+        monkeypatch.setattr(env.trybuna_feed.S, "_setup", lambda real: (mz, None))
+        SB = env.trybuna_feed.SearchBody
+        first = await env.trybuna_feed.trybuna_search(PAIR, SB(referee="Rawicki Jakub"), _Resp(), actor, actor)
+        S._search_cache.clear()                          # krótka pamięć (10 min) pusta: tylko 1 h pamięć sędziego odpowiada
+        second = await env.trybuna_feed.trybuna_search(PAIR, SB(referee="Rawicki Jakub"), _Resp(), actor, actor)
+        other = await env.trybuna_feed.trybuna_search(PAIR, SB(referee="Rawicki Jakub", video="with"), _Resp(), actor, actor)
+        return first, second, other, len(client.calls)
+
+    first, second, other, calls = env.run(go)
+    assert first["cache"] == {"hit": False, "age_s": 0, "refreshing": False}
+    assert second["cache"]["hit"] is True and second["cache"]["refreshing"] is False and second["games"] == first["games"]
+    assert other["cache"]["hit"] is False and calls == 2     # inny filtr = inny klucz
+
+
+def test_brak_sesji_bastionu_to_409_z_kodem_a_youtube_przechodzi(env, monkeypatch):
+    async def go():
+        actor = await env.actor(JUDGES[0])
+        S, client, mz = meczoteka(env, [(409, {"code": "BASTION_AUTH_REQUIRED"})])
+        monkeypatch.setattr(env.trybuna_feed.S, "_setup", lambda real: (mz, None))
+        SB = env.trybuna_feed.SearchBody
+        try:
+            await env.trybuna_feed.trybuna_search(PAIR, SB(q="ISM/1"), _Resp(), actor, actor)
+            exc = None
+        except HTTPException as e:
+            exc = e
+        yt = {"video_id": "v1", "url": "u", "title": "A - B", "thumbnail_url": None, "official": False, "confidence": 80, "sure": True,
+              "signals": {}, "code": "ISM/1", "home": "A", "away": "B", "date": "2026-10-12T18:00:00+02:00",
+              "target": {"kind": "trybuna", "match_id": None, "label": "T"}}
+
+        async def fake_yt(*a, **k):
+            return [yt]
+
+        monkeypatch.setattr(env.trybuna_feed, "youtube_results", fake_yt)
+        S2, client2, mz2 = meczoteka(env, [(409, {"code": "BASTION_AUTH_REQUIRED"})])
+        monkeypatch.setattr(env.trybuna_feed.S, "_setup", lambda real: (mz2, None))
+        out = await env.trybuna_feed.trybuna_search(PAIR, SB(q="ISM/1"), _Resp(), actor, actor)
+        return exc, out
+
+    exc, out = env.run(go)
+    assert exc.status_code == 409 and exc.error_code == "BASTION_AUTH_REQUIRED" and exc.detail["code"] == "BASTION_AUTH_REQUIRED"
+    assert out["bastion_error"] == "BASTION_AUTH_REQUIRED" and out["games"] == [] and "youtube" in {x["source"] for r in out["ranked"] for x in r["sources"]}
+
+
+def test_paczka_dzienna_formaty(env):
+    F = env.trybuna_feed
+    one = F.digest_message([("Jan Kowalski", {"bunny_item_id": 5, "home": "A", "away": "B"})])
+    assert one[0] == "Trybuna: nowe nagrania" and one[1] == "Jan Kowalski: A - B" and one[2] == {"bunnyItemId": "5"} and one[3] == "mentor-trybuna"
+    found = [("Jan Kowalski", {"bunny_item_id": i}) for i in (1, 2)] + [("Adam Nowak", {"bunny_item_id": 3}), ("Ewa Zet", {"bunny_item_id": 4})]
+    title, text, extra, tag = F.digest_message(found)
+    assert title == "4 nowe nagrania" and text == "Jan Kowalski, Adam Nowak i inni" and tag == "mentor-trybuna-digest"
+    assert extra == {"count": "4", "bunnyItemIds": "1,2,3,4"}
+    many = F.digest_message([("X Y", {"bunny_item_id": i}) for i in range(1, 26)])
+    assert many[0] == "25 nowych nagrań" and many[2]["count"] == "25" and len(many[2]["bunnyItemIds"].split(",")) == 20
+    assert [F.plural_recordings(n) for n in (2, 5, 12, 22)] == ["2 nowe nagrania", "5 nowych nagrań", "12 nowych nagrań", "22 nowe nagrania"]
+    from datetime import datetime as D
+    from app.streams.rules import WARSAW
+
+    assert F.seconds_to_digest(D(2026, 10, 29, 18, 0, tzinfo=WARSAW)) == 3600 and F.seconds_to_digest(D(2026, 10, 29, 19, 0, tzinfo=WARSAW)) == 24 * 3600
+
+
+def test_youtube_bez_kodu_dolacza_do_jedynego_meczu(env):
+    RK = importlib.import_module("app.mentor_trybuna_rank")
+
+    def bastion(key, code, home, away, day, item):
+        return {"source": "bastion", "key": key, "confidence": 100, "sure": True, "code": code, "home": home, "away": away, "date": f"{day}T18:00:00+02:00",
+                "state": "video", "video_state": "READY", "ref": {"bunny_item_id": item}, "target": {"kind": "trybuna", "match_id": None, "label": "T"}}
+
+    def yt(key, home, away, day):
+        return {"source": "youtube", "key": key, "confidence": 70, "sure": False, "code": None, "home": home, "away": away, "date": f"{day}T17:00:00+02:00",
+                "match_day": day, "ref": {"video_id": key[3:], "url": "u"}, "official": False, "target": {"kind": "trybuna", "match_id": None, "label": "T"}}
+
+    one = RK.merge_ranked([bastion("bastion:1", "SM/1", "ORLEN Wisła Płock", "PGE Wybrzeże Gdańsk", "2026-10-18", 1), yt("yt:aaa", "Wisła Płock", "Wybrzeże Gdańsk", "2026-10-19")])
+    assert len(one) == 1 and {s["source"] for s in one[0]["sources"]} == {"bastion", "youtube"}
+    two = RK.merge_ranked([bastion("bastion:1", "SM/1", "ORLEN Wisła Płock", "PGE Wybrzeże Gdańsk", "2026-10-18", 1),
+                           bastion("bastion:2", "SM/2", "Wisła Płock", "Wybrzeże Gdańsk", "2026-10-19", 2), yt("yt:aaa", "Wisła Płock", "Wybrzeże Gdańsk", "2026-10-19")])
+    assert len(two) == 3                                         # dwóch kandydatów = zostaje osobnym wpisem
+    far = RK.merge_ranked([bastion("bastion:1", "SM/1", "ORLEN Wisła Płock", "PGE Wybrzeże Gdańsk", "2026-10-18", 1), yt("yt:aaa", "Wisła Płock", "Wybrzeże Gdańsk", "2026-10-25")])
+    assert len(far) == 2

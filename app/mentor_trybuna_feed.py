@@ -58,6 +58,9 @@ FEED_CONCURRENCY = 3
 NOTIFY_EVERY_S = 24 * 3600
 NOTIFY_WINDOW_DAYS = 3
 NOTIFY_MAX_REFEREES = 40
+#: Paczka nowych nagrań: jeden push dziennie na osobę o 19:00 (czas polski); ślad w `mentor_trybuna_today` z dniem `digest:RRRR-MM-DD`.
+DIGEST_HOUR = 19
+DIGEST_PREFIX = "digest:"
 
 
 def _iso(value: Any) -> Optional[str]:
@@ -93,7 +96,25 @@ def raise_stop(real: Actor, stop: "S._Stop") -> None:
     exc = _playback_failure(BR.load_flags(), real, stop.verdicts)
     kind = S.CODE_KIND.get(exc.detail.get("code"), "unavailable")
     exc.detail["message"] = S.STATE_MESSAGES[kind]
-    raise exc from None
+    raise S.auth_aware(exc) from None
+
+
+def stop_is_auth(stop: "S._Stop") -> bool:
+    """Brak / wygasła sesja Bastionu (a nie limit czy awaria): wtedy Trybuna odpowiada spójnie `BASTION_AUTH_REQUIRED`."""
+    from app.mentor_bastion import _playback_failure
+
+    return _playback_failure(BR.load_flags(), C.MentorActor("0", display_name="x"), stop.verdicts).detail.get("code") == "BASTION_AUTH_REQUIRED"
+
+
+async def q_is_referee(q: str) -> bool:
+    """Czy tekst z pola szukania to nazwisko znanego sędziego / delegata (indeks obsad ZPRP): dwa i więcej słów, bez cyfr i ukośnika."""
+    words = T.name_key(q).split()
+    if len(words) < 2 or any(ch.isdigit() or ch == "/" for ch in q):
+        return False
+    from app.mentor_trybuna_suggest import get_index
+
+    want = T.name_key(q)
+    return any(T.name_key(p["name"]) == want for p in (await get_index())["people"])
 
 
 def bastion_block(state: str, scope: Optional[str] = None, **extra: Any) -> Dict[str, Any]:
@@ -208,27 +229,44 @@ async def trybuna_search(pair_id: str, body: SearchBody, response: Response, rea
     if state == "unconfigured" or mz is None:
         raise berr(503, "BASTION_UNAVAILABLE", S.UNCONFIGURED_MESSAGE)
     meta = None
-    try:
+    scope: Optional[str] = None
+    cache_info = {"hit": False, "age_s": 0, "refreshing": False}
+    halted: Optional["S._Stop"] = None
+
+    async def load():
         if ranged:
             # Przegląd okresu z tekstem albo sędzią: strony po 50 (do 10), daty i godziny filtrowane po stronie BAZY.
-            games, meta = await mz.scan(q=q, referee=referee, video=body.video, d_from=d_from, d_to=d_to, t_from=t_from, t_to=t_to)
-            games = games[:100]
+            found, found_meta = await mz.scan(q=q, referee=referee, video=body.video, d_from=d_from, d_to=d_to, t_from=t_from, t_to=t_to)
+            return found[:100], found_meta, mz.scope
+        found = await (mz.search_referee(referee, video=body.video, offset=body.offset) if referee else mz.search(q))
+        return found, None, mz.scope
+
+    try:
+        if referee or (q and await q_is_referee(q)):
+            # Szukanie po sędzi: pamięć 1 h (po 10 min nieświeża: odświeżana w tle), limit zapytań nie liczy trafień.
+            key = ("search", real.judge_id, T.name_key(referee or q), T.name_key(q) if referee else "", body.video, body.offset,
+                   d_from, d_to, t_from, t_to)
+            (games, meta, scope), cache_info = await S.swr_get(key, load)
         else:
-            games = await (mz.search_referee(referee, video=body.video, offset=body.offset) if referee else mz.search(q))
+            games, meta, scope = await load()
     except S._Stop as stop:
-        raise_stop(real, stop)
-    if not ranged:
-        games = [g for g in games if g.get("bunny_item_id")]
+        if not stop_is_auth(stop):
+            raise_stop(real, stop)
+        halted, games = stop, []   # YouTube działa bez Bastionu: błąd dopiero, gdy nie ma też YouTube
     watched = await watched_by_item([ctx["pair_id"]], [int(g["bunny_item_id"]) for g in games if g.get("bunny_item_id")])
     by_item = {item: mid for (_, item), mid in watched.items()}
     rows = [with_iso_date(game_row(g, by_item)) for g in games]    # czas polski bez strefy z Meczoteki -> ISO ze strefą
-    await S.enrich_media(real, mz.scope, rows)
+    await S.enrich_media(real, scope, rows)
     ranked, youtube = await build_ranked(ctx, rows, q, referee, d_from, d_to, t_from, t_to)
+    if halted is not None and not youtube:
+        raise_stop(real, halted)
     best = RK.best_key(ranked)
     out = {"games": rows, "ranked": ranked, "best": best, **RK.best_info(ranked, best), "counts": RK.counts(ranked), "youtube": youtube,
            "offset": body.offset,
            "next_offset": None if ranged else (body.offset + S.PAGE if len(games) >= S.PAGE else None),
-           "connection_scope": mz.scope, "query": {"q": q or None, "referee": referee or None}}
+           "connection_scope": scope, "query": {"q": q or None, "referee": referee or None}, "cache": cache_info}
+    if halted is not None:
+        out["bastion_error"] = "BASTION_AUTH_REQUIRED"
     if meta is not None:
         out["range"] = {"date_from": d_from.isoformat() if d_from else None, "date_to": d_to.isoformat() if d_to else None,
                         "time_from": R.s(body.time_from) or None, "time_to": R.s(body.time_to) or None, "pages": meta["pages"],
@@ -879,7 +917,7 @@ async def trybuna_preview(pair_id: str, body: PreviewBody, response: Response, r
         verdicts.append((scope, verdict))
         if verdict.kind in ("rate_limited", "unavailable"):
             break
-    raise _playback_failure(flags, real, verdicts)
+    raise S.auth_aware(_playback_failure(flags, real, verdicts))
 
 
 # ─── Kalendarz nagrań: mapa dni ─────────────────────────────────────────────
@@ -922,6 +960,8 @@ async def trybuna_days(pair_id: str, response: Response, from_: str = Query(...,
             games, meta = await mz.scan(video="any", d_from=d_from, d_to=d_to)
             bastion["truncated"] = bool(meta["truncated"])
         except S._Stop as stop:
+            if stop_is_auth(stop):
+                raise_stop(real, stop)
             bastion = {"state": await stop_state(stop), "truncated": False}
     for g in games:
         day = S.parse_day(g.get("date"))
@@ -1122,25 +1162,33 @@ async def referee_card(response: Response, name: str = Query("", max_length=80),
     available: Dict[str, Any] = {"games": [], "bastion": bastion_block("ok")}
     mz, state = S._setup(real)
     all_games: List[Dict[str, Any]] = []
+    cache_info = {"hit": False, "age_s": 0, "refreshing": False}
     if mz is None:
         available["bastion"] = bastion_block(state or "unconfigured")
     else:
+        async def load():
+            found, _meta = await mz.scan(referee=name, video="any")
+            return found, mz.scope
+
         try:
-            all_games, _meta = await mz.scan(referee=name, video="any")
+            # Pamięć 1 h na sędziego i użytkownika (po 10 min nieświeża: odświeżana w tle); sama lista kaset, reszta liczona na bieżąco.
+            (all_games, scope), cache_info = await S.swr_get(("card", real.judge_id, T.name_key(name), "any"), load)
             pair_ids = [p["id"] for p in await _my_pairs(real)]
             got = await watched_by_item(pair_ids, [int(g["bunny_item_id"]) for g in all_games if g.get("bunny_item_id")])
             marks = {item: mid for (_, item), mid in got.items()}
             available["games"] = [game_row(g, marks) for g in all_games if g.get("bunny_item_id")][:12]
-            await S.enrich_media(real, mz.scope, available["games"])
-            available["bastion"] = bastion_block("ok", mz.scope)
+            await S.enrich_media(real, scope, available["games"])
+            available["bastion"] = bastion_block("ok", scope)
         except S._Stop as stop:
+            if stop_is_auth(stop):
+                raise_stop(real, stop)
             available["bastion"] = bastion_block(await stop_state(stop), mz.scope)
     await S.attach_crests(zprp["recent"] + zprp["upcoming"])
     extras = await card_extras(judge_id, name, zprp_rows if judge_id else [], all_games, zprp["matches"], zprp.get("season_matches", 0))
 
     # Moje klipy z udziałem sędziego.
     my_clips = await clips_with_referee(real, me, key)
-    return {"referee": me, "follow": mine, "zprp": zprp, "available": available, "my_clips": my_clips, **extras}
+    return {"referee": me, "follow": mine, "zprp": zprp, "available": available, "my_clips": my_clips, "cache": cache_info, **extras}
 
 
 ROLE_LABELS = {"referee": "sędzia", "delegate": "delegat", "table": "stolikowy"}
@@ -1281,22 +1329,28 @@ async def notify_once(now: Optional[datetime] = None) -> Dict[str, int]:
                 if any(int(x[1]["bunny_item_id"]) == item for x in per_judge.get(r["judge_id"], [])):
                     continue
                 per_judge.setdefault(r["judge_id"], []).append((R.s(nm), g))
+    day = today.isoformat()
+    sent_today = {r["judge_id"] for r in await C.rows(select(mentor_trybuna_today).where(mentor_trybuna_today.c.day == f"{DIGEST_PREFIX}{day}"))}
     for judge_id, found in per_judge.items():
+        if judge_id in sent_today:
+            continue   # paczka z dzisiaj już poszła (restart po 19:00): nowe nagrania wejdą do jutrzejszej
         counts["games"] += len(found)
-        title = "Trybuna: nowe nagrania"
-        first_name, first = found[0]
-        teams = " - ".join(x for x in (first.get("home"), first.get("away")) if x)
-        body = f"{first_name}: {teams}".strip(": ") + (f" i {len(found) - 1} inne" if len(found) > 1 else "")
+        title, body, data_extra, tag = digest_message(found)
+        if tag == "mentor-trybuna-digest":
+            data_extra["day"] = day
         try:
             from app.mentor_panel_notify import push_data
             from app.push.push import send_push_to_judges_report
 
-            data = push_data("trybuna", target="trybuna", tag="mentor-trybuna", quiet=True,
-                             extra={"bunnyItemId": str(first["bunny_item_id"])})
+            data = push_data("trybuna", target="trybuna", tag=tag, quiet=True, extra=data_extra)
             await send_push_to_judges_report([judge_id], title, body, data, app_variant="baza", preference_key="mentorPanel")
             counts["pushed"] += 1
         except Exception:  # noqa: BLE001 - push nieudany: ślad zapisujemy mimo to, żeby nie wysyłać po raz drugi
             logger.warning("trybuna: push nieudany", exc_info=True)
+        try:
+            await database.execute(mentor_trybuna_today.insert().values(judge_id=judge_id, day=f"{DIGEST_PREFIX}{day}", sent_at=C.now()))
+        except Exception:  # noqa: BLE001 - wyścig dwóch przebiegów: już zapisane
+            pass
         for _, g in found:
             try:
                 await database.execute(mentor_trybuna_notified.insert().values(judge_id=judge_id, bunny_item_id=int(g["bunny_item_id"]), notified_at=C.now()))
@@ -1305,18 +1359,57 @@ async def notify_once(now: Optional[datetime] = None) -> Dict[str, int]:
     return counts
 
 
+def plural_recordings(n: int) -> str:
+    """"1 nowe nagranie", "3 nowe nagrania", "5 nowych nagrań", "22 nowe nagrania"."""
+    if n == 1:
+        return "1 nowe nagranie"
+    return f"{n} nowe nagrania" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else f"{n} nowych nagrań"
+
+
+def digest_message(found: List[Tuple[str, Mapping[str, Any]]]) -> Tuple[str, str, Dict[str, str], str]:
+    """(tytuł, treść, dodatki `data`, tag) paczki dziennej. Jedno nagranie = stary format pojedynczy (tag `mentor-trybuna`, `bunnyItemId`);
+    więcej = `mentor-trybuna-digest` z `count`, `bunnyItemIds` (id po przecinku, najwyżej 20) i `day` (dopisuje wołający)."""
+    if len(found) == 1:
+        first_name, first = found[0]
+        teams = " - ".join(x for x in (first.get("home"), first.get("away")) if x)
+        return "Trybuna: nowe nagrania", f"{first_name}: {teams}".strip(": "), {"bunnyItemId": str(first["bunny_item_id"])}, "mentor-trybuna"
+    names: List[str] = []
+    for nm, _ in found:
+        if nm and nm not in names:
+            names.append(nm)
+    who = ", ".join(names[:2]) + (" i inni" if len(names) > 2 else "")
+    ids = [str(int(g["bunny_item_id"])) for _, g in found][:20]
+    return plural_recordings(len(found)), who, {"count": str(len(found)), "bunnyItemIds": ",".join(ids)}, "mentor-trybuna-digest"
+
+
+def seconds_to_digest(now: Optional[datetime] = None) -> float:
+    """Sekundy do najbliższej 19:00 czasu polskiego."""
+    local = (now or datetime.now(timezone.utc)).astimezone(WARSAW)
+    target = local.replace(hour=DIGEST_HOUR, minute=0, second=0, microsecond=0)
+    if target <= local:
+        target += timedelta(days=1)
+    return (target - local).total_seconds()
+
+
 async def run_trybuna_notifier() -> None:
-    """Zadanie dzienne (pierwszy przebieg 20 minut po starcie, potem co dobę)."""
+    """Paczka nowych nagrań: raz dziennie o 19:00 czasu polskiego (po starcie między 19:00 a 23:59 od razu - ślad dnia chroni przed powtórką)."""
     await asyncio.sleep(1200)
-    while True:
+    if datetime.now(timezone.utc).astimezone(WARSAW).hour >= DIGEST_HOUR:
         try:
-            counts = await notify_once()
-            logger.info("mentor: trybuna push %s", counts)
+            logger.info("mentor: trybuna push %s", await notify_once())
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             logger.exception("mentor: trybuna push nieudany")
-        await asyncio.sleep(NOTIFY_EVERY_S)
+    while True:
+        try:
+            await asyncio.sleep(seconds_to_digest())
+            logger.info("mentor: trybuna push %s", await notify_once())
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("mentor: trybuna push nieudany")
+            await asyncio.sleep(60)
 
 
 # ─── Mentor poleca ──────────────────────────────────────────────────────────
