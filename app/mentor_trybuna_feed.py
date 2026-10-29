@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -60,7 +61,25 @@ NOTIFY_MAX_REFEREES = 40
 
 
 def _iso(value: Any) -> Optional[str]:
-    return value.isoformat() if isinstance(value, datetime) else (R.s(value) or None)
+    """Czas jako ISO ZE STREFĄ (naiwny datetime z bazy traktujemy jak UTC)."""
+    return R.aware(value).isoformat() if isinstance(value, datetime) else (R.s(value) or None)
+
+
+_LOCAL_STAMP = re.compile(r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(:\d{2})?$")
+
+
+def iso_pl(value: Any) -> Optional[str]:
+    """Czas do odpowiedzi jako ISO ze strefą (Europe/Warsaw). Napis Meczoteki / ZPRP bez strefy ("2026-10-18 15:00:00") to czas POLSKI
+    (nie UTC): dostaje przesunięcie +01:00 / +02:00; aware datetime jest przeliczany na czas polski; napis już ze strefą zostaje."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return R.aware(value).astimezone(WARSAW).isoformat()
+    text = R.s(value)
+    m = _LOCAL_STAMP.match(text)
+    if m:
+        return datetime.fromisoformat(f"{m.group(1)}T{m.group(2)}{m.group(3) or ':00'}").replace(tzinfo=WARSAW).isoformat()
+    return text
 
 
 def _naive_local_now() -> datetime:
@@ -92,7 +111,7 @@ async def stop_state(stop: "S._Stop") -> str:
 
 def game_time_known(game: Mapping[str, Any]) -> bool:
     """Godzina 00:00:00 przy meczu bez terminu (`unscheduled`) to brak godziny."""
-    return not (game.get("unscheduled") or R.s(game.get("date")).endswith("00:00:00"))
+    return not (game.get("unscheduled") or re.search(r"[ T]00:00:00(?!\d)", R.s(game.get("date"))))
 
 
 def is_upcoming(game: Mapping[str, Any], today) -> bool:
@@ -106,8 +125,13 @@ def game_row(game: Mapping[str, Any], watched: Mapping[int, str]) -> Dict[str, A
     return {"bunny_item_id": item, "game_id": game.get("game_id"), "url": BR.canonical_game_url(item) if item else None,
             "thumbnail_url": game.get("thumbnail_url"), **{k: game.get(k) for k in keep},
             "referees": T.clean_referees(game.get("referees") or []), "state": T.feed_state(game.get("video_state")),
-            "unscheduled": bool(game.get("unscheduled")), "time_known": game_time_known(game),
+            "date": iso_pl(game.get("date")), "date_local": game.get("date"), "unscheduled": bool(game.get("unscheduled")), "time_known": game_time_known(game),
             "added": bool(item and item in watched), "match_id": watched.get(item) if item else None}
+
+
+def with_iso_date(row: Dict[str, Any]) -> Dict[str, Any]:
+    row["date"] = iso_pl(row.get("date"))
+    return row
 
 
 async def watched_by_item(pair_ids: List[str], items: List[int]) -> Dict[Tuple[str, int], str]:
@@ -197,12 +221,12 @@ async def trybuna_search(pair_id: str, body: SearchBody, response: Response, rea
         games = [g for g in games if g.get("bunny_item_id")]
     watched = await watched_by_item([ctx["pair_id"]], [int(g["bunny_item_id"]) for g in games if g.get("bunny_item_id")])
     by_item = {item: mid for (_, item), mid in watched.items()}
-    rows = [game_row(g, by_item) for g in games]
+    rows = [with_iso_date(game_row(g, by_item)) for g in games]    # czas polski bez strefy z Meczoteki -> ISO ze strefą
     await S.enrich_media(real, mz.scope, rows)
     ranked, youtube = await build_ranked(ctx, rows, q, referee, d_from, d_to, t_from, t_to)
     best = RK.best_key(ranked)
-    ranked, best_info = RK.fold_baza(ranked, best)
-    out = {"games": rows, "ranked": ranked, "best": best, **best_info, "youtube": youtube, "offset": body.offset,
+    out = {"games": rows, "ranked": ranked, "best": best, **RK.best_info(ranked, best), "counts": RK.counts(ranked), "youtube": youtube,
+           "offset": body.offset,
            "next_offset": None if ranged else (body.offset + S.PAGE if len(games) >= S.PAGE else None),
            "connection_scope": mz.scope, "query": {"q": q or None, "referee": referee or None}}
     if meta is not None:
@@ -259,7 +283,8 @@ async def youtube_results(pair_cards: List[Dict[str, Any]], q: str, d_from: Opti
                     "thumbnail_url": s.get("thumbnail_url") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
                     "thumbnail_maxres_url": f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg", "duration_s": s.get("duration_s"),
                     "channel": s.get("channel_title"), "starts_at": _iso(s.get("starts_at")),
-                    "published_at": _iso(s.get("starts_at") or s.get("first_seen_at")), "date": local,
+                    "published_at": _iso(s.get("starts_at") or s.get("first_seen_at")), "date": iso_pl(local),
+                    "match_day": (S.card_day(card).isoformat() if S.card_day(card) else None),
                     "portal_confidence": s.get("confidence"), "official": official, "zprp_match_id": s.get("match_id"),
                     "confidence": sc["confidence"], "sure": bool(sc["sure"]), "signals": sc["signals"], "code": code,
                     "home": game_like["home"], "away": game_like["away"],
@@ -291,14 +316,15 @@ async def build_ranked(ctx: Dict[str, Any], rows: List[Dict[str, Any]], q: str, 
         ident = f"bastion:{g['bunny_item_id']}" if g.get("bunny_item_id") else f"game:{g.get('game_id')}"
         ranked.append({"source": "bastion", "key": ident, "confidence": sc["confidence"], "sure": bool(sc["sure"]), "signals": sc["signals"],
                        "title": g.get("title"), "date": g.get("date"), "home": g.get("home"), "away": g.get("away"), "code": g.get("code"),
-                       "thumbnail_url": g.get("thumbnail_url"), "state": g.get("state"), "ref": {"bunny_item_id": g.get("bunny_item_id"), "game_id": g.get("game_id")},
+                       "thumbnail_url": g.get("thumbnail_url"), "state": g.get("state"), "video_state": g.get("video_state"), "url": g.get("url"),
+                       "ref": {"bunny_item_id": g.get("bunny_item_id"), "game_id": g.get("game_id")},
                        "target": g["target"]})
     youtube = await youtube_results(pair_cards, q, d_from, d_to, t_from, t_to)
     for y in youtube:
         if y["confidence"] < RK.RANK_MIN:
             continue
         ranked.append({"source": "youtube", "key": f"yt:{y['video_id']}", "confidence": y["confidence"], "sure": y["sure"], "signals": y["signals"],
-                       "title": y["title"], "date": y["date"], "home": y["home"], "away": y["away"], "code": y["code"],
+                       "title": y["title"], "date": y["date"], "match_day": y.get("match_day"), "home": y["home"], "away": y["away"], "code": y["code"],
                        "thumbnail_url": y["thumbnail_url"], "official": y["official"], "ref": {"video_id": y["video_id"], "url": y["url"]},
                        "target": y["target"]})
     if not RK.empty_profile(profile):
@@ -309,7 +335,7 @@ async def build_ranked(ctx: Dict[str, Any], rows: List[Dict[str, Any]], q: str, 
             sc = RK.query_score(profile, c)
             if sc["confidence"] >= 50:
                 ranked.append({"source": "baza", "key": f"pair:{c['match_id']}", "confidence": sc["confidence"], "sure": bool(sc["sure"]),
-                               "signals": sc["signals"], "title": None, "date": _local_str(c.get("scheduled_at")), "home": (c.get("home") or {}).get("name"),
+                               "signals": sc["signals"], "title": None, "date": iso_pl(c.get("scheduled_at")), "home": (c.get("home") or {}).get("name"),
                                "away": (c.get("away") or {}).get("name"), "code": c.get("match_code"), "ref": {"match_id": c["match_id"]},
                                "target": RK.pair_target({}, [c], zprp_id=c["match_id"])})
         for c in await watched_cards(ctx):
@@ -318,11 +344,12 @@ async def build_ranked(ctx: Dict[str, Any], rows: List[Dict[str, Any]], q: str, 
             sc = RK.query_score(profile, c)
             if sc["confidence"] >= 50:
                 ranked.append({"source": "baza", "key": f"trybuna:{c['match_id']}", "confidence": sc["confidence"], "sure": bool(sc["sure"]),
-                               "signals": sc["signals"], "title": c.get("title"), "date": _local_str(c.get("scheduled_at")), "home": (c.get("home") or {}).get("name"),
+                               "signals": sc["signals"], "title": c.get("title"), "date": iso_pl(c.get("scheduled_at")), "home": (c.get("home") or {}).get("name"),
                                "away": (c.get("away") or {}).get("name"), "code": c.get("match_code"), "ref": {"match_id": c["match_id"]},
                                "target": {"kind": "trybuna", "match_id": c["match_id"], "label": "Trybuna tej pary"}})
     ranked.sort(key=RK.rank_key)
-    return ranked[:40], youtube
+    # Ten sam mecz z kilku źródeł (kaseta z nagraniem, bez nagrania, YouTube, "baza") = jeden wpis z listą `sources`.
+    return RK.merge_ranked(ranked)[:40], youtube
 
 
 @router.get("/pairs/{pair_id}/trybuna/youtube")
@@ -789,7 +816,7 @@ async def calendar_for(real: Actor, follows: List[Dict[str, Any]], days: int, mz
                     key = f"bastion:{g.get('bunny_item_id')}" if g.get("bunny_item_id") else f"game:{g.get('game_id')}"
                     if any(i.get("key") == key for i in items):
                         continue
-                    items.append({"source": "bastion", "key": key, "zprp_match_id": None, "date": g.get("date") if day else None,
+                    items.append({"source": "bastion", "key": key, "zprp_match_id": None, "date": iso_pl(g.get("date")) if day else None,
                                   "time_known": game_time_known(g), "unscheduled": bool(g.get("unscheduled")), "home": g.get("home"),
                                   "away": g.get("away"), "competition": g.get("competition"), "code": g.get("code"), "venue_city": None,
                                   "referees": refs, "followed": [f["id"] for f in follows if T.follow_matches(f, refs)],
@@ -1055,6 +1082,7 @@ async def referee_card(response: Response, name: str = Query("", max_length=80),
         name = (who.get(judge_id) or {}).get("full_name") or ""
     if not judge_id:
         judge_id = await resolve_judge(name) or ""
+    name = T.display_name(name)  # "RAWICKI Jakub" -> "Jakub Rawicki"
     me = {"name": name, "judge_id": judge_id or None}
     key = T.referee_key(name, judge_id)
     follows = await my_follows(real.judge_id)
@@ -1065,15 +1093,18 @@ async def referee_card(response: Response, name: str = Query("", max_length=80),
     zprp_rows: List[Dict[str, Any]] = []
     if judge_id:
         M = zprp_public_matches
-        rows = await C.rows(select(M).where(or_(M.c.referee_1_id == judge_id, M.c.referee_2_id == judge_id))
-                            .order_by(M.c.scheduled_at.desc()).limit(300))
+        mine_cond = or_(M.c.referee_1_id == judge_id, M.c.referee_2_id == judge_id, M.c.delegate_1_id == judge_id, M.c.delegate_2_id == judge_id)
+        rows = await C.rows(select(M).where(mine_cond).order_by(M.c.scheduled_at.desc()).limit(400))   # tylko do list "ostatnie / forma"
+        # Liczniki są PRAWDZIWE (bez limitu wierszy): wszystkie mecze sędziego w hurtowni, w tym osobno bieżący sezon.
+        stamps = [r["scheduled_at"] for r in await C.rows(select(M.c.scheduled_at).where(mine_cond))]
         now = _naive_local_now()
         seasons: Dict[str, int] = {}
-        for r in rows:
-            card = R.card_from_public(r)
-            seasons[card.get("season") or ""] = seasons.get(card.get("season") or "", 0) + 1
+        for ts in stamps:
+            season_name = R.season_key(R._local_naive_to_utc(ts)) if ts else ""
+            seasons[season_name] = seasons.get(season_name, 0) + 1
         zprp_rows = rows
-        zprp["matches"] = len(rows)
+        zprp["matches"] = len(stamps)
+        zprp["season_matches"] = seasons.get(R.season_key(datetime.now(timezone.utc)), 0)
         zprp["seasons"] = [{"season": s, "matches": n} for s, n in sorted(seasons.items(), reverse=True) if s]
         for r in rows:
             card = R.card_from_public(r)
@@ -1105,14 +1136,17 @@ async def referee_card(response: Response, name: str = Query("", max_length=80),
         except S._Stop as stop:
             available["bastion"] = bastion_block(await stop_state(stop), mz.scope)
     await S.attach_crests(zprp["recent"] + zprp["upcoming"])
-    extras = await card_extras(judge_id, name, zprp_rows if judge_id else [], all_games)
+    extras = await card_extras(judge_id, name, zprp_rows if judge_id else [], all_games, zprp["matches"], zprp.get("season_matches", 0))
 
     # Moje klipy z udziałem sędziego.
     my_clips = await clips_with_referee(real, me, key)
     return {"referee": me, "follow": mine, "zprp": zprp, "available": available, "my_clips": my_clips, **extras}
 
 
-async def card_extras(judge_id: str, name: str, rows: List[Dict[str, Any]], games: List[Dict[str, Any]]) -> Dict[str, Any]:
+ROLE_LABELS = {"referee": "sędzia", "delegate": "delegat", "table": "stolikowy"}
+
+
+async def card_extras(judge_id: str, name: str, rows: List[Dict[str, Any]], games: List[Dict[str, Any]], total: int = 0, season_total: int = 0) -> Dict[str, Any]:
     """Dodatki karty sędziego: forma w sezonie, najczęstszy partner, rozgrywki, liczniki i okręg (herb jak na ekranach egzaminu)."""
     me = {"name": name, "judge_id": judge_id or None}
     season = R.season_key(datetime.now(timezone.utc))
@@ -1122,10 +1156,12 @@ async def card_extras(judge_id: str, name: str, rows: List[Dict[str, Any]], game
     now = _naive_local_now()
     for r in rows:
         card = R.card_from_public(r)
-        refs = [x for x in T.referees_of_zprp_row(r) if x["role"] == "referee"]
-        mine = next((x for x in refs if T.same_referee(x, me)), None)
+        everyone = T.referees_of_zprp_row(r)
+        refs = [x for x in everyone if x["role"] == "referee"]
+        mine = next((x for x in everyone if T.same_referee(x, me)), None)
+        role = (mine or {}).get("role") or "referee"
         for other in refs:
-            if other is not mine and not T.same_referee(other, me):
+            if role == "referee" and mine is not None and other is not mine and not T.same_referee(other, me):
                 entry = partners.setdefault(T.name_key(other["name"]), {"name": other["name"], "count": 0})
                 entry["count"] += 1
         if card.get("competition_name"):
@@ -1134,8 +1170,11 @@ async def card_extras(judge_id: str, name: str, rows: List[Dict[str, Any]], game
             twin = next((g for g in games if g.get("bunny_item_id") and T.feed_state(g.get("video_state")) == "video"
                          and S.score_game(g, card)["confidence"] >= T.AUTO_MIN), None)
             form.append({"date": _iso(card.get("scheduled_at")), "code": card.get("match_code"), "home": (card.get("home") or {}).get("name"),
-                         "away": (card.get("away") or {}).get("name"), "has_video": twin is not None, "role": "referee",
-                         "position": (mine or {}).get("position")})
+                         "away": (card.get("away") or {}).get("name"), "has_video": twin is not None, "role": role, "role_label": ROLE_LABELS.get(role, role),
+                         "position": (mine or {}).get("position"), "score": (f"{card['home']['score']}:{card['away']['score']}"
+                                                                             if (card.get("home") or {}).get("score") is not None and (card.get("away") or {}).get("score") is not None else None),
+                         "home_score": (card.get("home") or {}).get("score"), "away_score": (card.get("away") or {}).get("score"),
+                         "competition": card.get("competition_name")})
     await S.attach_crests(form)
     top = max(partners.values(), key=lambda p: p["count"], default=None)
     province = None
@@ -1144,11 +1183,13 @@ async def card_extras(judge_id: str, name: str, rows: List[Dict[str, Any]], game
         if who and who.get("province"):
             from app import exam_live_brand as EB
 
+            from app.mentor_trybuna_suggest import province_display
+
             palette = EB.palette_for("province", who["province"])
-            province = {"name": who["province"], "crest": f"/exam-live/assets/img/{EB.crest_name(palette)}" if palette.get("kind") == "province" else None}
+            province = {"name": province_display(who["province"]), "crest": f"/exam-live/assets/img/{EB.crest_name(palette)}" if palette.get("kind") == "province" else None}
     with_video = [g for g in games if g.get("bunny_item_id") and T.feed_state(g.get("video_state")) == "video"]
     return {"season_form": form, "top_partner": top, "competitions": [{"name": n, "count": c} for n, c in sorted(comps.items(), key=lambda x: -x[1])[:5]],
-            "videos_count": len(with_video), "matches_count": len(rows) or len(games), "province": province}
+            "videos_count": len(with_video), "matches_count": total or len(games), "season_matches_count": season_total, "province": province}
 
 
 async def clips_with_referee(real: Actor, me: Mapping[str, Any], key: str, limit: int = 30) -> List[Dict[str, Any]]:

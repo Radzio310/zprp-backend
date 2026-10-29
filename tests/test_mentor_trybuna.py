@@ -1029,3 +1029,71 @@ def test_podpowiedzi_i_ludzie_zachowuja_polskie_znaki_do_wyswietlenia(env):
     r0 = next(i for i in ref["items"] if i["kind"] == "referee")
     assert r0["label"] == "Łukasz Żółć" and r0["sub"].startswith("sędzia")
     assert people[0]["name"] == "Łukasz Żółć" and people[0]["province"] == "śląskie"
+
+
+# ─── Scalanie wyników po tożsamości meczu, czas ze strefą, prawdziwe liczniki karty ─────
+
+
+def test_ten_sam_mecz_z_trzech_zrodel_to_jeden_wpis_z_sources(env):
+    RK = importlib.import_module("app.mentor_trybuna_rank")
+    day = "2026-10-18"
+    entries = [
+        {"source": "bastion", "key": "game:9", "confidence": 100, "sure": True, "code": "SM/38", "home": "ORLEN Wisła Płock", "away": "PGE Wybrzeże Gdańsk",
+         "date": f"{day}T13:00:00+02:00", "state": "waiting", "video_state": "NONE", "ref": {"bunny_item_id": None, "game_id": 9}, "target": {"kind": "trybuna", "match_id": None, "label": "T"}},
+        {"source": "baza", "key": "pair:z1", "confidence": 100, "sure": True, "code": "SM/38", "home": "ORLEN Wisła Płock", "away": "PGE Wybrzeże Gdańsk",
+         "date": f"{day}T15:00:00+02:00", "ref": {"match_id": "z1"}, "target": {"kind": "pair_match", "match_id": "z1", "label": "Mecz pary"}},
+        {"source": "bastion", "key": "bastion:5", "confidence": 100, "sure": True, "code": "SM/38", "home": "ORLEN Wisła Płock", "away": "PGE Wybrzeże Gdańsk",
+         "date": f"{day}T15:00:00+02:00", "state": "video", "video_state": "READY", "url": "https://portal/game?bunny_item_id=5", "ref": {"bunny_item_id": 5, "game_id": 5},
+         "target": {"kind": "pair_match", "match_id": "z1", "label": "Mecz pary"}},
+        {"source": "bastion", "key": "bastion:6", "confidence": 60, "sure": False, "code": "SM/39", "home": "Inny", "away": "Mecz", "date": f"{day}T18:00:00+02:00",
+         "state": "video", "video_state": "READY", "ref": {"bunny_item_id": 6}, "target": {"kind": "trybuna", "match_id": None, "label": "T"}},
+    ]
+    entries.sort(key=RK.rank_key)
+    merged = RK.merge_ranked(entries)
+    top = merged[0]
+    assert [m["key"] for m in merged] == ["bastion:5", "bastion:6"]                  # wersja Z NAGRANIEM, bez dubli
+    assert {s["source"] for s in top["sources"]} == {"bastion", "baza"} and len(top["sources"]) == 3
+    assert any(s.get("bunny_item_id") == 5 and s["video_state"] == "READY" and s["url"] for s in top["sources"])
+    assert top["in_baza"] is True and top["baza_match_id"] == "z1" and top["target"]["kind"] == "pair_match"
+    best = RK.best_key(merged)
+    assert best == "bastion:5" and RK.best_info(merged, best) == {"best_in_baza": True, "best_match_id": "z1"}
+    assert RK.counts(merged) == {"ranked": 2, "bastion": 2, "youtube": 0, "baza": 1}  # liczniki spójne z ranked
+
+
+def test_czas_w_odpowiedziach_to_iso_ze_strefa_polska(env):
+    F = env.trybuna_feed
+    assert F.iso_pl("2026-10-18 15:00:00") == "2026-10-18T15:00:00+02:00"        # czas polski bez strefy z Meczoteki
+    assert F.iso_pl("2026-12-18 15:00") == "2026-12-18T15:00:00+01:00"
+    assert F.iso_pl(datetime(2026, 10, 18, 13, 0, tzinfo=timezone.utc)) == "2026-10-18T15:00:00+02:00"   # UTC -> czas polski
+    assert F.iso_pl(datetime(2026, 10, 18, 13, 0)) == "2026-10-18T15:00:00+02:00"                         # naiwny z bazy = UTC
+    assert F.iso_pl("2026-10-18T15:00:00+02:00") == "2026-10-18T15:00:00+02:00" and F.iso_pl(None) is None
+    row = F.game_row({"bunny_item_id": 3, "date": "2026-10-18 00:00:00", "unscheduled": True, "home": "A", "away": "B"}, {})
+    assert row["date"] == "2026-10-18T00:00:00+02:00" and row["date_local"] == "2026-10-18 00:00:00" and row["time_known"] is False
+    assert F.game_time_known({"date": "2026-10-18T15:00:00+02:00"}) is True and F.game_time_known({"date": "2026-10-18T00:00:00+02:00"}) is False
+
+
+def test_karta_sedziego_liczy_prawdziwie_nazwiska_okreg_i_role(env):
+    from datetime import timedelta
+
+    async def go():
+        a = await env.actor(JUDGES[0])
+        h = {"source_hash": "h", "source_json": {}}
+        await env.db.execute(env.T["province_judges"].update().where(env.T["province_judges"].c.judge_id == JUDGES[0]).values(province="SLASKIE"))
+        for i in range(320):
+            await env.ins("zprp_public_matches", match_id=f"bulk{i}", season_id="S1", competition_id="K1", competition_name="I liga mężczyzn", match_code=f"B/{i}",
+                          home_team_name=f"Dom {i}", away_team_name=f"Gosc {i}", scheduled_at=datetime.now() - timedelta(days=1, minutes=i),
+                          referee_1_id=JUDGES[0], referee_2_name="RAWICKI Jakub", score_home=30, score_away=28, **h)
+        await env.ins("zprp_public_matches", match_id="del1", season_id="S1", competition_id="K1", competition_name="I liga mężczyzn", match_code="D/1",
+                      home_team_name="Delegowany", away_team_name="Mecz", scheduled_at=datetime.now() - timedelta(hours=1), delegate_1_id=JUDGES[0], **h)
+        return await env.trybuna_feed.referee_card(_Resp(), "", JUDGES[0], a)
+
+    card = env.run(go)
+    assert card["zprp"]["matches"] >= 321 and card["matches_count"] == card["zprp"]["matches"] and card["zprp"]["season_matches"] >= 321  # bez limitu 300
+    assert card["top_partner"]["name"] == "Jakub Rawicki" and card["top_partner"]["count"] == 320
+    assert card["province"]["name"] == "śląskie"
+    roles = {f["role"] for f in card["season_form"]}
+    assert "referee" in roles and "delegate" in roles
+    delegate = next(f for f in card["season_form"] if f["role"] == "delegate")
+    assert delegate["role_label"] == "delegat" and delegate["position"] == "D1"
+    referee = next(f for f in card["season_form"] if f["role"] == "referee" and f["score"])
+    assert referee["score"] == "30:28" and referee["role_label"] == "sędzia"

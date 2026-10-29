@@ -159,3 +159,83 @@ def fold_baza(ranked: List[Dict[str, Any]], best: Optional[str]) -> Tuple[List[D
     info["best_in_baza"] = len(kept) != len(ranked) or top["source"] == "baza"
     info["best_match_id"] = mid
     return kept, info
+
+
+def identity(entry: Mapping[str, Any]) -> str:
+    """Tożsamość meczu wyniku: kod meczu + dzień (czas polski), inaczej drużyny + dzień, inaczej sam klucz wpisu. Dzień meczu bierze się
+    z `match_day` (film z YouTube: dzień MECZU, nie transmisji), inaczej z `date`."""
+    day = S.parse_day(entry.get("match_day")) or S.parse_day(entry.get("date"))
+    code = S._alnum(entry.get("code")).casefold()
+    if code and day:
+        return f"c:{code}|{day.isoformat()}"
+    teams = sorted(S.fold(x) for x in (entry.get("home"), entry.get("away")) if x)
+    if teams and day:
+        return f"t:{'|'.join(teams)}|{day.isoformat()}"
+    return f"k:{entry.get('key')}"
+
+
+def _has_video(entry: Mapping[str, Any]) -> bool:
+    return entry.get("source") == "bastion" and entry.get("state") == "video" and bool((entry.get("ref") or {}).get("bunny_item_id"))
+
+
+def source_info(entry: Mapping[str, Any]) -> Dict[str, Any]:
+    ref = entry.get("ref") or {}
+    out: Dict[str, Any] = {"source": entry["source"], "key": entry["key"], "confidence": entry.get("confidence"), "sure": bool(entry.get("sure"))}
+    if entry["source"] == "bastion":
+        out.update(bunny_item_id=ref.get("bunny_item_id"), game_id=ref.get("game_id"), video_state=entry.get("video_state") or entry.get("state"),
+                   url=entry.get("url"))
+    elif entry["source"] == "youtube":
+        out.update(video_id=ref.get("video_id"), url=ref.get("url"), official=bool(entry.get("official")))
+    else:
+        out.update(match_id=ref.get("match_id"))
+    return out
+
+
+def merge_ranked(ranked: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ten sam mecz z kilku źródeł (kaseta z nagraniem, ta sama bez nagrania, film YouTube, wpis z "bazy") = JEDEN wpis z listą
+    `sources`. Wersja główna: kaseta Bastionu Z NAGRANIEM, inaczej pierwsza w kolejności trafności. Wpis ma `in_baza` / `baza_match_id`,
+    gdy któryś ze źródeł to mecz pary albo Trybuny pary; `target` bierze najlepszy z grupy (mecz pary > mecz z Trybuny > nowy)."""
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    order: List[str] = []
+    for e in ranked:
+        gid = identity(e)
+        if gid not in groups:
+            groups[gid] = []
+            order.append(gid)
+        groups[gid].append(e)
+    merged: List[Dict[str, Any]] = []
+    for gid in order:
+        members = groups[gid]
+        primary = next((m for m in members if _has_video(m)), members[0])
+        out = dict(primary)
+        out["sources"] = [source_info(m) for m in sorted(members, key=lambda m: (m is not primary, rank_key(m)))]
+        out["confidence"] = max(int(m.get("confidence") or 0) for m in members)
+        out["sure"] = any(m.get("sure") for m in members)
+        baza = next((m for m in members if m["source"] == "baza"), None)
+        out["in_baza"] = baza is not None
+        out["baza_match_id"] = (baza.get("ref") or {}).get("match_id") if baza else None
+        rank = {"pair_match": 0, "trybuna": 1}
+        targets = [m.get("target") for m in members if m.get("target")]
+        with_id = [x for x in targets if x.get("match_id")]
+        out["target"] = (sorted(with_id, key=lambda x: rank.get(x.get("kind"), 2)) or targets or [None])[0]
+        merged.append(out)
+    merged.sort(key=rank_key)
+    return merged
+
+
+def best_info(ranked: List[Mapping[str, Any]], best: Optional[str]) -> Dict[str, Any]:
+    """`best_in_baza` / `best_match_id` dla wybranego `best` (wpis jest już scalony z wpisem "baza")."""
+    top = next((r for r in ranked if r["key"] == best), None) if best else None
+    if top is None:
+        return {"best_in_baza": False, "best_match_id": None}
+    return {"best_in_baza": bool(top.get("in_baza")), "best_match_id": top.get("baza_match_id") or (top.get("target") or {}).get("match_id")}
+
+
+def counts(ranked: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
+    """Liczniki spójne z `ranked`: ile wpisów ma dane źródło wśród `sources`."""
+    out = {"ranked": 0, "bastion": 0, "youtube": 0, "baza": 0}
+    for r in ranked:
+        out["ranked"] += 1
+        for s in {x["source"] for x in r.get("sources") or [{"source": r["source"]}]}:
+            out[s] = out.get(s, 0) + 1
+    return out

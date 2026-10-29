@@ -113,7 +113,7 @@ async def build_index() -> Dict[str, Any]:
                 if not name or name.lower().startswith(("sędzia ", "delegat ")) and not jid:
                     continue
                 key = (role, T.name_key(name))
-                p = people.setdefault(key, {"role": role, "name": name, "judge_id": jid or None, "count": 0})
+                p = people.setdefault(key, {"role": role, "name": T.display_name(name), "judge_id": jid or None, "count": 0})
                 p["count"] += 1
                 p["judge_id"] = p["judge_id"] or jid or None
     for coll, key in ((teams, "name"), (comps, "name")):

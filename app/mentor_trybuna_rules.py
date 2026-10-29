@@ -41,6 +41,20 @@ def is_watched(match_id: Any) -> bool:
     return R.s(match_id).startswith(WATCHED_PREFIX)
 
 
+def display_name(raw: Any) -> str:
+    """"RAWICKI Jakub" -> "Jakub Rawicki" (nazwisko wielkimi na początku lub końcu); "JAN KOWALSKI" -> "Jan Kowalski"; "Jan Kowalski" bez zmian."""
+    text = " ".join(R.s(raw).split())
+    words = text.split()
+    sur = [w for w in words if len(w) > 1 and w.isupper()]
+    rest = [w for w in words if w not in sur]
+    cap = lambda w: "-".join(p.capitalize() for p in w.split("-"))  # noqa: E731
+    if sur and rest:
+        return " ".join(rest + [cap(w) for w in sur])
+    if sur and not rest:
+        return " ".join(cap(w) for w in words)
+    return text
+
+
 def name_key(name: Any) -> str:
     """Klucz nazwiska niezależny od kolejności, wielkości liter i polskich znaków ("Kowalski Jan" == "jan kowalski")."""
     words = [w for w in re.split(r"[^0-9a-z]+", _plain(name)) if w]
@@ -241,16 +255,16 @@ def referees_of_zprp_row(row: Mapping[str, Any]) -> List[Dict[str, Any]]:
         name = R.s(row.get(f"referee_{slot}_name"))
         jid = R.s(row.get(f"referee_{slot}_id"))
         if name or jid:
-            out.append({"name": name or f"Sędzia {jid}", "judge_id": jid or None, "position": "AB"[slot - 1], "role": "referee"})
+            out.append({"name": display_name(name) if name else f"Sędzia {jid}", "judge_id": jid or None, "position": "AB"[slot - 1], "role": "referee"})
     for slot in (1, 2):
         name = R.s(row.get(f"delegate_{slot}_name"))
         jid = R.s(row.get(f"delegate_{slot}_id"))
         if name or jid:
-            out.append({"name": name or f"Delegat {jid}", "judge_id": jid or None, "position": f"D{slot}", "role": "delegate"})
+            out.append({"name": display_name(name) if name else f"Delegat {jid}", "judge_id": jid or None, "position": f"D{slot}", "role": "delegate"})
     for pos, field in (("S1", "secretary"), ("S2", "timekeeper")):  # stolikowi: sekretarz i czasowy
         name, jid = R.s(row.get(f"{field}_name")), R.s(row.get(f"{field}_id"))
         if name or jid:
-            out.append({"name": name or f"Stolikowy {jid}", "judge_id": jid or None, "position": pos, "role": "table"})
+            out.append({"name": display_name(name) if name else f"Stolikowy {jid}", "judge_id": jid or None, "position": pos, "role": "table"})
     return out
 
 
