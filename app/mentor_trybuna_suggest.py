@@ -41,6 +41,26 @@ def forget_index() -> None:
     _index = None
 
 
+#: Nazwy okręgów do WYŚWIETLENIA (w bazie bywają zapisane wielkimi literami albo bez polskich znaków: "SLASKIE", "ŚLĄSKIE").
+PROVINCE_NAMES = {
+    "DOLNOSLASKIE": "dolnośląskie", "KUJAWSKO_POMORSKIE": "kujawsko-pomorskie", "LODZKIE": "łódzkie", "LUBELSKIE": "lubelskie",
+    "LUBUSKIE": "lubuskie", "MALOPOLSKIE": "małopolskie", "MAZOWIECKIE": "mazowieckie", "OPOLSKIE": "opolskie",
+    "PODKARPACKIE": "podkarpackie", "PODLASKIE": "podlaskie", "POMORSKIE": "pomorskie", "SLASKIE": "śląskie",
+    "SWIETOKRZYSKIE": "świętokrzyskie", "WARMINSKO_MAZURSKIE": "warmińsko-mazurskie", "WIELKOPOLSKIE": "wielkopolskie",
+    "ZACHODNIOPOMORSKIE": "zachodniopomorskie",
+}
+
+
+def province_display(value: Any) -> Optional[str]:
+    """Okręg do pokazania z polskimi znakami (normalizacja służy tylko do rozpoznania); nieznany zostaje, jak jest."""
+    text = R.s(value)
+    if not text:
+        return None
+    from app.exam_live_brand import province_slug
+
+    return PROVINCE_NAMES.get(province_slug(text), text)
+
+
 def plain_tokens(value: Any) -> List[str]:
     return [w for w in re.split(r"[^0-9a-z]+", S._plain(value)) if w]
 
@@ -208,6 +228,6 @@ async def people(q: str = Query("", max_length=80), limit: int = Query(20, ge=1,
         if prov:
             palette = EB.palette_for("province", prov)
             crest = f"/exam-live/assets/img/{EB.crest_name(palette)}" if palette.get("kind") == "province" else None
-        out.append({"kind": p["role"], "name": p["name"], "judge_id": p["judge_id"], "province": prov, "crest": crest,
+        out.append({"kind": p["role"], "name": p["name"], "judge_id": p["judge_id"], "province": province_display(prov), "crest": crest,
                     "matches_count": p["count"]})
     return out

@@ -1001,3 +1001,31 @@ def test_best_nie_dubluje_wpisu_baza(env):
     assert [r["key"] for r in kept] == ["bastion:1", "pair:m2"] and info == {"best_in_baza": True, "best_match_id": "m1"}
     kept2, info2 = RK.fold_baza(ranked, None)
     assert len(kept2) == 3 and info2["best_in_baza"] is False
+
+
+def test_podpowiedzi_i_ludzie_zachowuja_polskie_znaki_do_wyswietlenia(env):
+    G = env.trybuna_suggest
+    assert G.province_display("SLASKIE") == "śląskie" and G.province_display("ŚLĄSKIE") == "śląskie" and G.province_display("Warmińsko-Mazurskie") == "warmińsko-mazurskie"
+    assert G.province_display("") is None
+
+    async def go():
+        a = await env.actor(JUDGES[0])
+        await env.ins("zprp_public_matches", match_id="pl1", season_id="S1", competition_id="K8", competition_name="I liga mężczyzn", match_code="IM/1",
+                      home_team_name="Łódzki Klub Świętokrzyski", away_team_name="Żółć Gdańsk", scheduled_at=datetime.now() - timedelta(days=2),
+                      referee_1_id=JUDGES[0], referee_1_name="Łukasz Żółć", source_hash="h", source_json={})
+        G.forget_index()
+        env.db_province = await env.db.execute(env.T["province_judges"].update().where(env.T["province_judges"].c.judge_id == JUDGES[0]).values(province="SLASKIE"))
+        comp = await G.suggest(PAIR, "mezczyzn", 8, a)
+        team = await G.suggest(PAIR, "lodzki swiet", 8, a)
+        ref = await G.suggest(PAIR, "zolc", 8, a)
+        people = await G.people("lukasz zolc", 5, a)
+        return comp, team, ref, people
+
+    from datetime import timedelta
+
+    comp, team, ref, people = env.run(go)
+    assert [i["label"] for i in comp["items"] if i["kind"] == "competition"] == ["I liga mężczyzn"] and "rozgrywki" in comp["items"][0]["sub"]
+    assert team["items"][0]["label"] == "Łódzki Klub Świętokrzyski" and "drużyna" in team["items"][0]["sub"]
+    r0 = next(i for i in ref["items"] if i["kind"] == "referee")
+    assert r0["label"] == "Łukasz Żółć" and r0["sub"].startswith("sędzia")
+    assert people[0]["name"] == "Łukasz Żółć" and people[0]["province"] == "śląskie"
