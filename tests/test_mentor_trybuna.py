@@ -102,7 +102,7 @@ def test_dodanie_z_youtube_spina_zprp_i_pokoj_dziala_bez_oceny(env):
         room = await env.panel.match_room(PAIR, mid, actor)
         err = await code_of(env.panel.match_evaluation(PAIR, mid, actor))
         err2 = await code_of(env.panel.save_match_evaluation(PAIR, mid, env.panel.EvaluationBody(sheet={}), actor))
-        listing = await env.trybuna.list_watched(PAIR, q="", referee="", origin="", season="", actor=actor)
+        listing = await env.trybuna.list_watched(PAIR, q="", referee="", origin="", season="", trashed=0, actor=actor)
         pair_matches = await env.panel.matches(PAIR, season="", starred=None, submitted=None, q="", actor=actor)
         return out, room, err, err2, listing, pair_matches
 
@@ -137,7 +137,7 @@ def test_ten_sam_adres_to_ten_sam_mecz_i_prawa(env):
                                                        idempotency_header=None))
         ro = await code_of(env.trybuna.add_watched(PAIR, body(env, url="https://youtu.be/zzzzzzzzzzz"), _Resp(), committee, committee,
                                                    idempotency_header=None))
-        viewed = await env.trybuna.list_watched(PAIR, q="", referee="", origin="", season="", actor=mentor)
+        viewed = await env.trybuna.list_watched(PAIR, q="", referee="", origin="", season="", trashed=0, actor=mentor)
         return first, again, denied, ro, viewed
 
     first, again, denied, ro, viewed = env.run(go)
@@ -921,7 +921,83 @@ def test_jedna_lista_cel_dodania_mecz_pary_lub_trybuna(env, monkeypatch):
     assert top["source"] == "bastion" and top["key"] == "bastion:1" and top["sure"] and by_code["best"] == "bastion:1"
     assert top["target"]["kind"] == "pair_match" and top["target"]["match_id"] == "m1" and "SPR Gliwice" in top["target"]["label"]
     assert [r["key"] for r in by_code["ranked"] if r["source"] == "bastion"] == ["bastion:1"]      # LCM/32 odpada przy zapytaniu ISM/1
-    assert any(r["source"] == "baza" and r["target"]["match_id"] == "m1" for r in by_code["ranked"])  # i mecz pary z "bazy"
+    assert not any(r["source"] == "baza" for r in by_code["ranked"])           # wpis "baza" tego meczu nie dubluje best
+    assert by_code["best_in_baza"] is True and by_code["best_match_id"] == "m1"
     other = by_other["ranked"][0]
     assert other["key"] == "bastion:2" and other["sure"] and other["target"] == {"kind": "trybuna", "match_id": None, "label": "Trybuna (cudzy mecz)"}
     assert by_other["best"] == "bastion:2" and "youtube" in by_other
+
+
+# ─── Podpowiedzi, ludzie, kosz meczu, pola do grupowania, best bez dubla ─────
+
+
+def test_podpowiedzi_bez_polskich_znakow_prefiksy_kody_i_ludzie(env):
+    async def go():
+        a = await env.actor(JUDGES[0])
+        h = {"source_hash": "h", "source_json": {}}
+        for i, (code, home, away) in enumerate([("SM/38", "ORLEN Wisła Płock", "PGE Wybrzeże Gdańsk"), ("SM/3", "Łomża Industria Kielce", "Azoty Puławy")]):
+            await env.ins("zprp_public_matches", match_id=f"sm{i}", season_id="S1", competition_id="K7", competition_name="Superliga Mężczyzn",
+                          match_code=code, home_team_name=home, away_team_name=away, scheduled_at=datetime.now() - timedelta(days=5 + i),
+                          referee_1_id="777", referee_1_name="Jakub Rawicki", referee_2_name="Michał Fabryczny", delegate_1_name="Jakub Tarczykowski", **h)
+        env.trybuna_suggest.forget_index()
+        env.trybuna_suggest.S.forget_crests()
+        G = env.trybuna_suggest
+        wisla = await G.suggest(PAIR, "wisla plo", 8, a)
+        code = await G.suggest(PAIR, "sm/3", 8, a)
+        ref = await G.suggest(PAIR, "RAWI", 8, a)
+        short = await G.suggest(PAIR, "a", 8, a)
+        mine = await G.suggest(PAIR, "ism", 8, a)
+        people = await G.people("jakub", 20, a)
+        deleg = await G.people("tarcz", 20, a)
+        return wisla, code, ref, short, mine, people, deleg
+
+    from datetime import timedelta
+
+    wisla, code, ref, short, mine, people, deleg = env.run(go)
+    assert [i["label"] for i in wisla["items"] if i["kind"] == "team"] == ["ORLEN Wisła Płock"]
+    assert {i["label"] for i in code["items"] if i["kind"] == "code"} == {"SM/3", "SM/38"} and code["items"][0]["kind"] == "code"
+    assert ref["items"][0]["kind"] == "referee" and ref["items"][0]["value"] == "Jakub Rawicki" and "2 meczów" in ref["items"][0]["sub"]
+    assert short["items"] == []
+    assert any(i["kind"] == "match" and i["match_id"] == "m1" and "SPR Gliwice - KS Opole" == i["label"] for i in mine["items"])
+    assert {(p["kind"], p["name"]) for p in people} >= {("referee", "Jakub Rawicki"), ("delegate", "Jakub Tarczykowski")}
+    assert people[0]["matches_count"] == 2 and deleg[0]["kind"] == "delegate" and deleg[0]["judge_id"] is None
+
+
+def test_kosz_meczu_z_trybuny_impact_przywracanie_i_pola_listy(env):
+    async def go():
+        a = await env.actor(JUDGES[0])
+        out = await env.trybuna.add_watched(PAIR, body(env, url="https://youtu.be/abcdefghijk", home="SPR Gliwice", away="KS Opole", code="ISM/1"),
+                                            _Resp(), a, a, idempotency_header=None)
+        mid, vid = out["match"]["match_id"], out["videos"][0]["id"]
+        await env.library.create_clip(PAIR, env.library.ClipBody(match_id=mid, video_id=vid, start_s=1, end_s=9), a)
+        await env.trybuna_feed.queue_add(env.trybuna_feed.QueueAdd(pair_id=PAIR, match_id=mid), a)
+        L = lambda **k: env.trybuna.list_watched(PAIR, q="", referee="", origin="", season="", trashed=k.get("trashed", 0), actor=a)
+        listed = await L()
+        gone = await env.trybuna.remove_watched(PAIR, mid, a)
+        after = await L()
+        trash = await L(trashed=1)
+        clips = await env.library.list_clips(PAIR, category="", match_id=mid, author="", q="", markers=False, actor=a)
+        again = await code_of(env.trybuna.remove_watched(PAIR, mid, a))
+        back = await env.trybuna.restore_watched(PAIR, mid, a)
+        twice = await code_of(env.trybuna.restore_watched(PAIR, mid, a))
+        return listed, gone, after, trash, clips, again, back, twice
+
+    listed, gone, after, trash, clips, again, back, twice = env.run(go)
+    m = listed["matches"][0]
+    assert m["competition"] == m["competition_name"] and m["match_code"] == "ISM/1" and m["videos_count"] == 1 and m["clips_count"] == 1 and m["added_by_name"] == "Anna Nowak"
+    assert {"home_crest", "away_crest", "played_at", "referees", "added_at", "added_by"} <= set(m)
+    assert gone["impact"] == {"clips": 1, "threads": 0, "queue": 1} and gone["expires_at"]
+    assert after["matches"] == [] and [t["match_id"] for t in trash["matches"]] == [m["match_id"]] and trash["matches"][0]["impact"]["clips"] == 1
+    assert len(clips["clips"]) == 1                      # klipy zostają w Bibliotece
+    assert again[0] == 404 and back["match"]["match_id"] == m["match_id"] and twice == (409, "NOT_IN_TRASH")
+
+
+def test_best_nie_dubluje_wpisu_baza(env):
+    RK = importlib.import_module("app.mentor_trybuna_rank")
+    ranked = [{"key": "bastion:1", "source": "bastion", "sure": True, "confidence": 100, "target": {"kind": "pair_match", "match_id": "m1"}, "ref": {}},
+              {"key": "pair:m1", "source": "baza", "sure": True, "confidence": 100, "target": {"kind": "pair_match", "match_id": "m1"}, "ref": {"match_id": "m1"}},
+              {"key": "pair:m2", "source": "baza", "sure": False, "confidence": 60, "target": {"kind": "pair_match", "match_id": "m2"}, "ref": {"match_id": "m2"}}]
+    kept, info = RK.fold_baza(ranked, "bastion:1")
+    assert [r["key"] for r in kept] == ["bastion:1", "pair:m2"] and info == {"best_in_baza": True, "best_match_id": "m1"}
+    kept2, info2 = RK.fold_baza(ranked, None)
+    assert len(kept2) == 3 and info2["best_in_baza"] is False

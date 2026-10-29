@@ -383,6 +383,8 @@ app.include_router(mentor_trybuna_router)
 app.include_router(mentor_trybuna_feed_router)
 from app.mentor_trybuna_thumbs import router as mentor_trybuna_thumbs_router
 app.include_router(mentor_trybuna_thumbs_router)
+from app.mentor_trybuna_suggest import router as mentor_trybuna_suggest_router
+app.include_router(mentor_trybuna_suggest_router)
 app.include_router(short_result_records_router)
 # Dodatkowy raport sędziów/delegata: treść, PDF i adresaci.
 app.include_router(extra_report_router)

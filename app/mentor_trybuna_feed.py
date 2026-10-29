@@ -200,7 +200,9 @@ async def trybuna_search(pair_id: str, body: SearchBody, response: Response, rea
     rows = [game_row(g, by_item) for g in games]
     await S.enrich_media(real, mz.scope, rows)
     ranked, youtube = await build_ranked(ctx, rows, q, referee, d_from, d_to, t_from, t_to)
-    out = {"games": rows, "ranked": ranked, "best": RK.best_key(ranked), "youtube": youtube, "offset": body.offset,
+    best = RK.best_key(ranked)
+    ranked, best_info = RK.fold_baza(ranked, best)
+    out = {"games": rows, "ranked": ranked, "best": best, **best_info, "youtube": youtube, "offset": body.offset,
            "next_offset": None if ranged else (body.offset + S.PAGE if len(games) >= S.PAGE else None),
            "connection_scope": mz.scope, "query": {"q": q or None, "referee": referee or None}}
     if meta is not None:

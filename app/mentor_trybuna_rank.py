@@ -143,3 +143,19 @@ def pair_target(game_like: Mapping[str, Any], pair_cards: Iterable[Mapping[str, 
         name = " - ".join(x for x in ((hit.get("home") or {}).get("name"), (hit.get("away") or {}).get("name")) if x)
         return {"kind": "pair_match", "match_id": hit["match_id"], "label": f"Mecz pary: {name}".strip(": ")}
     return {"kind": "trybuna", "match_id": None, "label": "Trybuna (cudzy mecz)"}
+
+
+def fold_baza(ranked: List[Dict[str, Any]], best: Optional[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Wpis "baza" nie dubluje `best`: gdy `best` to ten sam mecz co wpis "baza" (wspólny `target.match_id`), wpis "baza" znika z listy,
+    a odpowiedź dostaje `best_in_baza: true` i `best_match_id`. Zwraca (lista, {best_in_baza, best_match_id})."""
+    info: Dict[str, Any] = {"best_in_baza": False, "best_match_id": None}
+    top = next((r for r in ranked if r["key"] == best), None) if best else None
+    if top is None:
+        return ranked, info
+    mid = (top.get("target") or {}).get("match_id") or (top.get("ref") or {}).get("match_id")
+    if not mid:
+        return ranked, info
+    kept = [r for r in ranked if not (r["source"] == "baza" and r is not top and (r.get("ref") or {}).get("match_id") == mid)]
+    info["best_in_baza"] = len(kept) != len(ranked) or top["source"] == "baza"
+    info["best_match_id"] = mid
+    return kept, info

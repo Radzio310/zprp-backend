@@ -654,9 +654,14 @@ async def add_watched_bulk(pair_id: str, body: BulkBody, response: Response, rea
 @router.get("/pairs/{pair_id}/trybuna/matches")
 async def list_watched(pair_id: str, q: str = Query("", max_length=80), referee: str = Query("", max_length=80),
                        origin: str = Query("", max_length=10), season: str = Query("", max_length=20),
-                       actor: Actor = Depends(mentor_actor)):
-    """Mecze z Trybuny tej pary (ostatnio dodane najpierw). Filtry: `q` (drużyny/kod/tytuł), `referee`, `origin`, `season`."""
+                       trashed: int = Query(0, ge=0, le=1), actor: Actor = Depends(mentor_actor)):
+    """Mecze z Trybuny tej pary (ostatnio dodane najpierw). Filtry: `q` (drużyny/kod/tytuł), `referee`, `origin`, `season`.
+    Każdy mecz ma pola do grupowania: `home`/`away` (+ `home_crest`/`away_crest`), `competition`, `match_code`, `played_at`, `referees[]`,
+    `videos_count`, `clips_count`, `added_at`, `added_by` (+ `added_by_name`). `trashed=1` zwraca kosz (usunięte w ostatnich 30 dniach,
+    z `deleted_at` i `expires_at`)."""
     ctx = await C.pair_context(pair_id, actor)
+    if trashed:
+        return await trashed_matches(ctx)
     cards = await watched_cards(ctx)
     from app import mentor_bastion_search as S
 
@@ -677,6 +682,12 @@ async def list_watched(pair_id: str, q: str = Query("", max_length=80), referee:
         if ref_key and not any(T.name_key(r.get("name")) == ref_key for r in c.get("referees") or []):
             continue
         out.append(c)
+    names = await C.people({c.get("added_by") for c in out if c.get("added_by")})
+    for c in out:
+        when = c.get("scheduled_at")
+        c.update({"competition": c.get("competition_name"), "played_at": when.isoformat() if hasattr(when, "isoformat") else when,
+                  "videos_count": int((c.get("videos") or {}).get("count") or 0), "clips_count": int((c.get("clips") or {}).get("count") or 0),
+                  "added_by_name": C.person(names, c["added_by"])["name"] if c.get("added_by") else None})
     return {"matches": out, "seasons": R.seasons_of(out), "rev": ctx["rev"]}
 
 
@@ -729,17 +740,64 @@ async def edit_watched(pair_id: str, match_id: str, body: WatchedPatch, actor: A
     return await _created_payload(ctx, await watched_row(ctx["pair_id"], match_id), False)
 
 
+TRASH_DAYS = 30
+
+
+async def match_impact(ctx: Dict[str, Any], match_id: str) -> Dict[str, int]:
+    """Co dotyczy meczu z Trybuny: `clips` (żywe klipy), `threads` (wątki), `queue` (wpisy w kolejkach „Do obejrzenia")."""
+    from app.db import mentor_trybuna_queue
+
+    clips = await C.rows(select(mentor_clips.c.id).where(mentor_clips.c.pair_id == ctx["pair_id"]).where(mentor_clips.c.match_id == match_id)
+                         .where(mentor_clips.c.deleted_at.is_(None)))
+    threads = await C.rows(select(mentor_threads.c.id).where(mentor_threads.c.pair_id == ctx["pair_id"]).where(mentor_threads.c.match_id == match_id))
+    queue = await C.rows(select(mentor_trybuna_queue.c.judge_id).where(mentor_trybuna_queue.c.pair_id == ctx["pair_id"])
+                         .where(mentor_trybuna_queue.c.match_id == match_id))
+    return {"clips": len(clips), "threads": len(threads), "queue": len(queue)}
+
+
 @router.delete("/pairs/{pair_id}/trybuna/matches/{match_id}")
 async def remove_watched(pair_id: str, match_id: str, actor: Actor = Depends(mentor_actor)):
-    """Zdejmuje mecz z Trybuny (miękko: nagrania, klipy i wątki zostają w bazie, mecz znika z listy i pokoju)."""
+    """Przenosi mecz z Trybuny do kosza (30 dni, `POST .../restore` przywraca). Odpowiedź: `{ok, match_id, impact: {clips, threads, queue},
+    expires_at}`. Nagrania, klipy i wątki zostają w bazie: klipy dalej są w Bibliotece, a mecz znika z listy, pokoju i kolejek."""
     ctx = await C.pair_context(pair_id, actor, action="video")
     row = await watched_row(ctx["pair_id"], match_id)
     if not row:
         raise C.err(404, "MATCH_NOT_FOUND", "To nie jest mecz z Trybuny tej pary.")
+    impact = await match_impact(ctx, row["match_id"])
+    stamp = C.now()
     await database.execute(update(W).where(W.c.match_id == row["match_id"]).where(W.c.deleted_at.is_(None))
-                           .values(deleted_at=C.now(), deleted_by=actor.judge_id))
+                           .values(deleted_at=stamp, deleted_by=actor.judge_id))
     await C.touch(ctx, actor.judge_id, "watched_removed", "matches", row["match_id"], {})
-    return {"ok": True, "match_id": row["match_id"]}
+    return {"ok": True, "match_id": row["match_id"], "impact": impact, "expires_at": stamp + timedelta(days=TRASH_DAYS)}
+
+
+@router.post("/pairs/{pair_id}/trybuna/matches/{match_id}/restore")
+async def restore_watched(pair_id: str, match_id: str, actor: Actor = Depends(mentor_actor)):
+    """Przywraca mecz z kosza (do 30 dni od usunięcia): 409 `NOT_IN_TRASH`, gdy meczu nie ma w koszu, 409 `TRASH_EXPIRED` po 30 dniach."""
+    ctx = await C.pair_context(pair_id, actor, action="video")
+    row = await watched_row(ctx["pair_id"], match_id, alive=False)
+    if not row or row.get("deleted_at") is None:
+        raise C.err(409, "NOT_IN_TRASH", "Ten mecz nie leży w koszu.")
+    if R.aware(row["deleted_at"]) < C.now() - timedelta(days=TRASH_DAYS):
+        raise C.err(409, "TRASH_EXPIRED", "Minęło 30 dni - tego meczu nie da się już przywrócić.")
+    await database.execute(update(W).where(W.c.match_id == row["match_id"]).values(deleted_at=None, deleted_by=None, updated_at=C.now()))
+    await C.touch(ctx, actor.judge_id, "watched_restored", "matches", row["match_id"], {})
+    return {"ok": True, "match": await watched_card(ctx, row["match_id"]), "rev": ctx["rev"]}
+
+
+async def trashed_matches(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    limit = C.now() - timedelta(days=TRASH_DAYS)
+    found = await C.rows(select(W).where(W.c.pair_id == ctx["pair_id"]).where(W.c.deleted_at.is_not(None)).order_by(W.c.deleted_at.desc()).limit(200))
+    names = await C.people({r.get("deleted_by") for r in found if r.get("deleted_by")})
+    out = []
+    for r in found:
+        if R.aware(r["deleted_at"]) < limit:
+            continue
+        card = T.card_from_snapshot(r["match_id"], _snap(r), title=r.get("title"))
+        card.update(extras_of(r))
+        out.append({**card, "deleted_at": r["deleted_at"], "deleted_by": C.person(names, r.get("deleted_by")) if r.get("deleted_by") else None,
+                    "expires_at": R.aware(r["deleted_at"]) + timedelta(days=TRASH_DAYS), "impact": await match_impact(ctx, r["match_id"])})
+    return {"matches": out, "trashed": True, "rev": ctx["rev"]}
 
 
 # ─── Powiązania: odczyt, ponowne liczenie, ręczna poprawka ──────────────────

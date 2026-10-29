@@ -28,7 +28,7 @@ MODULES = (
     "app.mentor_panel_media", "app.mentor_panel_reports", "app.mentor_panel_notify", "app.mentor_evaluations",
     "app.mentor_panel_handoff", "app.mentor_bastion", "app.mentor_bastion_jobs", "app.mentor_bastion_client",
     "app.mentoring", "app.proel_auth", "app.streams.store", "app.streams.worker", "app.mentor_panel_streams", "app.mentor_video_trash",
-    "app.mentor_bastion_search", "app.mentor_trybuna", "app.mentor_trybuna_rules", "app.mentor_trybuna_feed", "app.mentor_trybuna_thumbs", "app.mentor_trybuna_rank",
+    "app.mentor_bastion_search", "app.mentor_trybuna", "app.mentor_trybuna_rules", "app.mentor_trybuna_feed", "app.mentor_trybuna_thumbs", "app.mentor_trybuna_rank", "app.mentor_trybuna_suggest",
 )
 
 PAIR = "pair-1"
@@ -122,6 +122,7 @@ class Env:
         self.trybuna = importlib.import_module("app.mentor_trybuna")
         self.trybuna_feed = importlib.import_module("app.mentor_trybuna_feed")
         self.trybuna_rules = importlib.import_module("app.mentor_trybuna_rules")
+        self.trybuna_suggest = importlib.import_module("app.mentor_trybuna_suggest")
         self.sent = []
 
         async def fake_notify(ctx, actor_id, title, body, **kwargs):
