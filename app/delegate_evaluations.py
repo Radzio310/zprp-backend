@@ -23,6 +23,7 @@ from app.delegate_evaluation_utils import (
     new_bucket,
     pair_names,
     resolve_access,
+    restrict_to_district,
     safe_source_fingerprint,
     season_start,
 )
@@ -39,6 +40,7 @@ from app.db import (
 from app.deps import get_jwt_payload
 from app.province_access import normalize_province
 from app.province_panel_access import choose_vip_row, vip_covers_province
+from app.settlement_province import spellings
 
 router = APIRouter(prefix="/delegate-evaluations", tags=["Delegate evaluations"])
 admin_router = APIRouter(
@@ -209,7 +211,20 @@ async def sync(req: SyncIn, payload: dict = Depends(get_jwt_payload)):
 SOURCES = {"delegate", "mentor", "all"}
 
 
-async def _all_rows(judge_id: str, province: str, season: str, source: str) -> List[Dict[str, Any]]:
+async def district_judge_ids(province: str) -> set:
+    """Numery sędziów okręgu (`province_judges`, pisownia odporna przez `spellings`)."""
+    names = spellings(province)
+    if not names:
+        return set()
+    rows = await database.fetch_all(
+        select(province_judges.c.judge_id).where(province_judges.c.province.in_(names))
+    )
+    return {str(row["judge_id"]).strip() for row in rows}
+
+
+async def _all_rows(
+    judge_id: str, province: str, season: str, source: str, district_ids: Optional[set] = None
+) -> List[Dict[str, Any]]:
     """Arkusze delegatów i/lub opublikowane oceny mentora w JEDNYM kształcie wiersza.
 
     Ocena mentora niesie `kind: "mentor"` i `source_kind: "mentor"` - ekrany
@@ -224,6 +239,8 @@ async def _all_rows(judge_id: str, province: str, season: str, source: str) -> L
 
         rows += await mentor_form_rows(judge_id, province, season)
         rows.sort(key=lambda r: str(r.get("match_date") or ""), reverse=True)
+    if district_ids is not None:
+        rows = restrict_to_district(rows, district_ids)
     return rows
 
 
@@ -268,7 +285,9 @@ async def overview(
     access = await _access(actor, province, surface) if province else {"stats": True, "full": True, "admin": await _is_admin(actor)}
     if province and not access["stats"]:
         raise HTTPException(403, access.get("reason") or "Brak dostępu do statystyk ocen")
-    rows = await _all_rows(actor, province, season, source)
+    # Okręg widzi tylko pary ze swoim sędzią; administrator - wszystko.
+    district_ids = await district_judge_ids(province) if province and not access.get("admin") else None
+    rows = await _all_rows(actor, province, season, source, district_ids)
     people: Dict[str, Dict[str, Any]] = {}
     pairs: Dict[str, Dict[str, Any]] = {}
     # Worek „Łącznie": WSZYSTKIE arkusze z tego zapytania w jednym zbiorze, więc
@@ -299,6 +318,8 @@ async def overview(
             pairs[pair_key]["mentor_evaluations"] = pairs[pair_key].get("mentor_evaluations", 0) + int(is_mentor)
         for index, judge_id in enumerate(ids):
             if not province and str(judge_id) != actor:
+                continue
+            if district_ids is not None and str(judge_id).strip() not in district_ids:
                 continue
             key = str(judge_id)
             if key not in people:
@@ -364,7 +385,8 @@ async def forms(
     access = await _access(actor, province, surface) if province else {"full": True}
     if province and not access["full"]:
         raise HTTPException(403, access.get("reason") or "Brak dostępu do pełnych arkuszy")
-    items = [dict(row) for row in await _all_rows(actor, province, season, source)]
+    district_ids = await district_judge_ids(province) if province and not access.get("admin") else None
+    items = [dict(row) for row in await _all_rows(actor, province, season, source, district_ids)]
     if comparisons:
         national = await _national_rows(actor, season, source) if province and access.get("admin") else None
         metric_cache: Dict[str, Dict[str, Any]] = {}

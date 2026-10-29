@@ -198,3 +198,22 @@ def test_dostep_nadany_sedziemu_dziala_tylko_w_aplikacji():
     assert app["stats"] and not app["full"]
     none = resolve_access(surface="", is_org=False, grant=None)
     assert not none["stats"] and none["reason"] == NO_ACCESS_GRANT
+
+
+def test_okreg_widzi_tylko_pary_ze_swoim_sedzia():
+    from app.delegate_evaluation_utils import restrict_to_district
+
+    rows = [
+        {"id": 1, "referee_ids": ["10", "11"]},   # oba nasze
+        {"id": 2, "referee_ids": ["10", "99"]},   # mieszana: widoczna
+        {"id": 3, "referee_ids": ["98", "99"]},   # obca (np. PARKITNY - ZAJĄC)
+        {"id": 4, "referee_ids": []},
+    ]
+    assert [r["id"] for r in restrict_to_district(rows, {"10", "11"})] == [1, 2]
+    assert restrict_to_district(rows, set()) == []
+
+
+def test_pisownia_wojewodztwa_odporna():
+    from app.settlement_province import spellings
+
+    assert set(spellings("DOLNOSLASKIE")) & set(spellings("Dolnośląskie"))

@@ -202,3 +202,15 @@ def resolve_access(
     stats = bool(grant and grant.get("can_view_stats"))
     full = bool(grant and grant.get("can_view_full"))
     return {"stats": stats, "full": full, "admin": False, "reason": "" if stats else NO_ACCESS_GRANT}
+
+
+def restrict_to_district(rows: List[Dict[str, Any]], district_ids: set) -> List[Dict[str, Any]]:
+    """Zostawia arkusze, w których sędziował choć jeden sędzia okręgu.
+
+    Reguła pary mieszanej jak w mentoringu (`cross_pairs`): para z jednym naszym
+    sędzią jest widoczna, para bez żadnego naszego - nie.
+    """
+    return [
+        row for row in rows
+        if district_ids & {str(x).strip() for x in (row.get("referee_ids") or [])}
+    ]
