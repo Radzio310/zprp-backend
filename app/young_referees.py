@@ -16,7 +16,7 @@ from app.db import (
 )
 from app.deps import get_optional_jwt_payload
 from app.province_access import MASTER_TEACH
-from app.province_guard import ensure_province_write
+from app.province_guard import actor_judge_id, ensure_province_write
 from app.schemas import (
     CreateYoungRefereeRequest,
     UpdateYoungRefereeRequest,
@@ -92,6 +92,48 @@ async def _ensure_young_referee_write(
         kind=MASTER_TEACH,
         action=action,
     )
+
+
+# ----------------- Młody sędzia nie ocenia -----------------
+#
+# Oceny młodych wystawia mentor / obserwator / delegat, nigdy inny młody sędzia
+# i nigdy młody sam sobie. Tożsamość bierzemy z tokenu (numer sędziego z logowania
+# w ZPRP); numeru z treści żądania nie uznajemy. Dodatkowo, na wypadek starej
+# aplikacji bez tokenu, porównujemy podpis oceniającego (`mentor_name`) z listą
+# aktywnych młodych.
+
+YOUNG_CANNOT_RATE_MSG = (
+    "Młody sędzia nie wystawia ocen - ocenia mentor, obserwator lub delegat."
+)
+
+
+def _name_key(value: Any) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+async def _ensure_rater_is_not_young(
+    token_payload: Optional[dict],
+    mentor_name: Optional[str] = None,
+) -> None:
+    judge_id = actor_judge_id(token_payload)
+    if judge_id:
+        row = await database.fetch_one(
+            select(young_referees.c.id).where(
+                young_referees.c.base_judge_id == judge_id,
+                young_referees.c.is_active.is_(True),
+            )
+        )
+        if row is not None:
+            raise HTTPException(status_code=403, detail=YOUNG_CANNOT_RATE_MSG)
+    key = _name_key(mentor_name)
+    if key:
+        rows = await database.fetch_all(
+            select(young_referees.c.full_name).where(
+                young_referees.c.is_active.is_(True)
+            )
+        )
+        if any(_name_key(r["full_name"]) == key for r in rows):
+            raise HTTPException(status_code=403, detail=YOUNG_CANNOT_RATE_MSG)
 
 
 # ----------------- CRUD: młodzi sędziowie -----------------
@@ -309,7 +351,11 @@ async def delete_young_referee(
     status_code=status.HTTP_201_CREATED,
     summary="Dodaj ocenę młodego sędziego",
 )
-async def create_young_referee_rating(req: CreateYoungRefereeRatingRequest):
+async def create_young_referee_rating(
+    req: CreateYoungRefereeRatingRequest,
+    token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
+):
+    await _ensure_rater_is_not_young(token_payload, req.mentor_name)
     # upewnij się, że pierwszy młody sędzia istnieje
     ref_row = await database.fetch_one(
         select(young_referees.c.id, young_referees.c.full_name).where(
@@ -476,8 +522,11 @@ async def get_young_referee_rating(rating_id: int):
     summary="Zaktualizuj ocenę młodego sędziego",
 )
 async def update_young_referee_rating(
-    rating_id: int, req: UpdateYoungRefereeRatingRequest
+    rating_id: int,
+    req: UpdateYoungRefereeRatingRequest,
+    token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
 ):
+    await _ensure_rater_is_not_young(token_payload, req.mentor_name)
     row = await database.fetch_one(
         select(young_referee_ratings).where(young_referee_ratings.c.id == rating_id)
     )

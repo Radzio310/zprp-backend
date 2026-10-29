@@ -112,3 +112,25 @@ def test_przeniesienie_do_innego_okregu_pyta_o_obie_listy():
     source = source_of("update_young_referee")
     assert source.count("_ensure_young_referee_write") >= 2
     assert "req.province" in source
+
+
+# --- Młody sędzia nie ocenia ---------------------------------------------
+
+RATE_ROUTES = ("create_young_referee_rating", "update_young_referee_rating")
+
+
+@pytest.mark.parametrize("route", RATE_ROUTES)
+def test_zapis_oceny_odrzuca_mlodego_oceniajacego(route):
+    assert "_ensure_rater_is_not_young" in calls_in(route)
+    assert "token_payload" in arg_names(route)
+    source = source_of(route)
+    assert source.index("_ensure_rater_is_not_young") < source.index("database.")
+
+
+def test_bramka_oceniajacego_czyta_numer_z_tokenu_i_nazwe_z_listy():
+    helper = source_of("_ensure_rater_is_not_young")
+    assert "actor_judge_id" in helper
+    assert "young_referees.c.base_judge_id" in helper
+    assert "mentor_name" in helper
+    assert "403" in helper
+    assert "Młody sędzia nie wystawia ocen" in SOURCE
