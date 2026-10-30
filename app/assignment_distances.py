@@ -8,9 +8,9 @@ miasto sędziego - miasto hali możesz z Google'a". Tak więc:
   1. to samo miasto        -> 0 km, bez pytania kogokolwiek,
   2. `okreg_distances`     -> tabela zmierzona przez okręg, ta sama, która
                               rozlicza przejazdy (jeden słownik pojęć),
-  3. `city_distances`      -> para, o którą już kiedyś pytaliśmy Google,
+  3. `route_atlas`         -> para, o którą już kiedyś pytaliśmy Google,
   4. Google Distance Matrix-> tylko pary, których nie ma nigdzie wyżej,
-                              i od razu zapisane do `city_distances`.
+                              i od razu zapisane do Atlasu tras (`app/route_atlas.py`).
 
 Automat pyta o odległość TYSIĄCE razy (każdy sędzia x każdy mecz), a `Context`
 oczekuje zwykłej funkcji - dlatego cały zbiór par wypełniamy PRZED układaniem
@@ -28,7 +28,6 @@ from typing import Any, Iterable, Optional
 
 from app.settlement_distances import (
     DistanceIndex,
-    google_distance,
     normalize_city,
 )
 from app.settlement_province import spellings
@@ -143,7 +142,7 @@ async def load_book(province: str) -> DistanceBook:
     # księga odległości jest czysta - dzięki temu chodzi w teście bez bazy.
     from sqlalchemy import select
 
-    from app.db import city_distances, database, okreg_distances
+    from app.db import database, okreg_distances, route_atlas
 
     row = await database.fetch_one(
         select(okreg_distances.c.content).where(
@@ -161,14 +160,28 @@ async def load_book(province: str) -> DistanceBook:
             content = None
     index = DistanceIndex(content)
 
+    # Atlas tras: pary symetryczne bez regionu i adresu ("a~b"). Pomiar starszy
+    # niz 6 miesiecy pomijamy - dla ksiegi jest "nieznany", wiec `fill_missing`
+    # zmierzy go od nowa (a gdy sie nie uda, atlas odda stary wynik).
+    from datetime import datetime, timezone
+
+    from app.route_atlas_rules import is_fresh
+
+    now = datetime.now(timezone.utc)
     cache: dict[tuple[str, str], float] = {}
-    for saved in await database.fetch_all(select(city_distances)):
-        left = str(saved["from_key"] or "")
-        right = str(saved["to_key"] or "")
-        if not left or not right:
+    for saved in await database.fetch_all(
+        select(route_atlas.c.pair_key, route_atlas.c.km, route_atlas.c.measured_at).where(
+            route_atlas.c.pair_key.like("%~%"),
+            ~route_atlas.c.pair_key.like("%>%"),
+            ~route_atlas.c.pair_key.like("%|%"),
+            ~route_atlas.c.pair_key.like("%#%"),
+            ~route_atlas.c.pair_key.like("%@%"),
+        )
+    ):
+        left, _, right = str(saved["pair_key"] or "").partition("~")
+        if not left or not right or not is_fresh(saved["measured_at"], now):
             continue
-        key = (left, right) if left <= right else (right, left)
-        cache[key] = float(saved["km"] or 0.0)
+        cache[(left, right) if left <= right else (right, left)] = float(saved["km"] or 0.0)
     return DistanceBook(index, cache)
 
 
@@ -182,7 +195,7 @@ async def fill_missing(
     """
     Dopytuje Google o pary, których nie zna nikt, i ZAPISUJE je na zawsze.
 
-    Zapis idzie do `city_distances`, więc następny przebieg - i następny miesiąc -
+    Zapis idzie do Atlasu tras (`route_atlas`), więc następny przebieg - i następny miesiąc -
     ma tę parę za darmo. Bez klucza do Google kończy się po cichu: automat
     policzy plan z tym, co wie, a raport pokaze, ile par zostało nieznanych.
     """
@@ -190,41 +203,19 @@ async def fill_missing(
     if not todo:
         return {"asked": 0, "saved": 0, "missing": 0}
 
-    # Import po odsianiu pustego przebiegu: `app.db` łączy się z Postgresem już
-    # przy imporcie, a „nie ma czego dopytać" nie potrzebuje żadnej bazy.
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from app import route_atlas as RA
+    from app.route_atlas_rules import Endpoint
 
-    from app.db import city_distances, database
-
-    own_client = client is None
-    if own_client:
-        from httpx import AsyncClient
-
-        client = AsyncClient(timeout=20.0)
-
+    results = await RA.resolve(
+        [RA.Pair(Endpoint(name=left), Endpoint(name=right)) for left, right in todo],
+        client=client,
+        max_new=len(todo),
+    )
     saved = 0
-    try:
-        for left, right in todo:
-            km = await google_distance(client, left, right)
-            book.remember((left, right), km)
-            if km is None:
-                continue
-            try:
-                await database.execute(
-                    pg_insert(city_distances)
-                    .values(from_key=left, to_key=right, km=float(km), source="google")
-                    .on_conflict_do_update(
-                        index_elements=[city_distances.c.from_key, city_distances.c.to_key],
-                        set_={"km": float(km), "source": "google"},
-                    )
-                )
-                saved += 1
-            except Exception:
-                # Pamięć jest wygoda, nie warunkiem. Plan i tak ma już tę liczbę.
-                logger.exception("obsada: nie udało się zapamiętać odległości %s-%s", left, right)
-    finally:
-        if own_client:
-            await client.aclose()
+    for (left, right), result in zip(todo, results):
+        book.remember((left, right), result.km)
+        if result.status == "measured":
+            saved += 1
 
     return {
         "asked": len(todo),

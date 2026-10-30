@@ -95,27 +95,27 @@ class GoogleDistancesRequest(BaseModel):
     pairs: list[GoogleDistancePairRequest]
 
 
-# Ten sam projekt Google Maps, z którego korzysta aplikacja BAZA. W produkcji
-# klucz powinien być ustawiony jako GOOGLE_MAPS_API_KEY; wartość awaryjna
-# zachowuje zgodność z obecną aplikacją mobilną.
-_GOOGLE_MAPS_API_KEY = (
-    os.getenv("GOOGLE_MAPS_API_KEY")
-    or "AIzaSyDbampOBXG-R_ohI4WaVowwHYPncmKzctc"
-).strip()
-_google_distance_cache: dict[tuple[str, str], float] = {}
-
-
 def _distance_key(origin: str, destination: str) -> tuple[str, str]:
     return (" ".join(origin.lower().split()), " ".join(destination.lower().split()))
 
 
+#: Ile NOWYCH pomiarow Google wolno zlecic jednym (niezalogowanym) zadaniem
+#: starego klienta. Reszta wraca jako "failed" - klient prosi ponownie albo
+#: przechodzi na POST /atlas/routes.
+LEGACY_MAX_NEW = 40
+
+
 @router.post("/google-distances")
 async def google_distances(data: GoogleDistancesRequest):
-    """Uzupełnia brakujące pary miast przez Google Distance Matrix.
+    """Zgodnosc ze starymi klientami BAZA_web; dane z Atlasu tras.
 
-    Klient wysyła wyłącznie pary nieobecne w tabeli wojewódzkiej. Nie
-    poprawiamy ani nie sklejamy nazw otrzymanych z API; dopisujemy tylko kraj.
+    Koniec Distance Matrix: pary znane odpowiadaja z `route_atlas`, brakujace
+    mierzymy ta sama metoda co rozliczenia (najkrotsza z 4 zapytan Directions),
+    maksymalnie `LEGACY_MAX_NEW` na zadanie. Nowi klienci: POST /atlas/routes.
     """
+    from app import route_atlas as RA
+    from app.route_atlas_rules import Endpoint
+
     unique: dict[tuple[str, str], GoogleDistancePairRequest] = {}
     for pair in data.pairs:
         origin = pair.origin.strip()
@@ -131,80 +131,17 @@ async def google_distances(data: GoogleDistancesRequest):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Maksymalnie 500 unikalnych par")
     if not unique:
         return {"requested": 0, "resolved": 0, "failed": 0, "distances": []}
-    if not _GOOGLE_MAPS_API_KEY:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Brak konfiguracji Google Maps API")
 
-    distances: list[dict[str, Any]] = []
-    pending_by_origin: dict[str, list[GoogleDistancePairRequest]] = {}
-    for key, pair in unique.items():
-        cached = _google_distance_cache.get(key)
-        if cached is not None:
-            distances.append({
-                "origin": pair.origin,
-                "destination": pair.destination,
-                "km": cached,
-            })
-        else:
-            pending_by_origin.setdefault(pair.origin, []).append(pair)
-
-    semaphore = asyncio.Semaphore(6)
-
-    async def fetch_chunk(
-        client: httpx.AsyncClient,
-        origin: str,
-        chunk: list[GoogleDistancePairRequest],
-    ) -> list[dict[str, Any]]:
-        async with semaphore:
-            try:
-                response = await client.get(
-                    "https://maps.googleapis.com/maps/api/distancematrix/json",
-                    params={
-                        "origins": f"{origin}, Polska",
-                        "destinations": "|".join(
-                            f"{pair.destination}, Polska" for pair in chunk
-                        ),
-                        "mode": "driving",
-                        "avoid": "tolls",
-                        "language": "pl",
-                        "region": "PL",
-                        "key": _GOOGLE_MAPS_API_KEY,
-                    },
-                )
-                response.raise_for_status()
-                payload = response.json()
-            except (httpx.HTTPError, ValueError):
-                return []
-
-            if payload.get("status") != "OK":
-                return []
-            elements = ((payload.get("rows") or [{}])[0].get("elements") or [])
-            result: list[dict[str, Any]] = []
-            for index, pair in enumerate(chunk):
-                element = elements[index] if index < len(elements) else {}
-                meters = (element.get("distance") or {}).get("value")
-                if element.get("status") != "OK" or not isinstance(meters, (int, float)):
-                    continue
-                km = float(meters) / 1000.0
-                if km <= 0:
-                    continue
-                _google_distance_cache[_distance_key(origin, pair.destination)] = km
-                _google_distance_cache[_distance_key(pair.destination, origin)] = km
-                result.append({
-                    "origin": origin,
-                    "destination": pair.destination,
-                    "km": km,
-                })
-            return result
-
-    jobs = []
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-        for origin, pairs in pending_by_origin.items():
-            for offset in range(0, len(pairs), 25):
-                jobs.append(fetch_chunk(client, origin, pairs[offset:offset + 25]))
-        if jobs:
-            for batch in await asyncio.gather(*jobs):
-                distances.extend(batch)
-
+    items = list(unique.values())
+    results = await RA.resolve(
+        [RA.Pair(Endpoint(name=p.origin), Endpoint(name=p.destination)) for p in items],
+        max_new=LEGACY_MAX_NEW,
+    )
+    distances: list[dict[str, Any]] = [
+        {"origin": p.origin, "destination": p.destination, "km": r.km}
+        for p, r in zip(items, results)
+        if r.km is not None and r.km > 0
+    ]
     return {
         "requested": len(unique),
         "resolved": len(distances),

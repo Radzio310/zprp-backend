@@ -4807,6 +4807,11 @@ from app.exam_public_tables import define_tables as _define_exam_public_tables
 
 (exam_public_links,) = _define_exam_public_tables(metadata)
 
+# Atlas tras - wspolna pamiec odleglosci drogowych (km + polilinia) i porazek pomiaru.
+from app.route_atlas_tables import define_tables as _define_route_atlas_tables
+
+route_atlas, route_atlas_failures = _define_route_atlas_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 

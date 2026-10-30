@@ -1739,32 +1739,36 @@ async def _route_map(key: str, rows: list[dict]) -> dict:
 
 
 async def _route_shapes(key: str, rows: list[dict]) -> dict:
-    """match_key -> zakodowana geometria najkrótszej trasy Google (tylko źródło Google)."""
-    from app.db import city_route_shapes
+    """match_key -> zakodowana geometria najkrótszej trasy Google (tylko źródło Google), z Atlasu tras."""
+    from app.db import route_atlas
     from app.national_place_rules import province_slug
     from app.settlement_distances import normalize_city
 
     slug = province_slug(key)
-    wanted: dict[tuple[str, str], list[str]] = {}
+    wanted: dict[str, list[str]] = {}
     for row in rows:
         if row.get("distance_source") != "google" or not row.get("home_city") or not row.get("city"):
             continue
-        pair = (f"{normalize_city(row['home_city'])[0]}|{slug}", normalize_city(row["city"])[0])
+        pair = f"{normalize_city(row['home_city'])[0]}|{slug}>{normalize_city(row['city'])[0]}"
         wanted.setdefault(pair, []).append(row["match_key"])
     if not wanted:
         return {}
+    out: dict[str, str] = {}
     try:
-        found = await database.fetch_all(
-            select(city_route_shapes.c.from_key, city_route_shapes.c.to_key, city_route_shapes.c.encoded).where(
-                city_route_shapes.c.from_key.in_({pair[0] for pair in wanted})
+        keys = list(wanted)
+        for start in range(0, len(keys), 500):
+            found = await database.fetch_all(
+                select(route_atlas.c.pair_key, route_atlas.c.encoded).where(
+                    route_atlas.c.pair_key.in_(keys[start:start + 500])
+                )
             )
-        )
+            for item in found:
+                if not item["encoded"]:
+                    continue
+                for match_key in wanted.get(item["pair_key"], []):
+                    out[match_key] = item["encoded"]
     except Exception:
         return {}
-    out: dict[str, str] = {}
-    for item in found:
-        for match_key in wanted.get((item["from_key"], item["to_key"]), []):
-            out[match_key] = item["encoded"]
     return out
 
 

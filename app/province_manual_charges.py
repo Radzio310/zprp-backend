@@ -275,34 +275,28 @@ async def _judges(province: str) -> list[dict]:
     return out
 
 
-def _google_key() -> str:
-    key = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
-    if key:
-        return key
-    try:  # ten sam klucz, którym BAZA_web dopytuje brakujące pary
-        from app.baza_web import _GOOGLE_MAPS_API_KEY
-
-        return _s(_GOOGLE_MAPS_API_KEY)
-    except Exception:
-        return ""
-
-
 from app.national_place_rules import province_label, province_slug  # noqa: E402
 
 
-async def _google_km(
-    client: Any, origin: str, destination: str, region: str = "", region_key: str = ""
-) -> Optional[float]:
-    """Najkrótsza trasa Google jak w aplikacji (`settlement_distances.google_distance`)."""
-    from app import settlement_distances as SD
-
-    if not SD.GOOGLE_MAPS_API_KEY:
-        SD.GOOGLE_MAPS_API_KEY = _google_key()
+async def _atlas_km(
+    pairs: list[tuple[str, str]], region: str, region_key: str, max_new: int
+) -> list[Optional[float]]:
+    """Kilometry z Atlasu tras (pomiar najkrotszej trasy Google tylko dla brakujacych)."""
     from app import national_place_rules as NP
+    from app import route_atlas as RA
     from app import settlement_route_map_rules as RM
+    from app.route_atlas_rules import Endpoint
 
-    start, end = RM.locator(NP.default_gazetteer(), region_key)(origin, destination) if region_key else (None, None)
-    return await SD.google_distance(client, origin, destination, region, start, end)
+    locate = RM.locator(NP.default_gazetteer(), region_key) if region_key else None
+    items = []
+    for origin, destination in pairs:
+        start, end = locate(origin, destination) if locate else (None, None)
+        items.append(RA.Pair(
+            Endpoint(name=origin, region=region, hint=start),
+            Endpoint(name=destination, directional=True, hint=end),
+        ))
+    results = await RA.resolve(items, max_new=max_new)
+    return [r.km for r in results]
 
 
 async def _resolve_km(
@@ -333,36 +327,31 @@ async def _resolve_km(
     _, book = await _distance_book(province)
     index = book.for_day(day)
     national = await load_national_pairs()
-    google_left = GOOGLE_LIMIT
-    client = None
-    try:
-        for item in todo:
-            table_km = None if central else index.lookup(item["home_city"], city)
-            hit = NL.pick_distance(
-                central,
-                home=item["home_city"],
-                city=city,
-                table_km=table_km,
-                national=national,
-                province=province,
-            )
-            if hit is not None:
-                item["km_one_way"], item["km_source"] = hit
-                continue
-            if google_left <= 0:
-                item["km_one_way"], item["km_source"] = None, "none"
-                continue
-            if client is None:
-                import httpx
-
-                client = httpx.AsyncClient(timeout=8.0)
-            google_left -= 1
-            value = await _google_km(client, item["home_city"], city, province_label(province_slug(province)), province_slug(province))
+    need_google: list[dict] = []
+    for item in todo:
+        table_km = None if central else index.lookup(item["home_city"], city)
+        hit = NL.pick_distance(
+            central,
+            home=item["home_city"],
+            city=city,
+            table_km=table_km,
+            national=national,
+            province=province,
+        )
+        if hit is not None:
+            item["km_one_way"], item["km_source"] = hit
+        else:
+            need_google.append(item)
+    if need_google:
+        values = await _atlas_km(
+            [(item["home_city"], city) for item in need_google],
+            province_label(province_slug(province)),
+            province_slug(province),
+            GOOGLE_LIMIT,
+        )
+        for item, value in zip(need_google, values):
             item["km_one_way"] = value
             item["km_source"] = "google" if value is not None else "none"
-    finally:
-        if client is not None:
-            await client.aclose()
     return officials
 
 

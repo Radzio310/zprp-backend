@@ -90,6 +90,7 @@ from app.upload_protocol import router as upload_protocol_router
 from app.protocol_convert import router as protocol_convert_router
 from app.password_change import router as password_change_router
 from app.baza_web import router as baza_web_router
+from app.atlas_routes import router as atlas_router
 from app.province_judges import router as province_judges_router
 from app.badges import router as badges_router
 from app.baza_vips import router as baza_vips_router
@@ -403,6 +404,7 @@ app.include_router(upload_protocol_router)
 app.include_router(protocol_convert_router)
 app.include_router(password_change_router)
 app.include_router(baza_web_router)
+app.include_router(atlas_router)
 app.include_router(province_judges_router)
 app.include_router(badges_router)
 app.include_router(baza_vips_router)
@@ -1587,6 +1589,11 @@ async def startup():
 
     # Dobowe odswiezanie danych do statystyk i rozliczen okregowych. Chodzi
     # tylko po wojewodztwach z WLACZONYM modulem i skonfigurowanym kontem sync.
+    # Atlas tras: jednorazowe przejecie dotychczasowych pomiarow (city_distances,
+    # ksztalty tras, porazki) - w tle, przed pierwszymi odswiezeniami rozliczen.
+    from app.route_atlas import run_migration_safely as _atlas_migration
+
+    asyncio.create_task(_atlas_migration())
     _settlement_sync_task = asyncio.create_task(run_settlement_sync_scheduler())
     # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - obrót co 15 minut.
     start_alert_scheduler()

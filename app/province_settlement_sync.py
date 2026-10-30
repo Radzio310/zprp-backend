@@ -65,16 +65,10 @@ from app.settlement_sync_rules import (
     STORE_BATCH,
     VENUE_EMPTY_RETRY_DAYS,
     VENUE_TTL_DAYS,
-    classify_failures,
-    failure_alive,
     upsert_batches,
     venue_needs_refresh,
 )
-from app.settlement_distances import (
-    DistanceIndex,
-    VersionedDistanceIndex,
-    resolve_distances,
-)
+from app.settlement_distances import VersionedDistanceIndex, normalize_city
 from app.settlement_names import fill_missing_names, judge_cities, remember_officials
 from app.settlement_names_rules import officials_from_payload
 from app.settlement_province import display
@@ -1417,50 +1411,48 @@ async def refresh_province(
                     google_rows.append((position, home, _google_destination(city, row.get("venue_address"), row.get("teams"))))
 
             if google_rows:
+                # Jedyne zrodlo pomiarow to Atlas tras (`app/route_atlas.py`):
+                # pamieta km, geometrie i porazki, deduplikuje pary w locie i
+                # powtarza pomiary starsze niz 6 miesiecy. Wiersz z km bez
+                # geometrii dociaga ja raz na 30 dni (`need_shape`).
+                from app import route_atlas as RA
+                from app.route_atlas_rules import Endpoint
+
                 region_slug = province_slug(province)
-                memory = await _google_memory(region_slug)
-                # Para zmierzona bez geometrii dociąga ją przy tym odświeżeniu
-                # (jedno ponowne pomiary); km zostają, jeśli wynik ten sam.
-                have_shapes = await _google_shape_keys(region_slug)
-                cache = {k: v for k, v in memory.items() if k in have_shapes}
-                # Porazki pomiaru pamietane z terminem waznosci: para bez wyniku
-                # (7 dni) i para z km bez geometrii (30 dni) nie wraca do Google
-                # przy kazdym odswiezeniu.
-                started = _now()
-                live_failures = await _failure_memory(region_slug, started)
-                for fkey, kind in live_failures.items():
-                    if kind == "noshape" and fkey in memory:
-                        cache[fkey] = memory[fkey]
-                    elif kind == "nokm" and fkey not in memory:
-                        cache[fkey] = None
-                before = set(cache)
-                shapes: dict = {}
-                no_route: set = set()
-                resolved = await resolve_distances(
-                    [(home, city) for _, home, city in google_rows],
-                    DistanceIndex(None),
+                region_name = province_label(region_slug)
+                locate = _route_locator(province)
+                unique_pairs: dict[tuple[str, str], RA.Pair] = {}
+                for _, home, city in google_rows:
+                    if (home, city) in unique_pairs:
+                        continue
+                    start, end = locate(home, city)
+                    unique_pairs[(home, city)] = RA.Pair(
+                        Endpoint(name=home, region=region_name, hint=start),
+                        # Klucz celu to dawny, obciety do pierwszego przecinka -
+                        # dzieki temu pomiary sprzed atlasu dalej trafiaja.
+                        Endpoint(
+                            name=city, directional=True, hint=end,
+                            key=normalize_city(city)[0] if "," in city else "",
+                        ),
+                    )
+                raw_pairs = list(unique_pairs)
+                measured = await RA.resolve(
+                    [unique_pairs[raw] for raw in raw_pairs],
                     client=public,
-                    cache=cache,
-                    origin_region=province_label(region_slug),
-                    locate=_route_locator(province),
-                    shapes=shapes,
+                    need_shape=True,
                     on_progress=tick,
-                    no_route=no_route,
                 )
                 logger.info(
-                    "[settlement] %s: Google zmierzyl %d par (pamiec z geometria: %d)",
-                    province, len(cache) - len(before), len(before),
+                    "[settlement] %s: atlas - z pamieci %d, zmierzone teraz %d, bez wyniku %d",
+                    province,
+                    sum(1 for r in measured if r.status in ("cached", "stale")),
+                    sum(1 for r in measured if r.status == "measured"),
+                    sum(1 for r in measured if r.km is None),
                 )
-                await _google_memory_save(
-                    region_slug,
-                    {k: v for k, v in cache.items() if k not in before and v is not None},
-                    shapes,
-                )
-                failed, healed = classify_failures(
-                    cache, before, shapes, google_on=bool(SD.GOOGLE_MAPS_API_KEY), no_route=no_route
-                )
-                if failed or healed:
-                    await _failure_save(region_slug, failed, healed, started)
+                resolved = {
+                    raw: ((r.km, "google") if r.km is not None else (None, "none"))
+                    for raw, r in zip(raw_pairs, measured)
+                }
                 for position, home, city in google_rows:
                     hit = resolved.get((home, city))
                     if hit is not None:
@@ -1541,10 +1533,6 @@ async def refresh_province(
 
 
 
-#: Wersja pomiaru Google zapisanego w `city_distances.source`. Wartości z innej
-#: wersji (np. starej trasy domyślnej, source „google") są ignorowane i liczone
-#: od nowa - podbić przy każdej zmianie sposobu pomiaru (jak
-#: `GOOGLE_DISTANCE_REVISION` w aplikacji).
 def _google_destination(city: str, address: Any, teams: Any = None) -> str:
     """
     Cel dla Google. Miejscowość wieloznaczna („Dąbrowa" ma ich 96) rozstrzygamy
@@ -1563,117 +1551,6 @@ def _route_locator(province: str):
     from app import settlement_route_map_rules as RM
 
     return RM.locator(NP.default_gazetteer(), province)
-
-
-GOOGLE_MEMORY_SOURCE = "google-shortest-r3"
-
-#: Domy (klucz znormalizowany), których stare pomiary zrobił goły tekst i trafiły w
-#: imiennika („Nakło Śląskie" -> Nakło spod Lelowa, 82 km zamiast 8). Pamięć ich
-#: nie oddaje, więc pomiar idzie od nowa już z punktem ze skorowidza.
-REMEASURE_ORIGINS = frozenset({"naklo slaskie"})
-
-
-async def _google_memory(region_slug: str) -> dict:
-    """Zapamiętane najkrótsze trasy Google okręgu: {(dom, hala): km}."""
-    from app.db import city_distances
-
-    rows = await database.fetch_all(
-        select(city_distances.c.from_key, city_distances.c.to_key, city_distances.c.km).where(
-            city_distances.c.source == GOOGLE_MEMORY_SOURCE
-        )
-    )
-    suffix = f"|{region_slug}"
-    return {
-        (r["from_key"][: -len(suffix)], r["to_key"]): float(r["km"])
-        for r in rows
-        if r["from_key"].endswith(suffix) and r["from_key"][: -len(suffix)] not in REMEASURE_ORIGINS
-    }
-
-
-async def _google_memory_save(region_slug: str, fresh: dict, shapes: Optional[dict] = None) -> None:
-    from app.db import city_distances, city_route_shapes
-
-    for (origin, destination), km in fresh.items():
-        try:
-            statement = pg_insert(city_distances).values(
-                from_key=f"{origin}|{region_slug}", to_key=destination, km=km, source=GOOGLE_MEMORY_SOURCE
-            )
-            await database.execute(
-                statement.on_conflict_do_update(
-                    index_elements=[city_distances.c.from_key, city_distances.c.to_key],
-                    set_={"km": km, "source": GOOGLE_MEMORY_SOURCE},
-                )
-            )
-        except Exception as exc:
-            logger.debug("[settlement] pamięć Google: %s", exc)
-    for (origin, destination), encoded in (shapes or {}).items():
-        try:
-            statement = pg_insert(city_route_shapes).values(
-                from_key=f"{origin}|{region_slug}", to_key=destination, encoded=encoded
-            )
-            await database.execute(
-                statement.on_conflict_do_update(
-                    index_elements=[city_route_shapes.c.from_key, city_route_shapes.c.to_key],
-                    set_={"encoded": encoded},
-                )
-            )
-        except Exception as exc:
-            logger.debug("[settlement] geometria tras: %s", exc)
-
-
-async def _google_shape_keys(region_slug: str) -> set:
-    """Pary (dom, hala) okręgu, dla których mamy już zapisaną geometrię."""
-    from app.db import city_route_shapes
-
-    try:
-        rows = await database.fetch_all(select(city_route_shapes.c.from_key, city_route_shapes.c.to_key))
-    except Exception:
-        return set()
-    suffix = f"|{region_slug}"
-    return {
-        (r["from_key"][: -len(suffix)], r["to_key"]) for r in rows if r["from_key"].endswith(suffix)
-    }
-
-
-async def _failure_memory(region_slug: str, now: datetime) -> dict:
-    """Zywe porazki pomiaru okregu: {(dom, hala): "nokm" | "noshape"}."""
-    from app.db import settlement_pair_failures as F
-
-    try:
-        rows = await database.fetch_all(select(F.c.from_key, F.c.to_key, F.c.kind, F.c.checked_at))
-    except Exception:
-        return {}
-    suffix = f"|{region_slug}"
-    return {
-        (r["from_key"][: -len(suffix)], r["to_key"]): r["kind"]
-        for r in rows
-        if r["from_key"].endswith(suffix)
-        and r["from_key"][: -len(suffix)] not in REMEASURE_ORIGINS
-        and failure_alive(r["kind"], r["checked_at"], now)
-    }
-
-
-async def _failure_save(region_slug: str, failed: dict, healed: set, now: datetime) -> None:
-    from app.db import settlement_pair_failures as F
-
-    try:
-        async with database.transaction():
-            await upsert_batches(
-                database,
-                F,
-                [
-                    {"from_key": f"{o}|{region_slug}", "to_key": d, "kind": kind, "checked_at": now}
-                    for (o, d), kind in failed.items()
-                ],
-                ["from_key", "to_key"],
-            )
-            keys = [(f"{o}|{region_slug}", d) for (o, d) in healed]
-            for start in range(0, len(keys), STORE_BATCH):
-                await database.execute(
-                    delete(F).where(tuple_(F.c.from_key, F.c.to_key).in_(keys[start : start + STORE_BATCH]))
-                )
-    except Exception as exc:
-        logger.debug("[settlement] pamięć porażek: %s", exc)
 
 
 async def last_run(province: str) -> Optional[dict]:
