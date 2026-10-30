@@ -74,7 +74,7 @@ def test_szablony_i_domyslna_punktacja():
         assert c["multi_scoring"] == "all_or_nothing"
     assert [X.TEMPLATES[k]["label"] for k in X.TEMPLATES] == ["Egzamin 25", "Egzamin 30", "Egzamin 15"]
     short = X.clean_config({"window_start": T0.isoformat(), "window_end": (T0 + timedelta(days=5)).isoformat()}, template="exam15")
-    assert short["question_count"] == 15 and short["result_release"] == "after_close"
+    assert short["question_count"] == 15 and short["result_release"] == "immediate"
 
 
 @pytest.mark.parametrize("raw, fragment", [

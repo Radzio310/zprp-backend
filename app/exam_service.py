@@ -26,6 +26,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 from sqlalchemy import and_, case, delete, func, insert, literal_column, or_, select, update
 
 from app import exam_rules as X
+from app import exam_time_rules as T
 from app import province_event_rules as R
 from app.exam_rules import ExamError
 from app.settlement_province import DISPLAY, display
@@ -849,8 +850,64 @@ async def _finalize_score(st: Store, exam: Mapping[str, Any], attempt: Dict[str,
     bank = await load_bank(st, exam["bank_version"])
     score = X.score_attempt(exam["config"], attempt["paper"], answers, bank, exam["voided"])
     attempt["score"] = score
+    # Bufor może jeszcze dopisać odpowiedzi do zamkniętego podejścia - czas policzy się od nowa przy odczycie.
+    attempt["time_json"] = None
     await st.database.execute(update(st.t.attempts).where(st.t.attempts.c.id == attempt["id"]).values(
-        score_json=_dumps(score), percent=score["percent"], passed=score["passed"]))
+        score_json=_dumps(score), percent=score["percent"], passed=score["passed"], time_json=None))
+
+
+#: Paczka podejść przy jednym dociągnięciu czasu (lista `IN` zostaje rozsądnej długości).
+_TIME_CHUNK = 200
+
+
+def _apply_time(row: Dict[str, Any], time_view: Optional[Mapping[str, Any]]) -> None:
+    """Pola czasu na wierszu podejścia: `real_s` istnieje, gdy policzono (None = czasu nie znamy)."""
+    if not time_view:
+        return
+    row["time"] = dict(time_view)
+    row["real_s"] = time_view.get("real_s")
+    row["away_s"] = time_view.get("away_s")
+    row["total_s"] = time_view.get("total_s")
+
+
+async def fill_attempt_times(st: Store, rows: List[Dict[str, Any]]) -> None:
+    """Czas realny na wierszach podejść. Policzone czyta z `time_json`; brakujące (stare podejścia,
+    świeżo oddane) liczy z odpowiedzi i zdarzeń, a wynik utrwala - następny odczyt jest już bez zapytań."""
+    missing: List[Dict[str, Any]] = []
+    for row in rows:
+        if row.get("status") == "in_progress":
+            continue
+        stored = _loads(row.get("time_json"), None)
+        if stored:
+            _apply_time(row, stored)
+        else:
+            missing.append(row)
+    for i in range(0, len(missing), _TIME_CHUNK):
+        chunk = missing[i:i + _TIME_CHUNK]
+        ids = [r["id"] for r in chunk]
+        answers: Dict[str, List[Dict[str, Any]]] = {}
+        for raw in await st.database.fetch_all(select(st.t.answers.c.attempt_id, st.t.answers.c.shown_at, st.t.answers.c.answered_at)
+                                               .where(st.t.answers.c.attempt_id.in_(ids))):
+            r = _row(raw)
+            answers.setdefault(r["attempt_id"], []).append({"shown_at": _dt(r["shown_at"]), "answered_at": _dt(r["answered_at"])})
+        events: Dict[str, List[Dict[str, Any]]] = {}
+        for raw in await st.database.fetch_all(select(st.t.events.c.attempt_id, st.t.events.c.kind, st.t.events.c.detail_json, st.t.events.c.created_at)
+                                               .where(and_(st.t.events.c.attempt_id.in_(ids), st.t.events.c.kind.in_(T.ABSENCE_KINDS)))):
+            r = _row(raw)
+            events.setdefault(r["attempt_id"], []).append({"kind": r["kind"], "detail": _loads(r["detail_json"], {}), "at": _dt(r["created_at"])})
+        limits: Dict[str, Any] = {}
+        for raw in await st.database.fetch_all(select(st.t.definitions.c.id, st.t.definitions.c.config_json)
+                                               .where(st.t.definitions.c.id.in_(list({r["exam_id"] for r in chunk})))):
+            r = _row(raw)
+            limits[r["id"]] = (_loads(r["config_json"], {}) or {}).get("time_per_question_s")
+        for row in chunk:
+            view = T.attempt_time(row.get("started_at"), row.get("finished_at"), answers.get(row["id"], []),
+                                  events.get(row["id"], []), limits.get(row["exam_id"]))
+            if not view:
+                continue
+            _apply_time(row, view)
+            row["time_json"] = _dumps(view)
+            await st.database.execute(update(st.t.attempts).where(st.t.attempts.c.id == row["id"]).values(time_json=row["time_json"]))
 
 
 async def _record_event(st: Store, exam_id: str, attempt: Mapping[str, Any], kind: str, detail: Mapping[str, Any],
@@ -1211,6 +1268,16 @@ async def _review_payload(st: Store, exam: Mapping[str, Any], attempt: Dict[str,
     bank = await load_bank(st, exam["bank_version"])
     difficulty = await _exam_difficulty(st, exam, bank)
     config = exam["config"]
+    await fill_attempt_times(st, [attempt])
+    time_view = attempt.get("time")
+    questions = X.review_view(config, attempt["paper"], answers, bank, attempt["score"], difficulty)
+    if time_view and time_view.get("gaps"):
+        # Czas na pytaniu bez przerw: pytanie otwarte w trakcie wyjścia nie „trwa" całą nieobecność.
+        for q in questions:
+            row = answers.get(q.get("qid")) or {}
+            for key in ("time_ms", "elapsed_ms"):
+                if q.get(key) is not None:
+                    q[key] = T.active_ms(row.get("shown_at"), row.get("answered_at"), q[key], time_view["gaps"], attempt.get("started_at"))
     return {
         "attempt_id": attempt["id"], "result": result,
         "exam": {"id": exam["id"], "name": exam["name"], "scope": exam["scope"], "province": exam.get("province"),
@@ -1218,8 +1285,13 @@ async def _review_payload(st: Store, exam: Mapping[str, Any], attempt: Dict[str,
                  "multi_scoring": config.get("multi_scoring"), "answers_release": X.answers_release(config)},
         "attempt": {"attempt_no": attempt["attempt_no"], "status": attempt["status"], "finish_reason": attempt.get("finish_reason"),
                     "started_at": _iso(attempt.get("started_at")), "finished_at": _iso(attempt.get("finished_at")),
-                    "duration_s": _duration_s(attempt), "judge_id": attempt.get("judge_id"), "judge_name": attempt.get("judge_name")},
-        "questions": X.review_view(config, attempt["paper"], answers, bank, attempt["score"], difficulty),
+                    # `duration_s` = czas REALNY (stare wersje aplikacji też dostają właściwą liczbę); None = nie wiemy.
+                    "duration_s": time_view.get("real_s") if time_view else _duration_s(attempt),
+                    "total_s": time_view.get("total_s") if time_view else _duration_s(attempt),
+                    "away_s": time_view.get("away_s") if time_view else None,
+                    "time": time_view,
+                    "judge_id": attempt.get("judge_id"), "judge_name": attempt.get("judge_name")},
+        "questions": questions,
     }
 
 
@@ -1311,14 +1383,14 @@ async def attempts_list(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
                                        .order_by(st.t.attempts.c.judge_name, st.t.attempts.c.attempt_no))
     events = await _events_by_attempt(st, exam_id)
     items = []
-    for raw in rows:
-        a = _attempt(raw)
-        if not _in_cut(a.get("province"), exam["cut_province"]):
-            continue
+    loaded = [a for a in (_attempt(raw) for raw in rows) if _in_cut(a.get("province"), exam["cut_province"])]
+    await fill_attempt_times(st, loaded)
+    for a in loaded:
         score = a["score"] or {}
         items.append({"attempt_id": a["id"], "judge_id": a["judge_id"], "judge_name": a.get("judge_name"),
                       "province": a.get("province"), "attempt_no": a["attempt_no"], "status": a["status"],
                       "started_at": _iso(a["started_at"]), "finished_at": _iso(a.get("finished_at")),
+                      **{k: a[k] for k in ("real_s", "away_s", "total_s") if k in a},
                       "points": score.get("points"), "max": score.get("max"), "percent": score.get("percent"),
                       "passed": score.get("passed"), "integrity": X.integrity_report(events.get(a["id"], []), exam["config"]["anti"].get("integrity"))})
     return {"exam_id": exam_id, "pass_percent": exam["config"]["pass_percent"], "attempts": items}

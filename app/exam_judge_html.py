@@ -55,6 +55,8 @@ def _dur(seconds: Any) -> str:
     if seconds is None:
         return "-"
     s = int(round(float(seconds)))
+    if s >= 3600:
+        return f"{s // 3600} h {s % 3600 // 60} min"
     return f"{s // 60} min {s % 60:02d} s" if s >= 60 else f"{s} s"
 
 
@@ -200,7 +202,7 @@ def judge_facts(report: Mapping[str, Any], review: Mapping[str, Any], record: Op
         "pass_percent": result.get("pass_percent") if result.get("pass_percent") is not None else exam.get("pass_percent"),
         "attempt_no": attempt.get("attempt_no"), "attempt_id": review.get("attempt_id"),
         "started_at": attempt.get("started_at"), "finished_at": attempt.get("finished_at"), "finish_reason": attempt.get("finish_reason"),
-        "duration_s": duration, "avg_q_s": round(sum(answered) / len(answered), 1) if answered else None,
+        "duration_s": duration, "away_s": attempt.get("away_s"), "avg_q_s": round(sum(answered) / len(answered), 1) if answered else None,
         "place": place, "ranked": len(ranked), "shared": shared, "beaten": beaten,
         "exam_avg": exam_avg, "province_avg": province_avg,
         "histogram": list((report.get("summary") or {}).get("histogram_10pct") or [0] * 10),
@@ -516,6 +518,8 @@ def _analysis(f: Mapping[str, Any], th: Mapping[str, Any], blocks: Sequence[str]
             _stat(_place_text(f), "miejsce")]
     if "time" in blocks:
         kpis.append(_stat(_dur(f.get("duration_s")), "czas pisania"))
+        if (f.get("away_s") or 0) >= 5:
+            kpis.append(_stat(_dur(f.get("away_s")), "poza egzaminem"))
     parts = []
     top = []
     if "ring" in blocks:
@@ -558,6 +562,8 @@ def _sheet(f: Mapping[str, Any], th: Mapping[str, Any], blocks: Sequence[str], p
             ("Wynik", f'{_pct(f["percent"], 1)} ({f.get("points")}/{f.get("max")} pkt) · {"zaliczony" if f["passed"] else "niezaliczony"}')]
     if "time" in blocks:
         meta.append(("Czas pisania", _dur(f.get("duration_s"))))
+        if (f.get("away_s") or 0) >= 5:
+            meta.append(("Poza egzaminem", _dur(f.get("away_s"))))
     if "integrity" in blocks:
         it = f["integrity"]
         meta.append(("Rzetelność", f'{it.get("score") if it.get("score") is not None else "-"}/100'

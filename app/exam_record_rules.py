@@ -61,8 +61,11 @@ def _mean(values: Sequence[float]) -> Optional[float]:
 
 
 def duration_s(a: Mapping[str, Any]) -> Optional[float]:
+    """Czas pisania: realny, gdy policzony (`real_s`), a na wierszu bez podziału - start do oddania."""
     if a.get("status") not in FINISHED:
         return None
+    if "real_s" in a:
+        return a["real_s"]
     start, end = _aware(a.get("started_at")), _aware(a.get("finished_at"))
     if start and end and end >= start:
         return round((end - start).total_seconds(), 1)
@@ -107,6 +110,7 @@ def attempt_row(
         "attempt_id": a.get("id"), "attempt_no": a.get("attempt_no"), "status": status,
         "finish_reason": a.get("finish_reason"), "started_at": _iso(a.get("started_at")),
         "finished_at": _iso(a.get("finished_at")), "duration_s": duration_s(a),
+        "away_s": a.get("away_s"), "total_s": a.get("total_s"),
         "visible": visible, "percent": None, "points": None, "max": None, "passed": None,
         "right": None, "wrong": None, "voided": None,
         "review_available": refusal is None, "review_reason": refusal, "review_opens_at": opens,

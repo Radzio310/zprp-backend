@@ -189,13 +189,14 @@ def _median(values: Sequence[float]) -> Optional[float]:
 
 
 def durations_s(attempts: Iterable[Mapping[str, Any]]) -> List[float]:
+    """Czas pisania: realny, gdy policzony (`real_s`; None = nie wiemy, nie wchodzi do średniej)."""
     out = []
     for a in attempts:
         if a.get("status") not in FINISHED:
             continue
-        start, end = _ts(a.get("started_at")), _ts(a.get("finished_at"))
-        if start and end and end >= start:
-            out.append((end - start).total_seconds())
+        value = _duration(a)
+        if value is not None:
+            out.append(value)
     return out
 
 
@@ -563,6 +564,8 @@ def export_filename(exam_name: str, fmt: str, when: datetime) -> str:
 
 
 def _duration(row: Mapping[str, Any]) -> Optional[float]:
+    if "real_s" in row:
+        return row["real_s"]
     start, end = _ts(row.get("started_at")), _ts(row.get("finished_at"))
     return (end - start).total_seconds() if start and end and end >= start else None
 

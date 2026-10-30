@@ -29,6 +29,8 @@ MIGRATIONS: list = [
     "CREATE INDEX IF NOT EXISTS ix_exam_attempts_deleted ON exam_attempts (deleted_at) WHERE deleted_at IS NOT NULL",
     # Czas na pytaniu zmierzony telefonem (od pokazania do zatwierdzenia, sumowany przy cofaniu) - 24.10.2026.
     "ALTER TABLE exam_answers ADD COLUMN IF NOT EXISTS client_time_ms integer",
+    # Czas realny i czas poza egzaminem (30.10.2026): liczony raz z zapisanych śladów, stare podejścia przy pierwszym odczycie.
+    "ALTER TABLE exam_attempts ADD COLUMN IF NOT EXISTS time_json text",
 ]
 
 
@@ -116,6 +118,8 @@ def define_tables(metadata):
         Column("deleted_at", DateTime(timezone=True), nullable=True),
         Column("deleted_by", String, nullable=True),
         Column("deleted_by_name", String, nullable=True),
+        #: Podział czasu z `app/exam_time_rules.attempt_time`; NULL = jeszcze niepoliczony.
+        Column("time_json", Text, nullable=True),
         UniqueConstraint("exam_id", "judge_id", "attempt_no", name="ux_exam_attempt_no"),
     )
     answers = Table(

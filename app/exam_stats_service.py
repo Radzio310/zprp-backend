@@ -99,7 +99,7 @@ async def _attempts(st: S.Store, exam_ids: List[str], judge_id: Optional[str] = 
         return []
     a = st.t.attempts
     q = select(a.c.id, a.c.exam_id, a.c.judge_id, a.c.judge_name, a.c.province, a.c.attempt_no, a.c.status,
-               a.c.finish_reason, a.c.started_at, a.c.finished_at, a.c.percent, a.c.passed, a.c.score_json
+               a.c.finish_reason, a.c.started_at, a.c.finished_at, a.c.percent, a.c.passed, a.c.score_json, a.c.time_json
                ).where(and_(a.c.exam_id.in_(exam_ids), S._live(a)))
     if judge_id is not None:
         q = q.where(a.c.judge_id == judge_id)
@@ -112,6 +112,7 @@ async def _attempts(st: S.Store, exam_ids: List[str], judge_id: Optional[str] = 
         r["started_at"], r["finished_at"] = S._dt(r["started_at"]), S._dt(r["finished_at"])
         r["judge_id"] = S._s(r["judge_id"])
         out.append(r)
+    await S.fill_attempt_times(st, out)
     return out
 
 

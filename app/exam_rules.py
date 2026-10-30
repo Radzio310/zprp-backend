@@ -257,7 +257,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     #: Bez niej każde pytanie pozwala zaznaczyć kilka odpowiedzi - zdający nie wie, ile jest poprawnych.
     "single_hint_all": False,
     "single_hint_ids": [],
-    "result_release": "after_close",
+    #: Decyzja 30.10.2026: wynik i klucz od razu po oddaniu; „po zamknięciu" to świadomy wybór komisji.
+    #: Zapisane egzaminy trzymają własne wartości - ta domyślna ich nie dotyka.
+    "result_release": "immediate",
     "answers_release": "immediate",
     "mandatory": False,
     "target": {"include_all": False, "include_badges": [], "exclude_badges": []},
@@ -279,7 +281,7 @@ _TEMPLATE_BASE: Dict[str, Any] = {
     "scope": {"rules": [], "topics": [], "kinds": [], "manual_ids": [], "difficulty": "any"},
     "set_mode": "shared", "shuffle_answers": True, "shuffle_questions": False, "allow_back": False,
     "time_per_question_s": 100, "time_total_min": None, "max_attempts": 1, "retake": "any",
-    "pass_percent": 75, "result_release": "after_close", "mandatory": True,
+    "pass_percent": 75, "result_release": "immediate", "mandatory": True,
     "include_ids": [], "exclude_ids": [], "reminders_hours": [72, 24, 2], "results_push": True,
     "anti": {"leave_app": "warn", "screenshots": True, "speed_flags": True, "similarity": True,
              "single_device": True, "room_code": False},
@@ -293,8 +295,8 @@ def _template(count: int, exclude_badges: List[str]) -> Dict[str, Any]:
     return config
 
 
-# Decyzja właściciela 17.10.2026: trzy druki, okno 7 dni, próg 75%, wynik po
-# zamknięciu okna. „Egzamin 30" obowiązkowy dla wszystkich; 25 i 15 dla
+# Decyzja właściciela 17.10.2026: trzy druki, okno 7 dni, próg 75% (wynik od razu
+# od 30.10.2026, wcześniej po zamknięciu okna). „Egzamin 30" obowiązkowy dla wszystkich; 25 i 15 dla
 # wszystkich oprócz odznak „Ligowcy" i „Delegaci".
 TEMPLATES: Dict[str, Dict[str, Any]] = {
     "exam25": {"label": "Egzamin 25", "window_days": 7, "config": _template(25, TEMPLATE_EXCLUDED_BADGES)},

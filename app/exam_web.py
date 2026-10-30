@@ -351,6 +351,10 @@ async def _record(attempt: Dict[str, Any], signal: str, detail: Dict[str, Any], 
             quiet = R.merge_quiet(S._loads(session.get("quiet_json"), {}), shape["signal"], shape["detail"])
             session["quiet_json"] = json.dumps(quiet)
             await database.execute(update(sessions).where(sessions.c.id == session["id"]).values(quiet_json=session["quiet_json"]))
+        if shape["signal"] == "resume" and float(shape["detail"].get("seconds") or 0) > 0:
+            # Powrót niesie długość wyjścia: to pomiar czasu poza egzaminem (`exam_time_rules`), nie naruszenie.
+            await S._record_event(_store(), attempt["exam_id"], attempt, "resume", {**shape["detail"], "source": "web"},
+                                  client_ts_ms if isinstance(client_ts_ms, (int, float)) else None, now)
         return False
     st = _store()
     await S._record_event(st, attempt["exam_id"], attempt, shape["kind"], shape["detail"],

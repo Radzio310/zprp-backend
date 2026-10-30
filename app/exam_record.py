@@ -97,7 +97,7 @@ async def my_record(ss: SS.StatsStore, who: S.Who, now: Optional[datetime] = Non
 async def _attempts_of(st: S.Store, judge_id: str) -> List[Dict[str, Any]]:
     a = st.t.attempts
     q = select(a.c.id, a.c.exam_id, a.c.judge_id, a.c.judge_name, a.c.province, a.c.attempt_no, a.c.status,
-               a.c.finish_reason, a.c.started_at, a.c.finished_at, a.c.percent, a.c.passed, a.c.score_json
+               a.c.finish_reason, a.c.started_at, a.c.finished_at, a.c.percent, a.c.passed, a.c.score_json, a.c.time_json
                ).where(and_(a.c.judge_id == judge_id, S._live(a)))
     out = []
     for raw in await st.database.fetch_all(q):
@@ -105,6 +105,7 @@ async def _attempts_of(st: S.Store, judge_id: str) -> List[Dict[str, Any]]:
         r["score"] = S._loads(r.pop("score_json", None), None) or {}
         r["started_at"], r["finished_at"] = S._dt(r["started_at"]), S._dt(r["finished_at"])
         out.append(r)
+    await S.fill_attempt_times(st, out)
     return out
 
 

@@ -52,7 +52,7 @@ def test_druki_25_30_15():
         assert tpl["label"] == f"Egzamin {count}" and tpl["window_days"] == 7
         c = X.clean_config(win, template=key)
         assert c["question_count"] == count and c["time_per_question_s"] == 100 and c["time_total_min"] is None
-        assert c["pass_percent"] == 75 and c["result_release"] == "after_close" and c["mandatory"] is True
+        assert c["pass_percent"] == 75 and c["result_release"] == "immediate" and c["mandatory"] is True
         assert c["scope"]["rules"] == [] and c["scope"]["manual_ids"] == [] and c["allow_back"] is False
         assert c["target"]["include_all"] is True and c["target"]["exclude_badges"] == excluded
 

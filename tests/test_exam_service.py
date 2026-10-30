@@ -483,3 +483,56 @@ async def test_klucz_od_razu_po_oddaniu_i_przeglad_komisji(st):
     assert full["violations"] == 1 and full["events"][0]["kind"] == "app_background" and full["flags"] == []
     with pytest.raises(X.ExamError):
         await S.committee_review(st, PLAIN, exam["id"], aid)
+
+
+# --- czas realny i poza egzaminem (30.10.2026) ------------------------------
+
+
+async def test_domyslnie_wynik_i_klucz_od_razu_a_zapisany_egzamin_zostaje(st):
+    exam, _ = await make(st)
+    assert exam["config"]["result_release"] == "immediate" and exam["config"]["answers_release"] == "immediate"
+    t = OPEN + timedelta(minutes=5)
+    state = await S.start_attempt(st, PLAIN, exam["id"], {}, now=t)
+    _final, _, end = await answer_all(st, PLAIN, state["attempt"]["id"], t, state=state)
+    mine = await S.attempt_review(st, PLAIN, state["attempt"]["id"], now=end)
+    assert mine["result"]["visible"] is True and len(mine["questions"]) == 3
+    # Egzamin zapisany z „po zamknięciu" nie zmienia się przy edycji samej nazwy.
+    old, _ = await make(st, result_release="after_close")
+    edited, _ = await S.update_exam(st, COMMISSION, old["id"], {"name": "Nowa nazwa"}, now=T0)
+    assert edited["config"]["result_release"] == "after_close"
+
+
+async def test_przerwa_w_podejsciu_nie_jest_czasem_pisania(st):
+    exam, _ = await make(st, result_release="immediate", time_per_question_s=100)
+    t = OPEN + timedelta(minutes=5)
+    state = await S.start_attempt(st, PLAIN, exam["id"], {}, now=t)
+    aid = state["attempt"]["id"]
+    q = state["question"]
+    out = await S.post_answers(st, PLAIN, aid, {"answers": [{"qid": q["qid"], "selected": [CORRECT[q["qid"]]]}]}, t + timedelta(seconds=30))
+    # Powrót po trzech dobach: pytanie 2 przepadło zegarem, pytanie 3 dostaje odpowiedź od razu.
+    back = t + timedelta(hours=72)
+    state = await S.attempt_state(st, PLAIN, aid, None, None, back)
+    q = state["question"]
+    await S.post_answers(st, PLAIN, aid, {"answers": [{"qid": q["qid"], "selected": [CORRECT[q["qid"]]]}]}, back + timedelta(seconds=20))
+    review = await S.attempt_review(st, PLAIN, aid, now=back + timedelta(seconds=30))
+    att = review["attempt"]
+    assert att["total_s"] > 71 * 3600
+    assert att["duration_s"] < 300 and att["duration_s"] >= 50
+    assert att["away_s"] > 71 * 3600 and att["time"]["inferred_s"] > 0 and att["time"]["known"] is True
+    assert any(g["source"] == "inferred" for g in att["time"]["gaps"])
+    # To samo w liście komisji, rankingu i kartotece; drugi odczyt czyta zapis.
+    listed = await S.attempts_list(st, COMMISSION, exam["id"])
+    assert listed["attempts"][0]["real_s"] == att["duration_s"]
+    raw = await st.database.fetch_val(select(st.t.attempts.c.time_json).where(st.t.attempts.c.id == aid))
+    assert raw and json.loads(raw)["real_s"] == att["duration_s"]
+
+
+async def test_zmierzone_wyjscie_z_aplikacji_odejmuje_sie_od_czasu(st):
+    exam, _ = await make(st, result_release="immediate")
+    t = OPEN + timedelta(minutes=5)
+    state = await S.start_attempt(st, PLAIN, exam["id"], {}, now=t)
+    aid = state["attempt"]["id"]
+    await S.post_events(st, PLAIN, aid, {"events": [{"kind": "app_background", "detail": {"seconds": 12}}]}, now=t + timedelta(seconds=15))
+    _final, _, end = await answer_all(st, PLAIN, aid, t + timedelta(seconds=15), state=state)
+    att = (await S.attempt_review(st, PLAIN, aid, now=end))["attempt"]
+    assert att["away_s"] == 12 and att["time"]["measured_s"] == 12 and att["duration_s"] == att["total_s"] - 12

@@ -198,8 +198,11 @@ def bucket_of(exam: Mapping[str, Any], bucket: str) -> Tuple[str, str, str]:
 
 
 def duration_s(a: Mapping[str, Any]) -> Optional[float]:
+    """Czas pisania: realny, gdy policzony (`real_s`), a na wierszu bez podziału - start do oddania."""
     if a.get("status") not in FINISHED:
         return None
+    if "real_s" in a:
+        return a["real_s"]
     start, end = _aware(a.get("started_at")), _aware(a.get("finished_at"))
     if start and end and end >= start:
         return (end - start).total_seconds()
@@ -651,6 +654,7 @@ def judge_card(
             "attempt_id": a.get("id"), "exam_id": a.get("exam_id"), "exam_name": e.get("name"), "exam_at": _iso(e.get("opens_at")),
             "attempt_no": a.get("attempt_no"), "status": a.get("status"), "finish_reason": a.get("finish_reason"),
             "started_at": _iso(a.get("started_at")), "finished_at": _iso(a.get("finished_at")), "duration_s": _r(duration_s(a), 1),
+            "away_s": a.get("away_s"),
             "points": a.get("points"), "max": a.get("max"), "percent": _f(a.get("percent")), "passed": a.get("passed"),
             "pass_percent": _f(e.get("pass_percent")), "best": _s(a.get("id")) in best_ids,
             "voided": voided, "integrity": integrity(a),
