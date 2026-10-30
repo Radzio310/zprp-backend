@@ -140,6 +140,30 @@ def folder_names(match: Mapping[str, Any], category: Any) -> Dict[str, str]:
     return {"match": fs_part(raw, 90, "Mecz"), "category": fs_part(category, 50, "Bez kategorii")}
 
 
+FULL_NAME_LIMIT = 150
+
+
+def full_filename(match: Mapping[str, Any], category: Any, filename: str, limit: int = FULL_NAME_LIMIT) -> str:
+    """Nazwa niosąca mecz i kategorię (zwykłe pobranie bez folderów): „LCM-32 Do dyskusji 23m20 Kara 2 min - czerwona.mp4”.
+    Mecz to numer (inaczej data i drużyny); gdy całość przekracza limit, skracamy najpierw mecz, potem kategorię,
+    a minuta i tytuł klipu zostają."""
+    base = filename[:-4] if filename.lower().endswith(".mp4") else filename
+    base = fs_part(base, limit, "klip")
+    code = fs_part(match.get("code"), 30)
+    if code:
+        head = code
+    else:
+        teams = " - ".join(p for p in (str(match.get("home") or "").strip(), str(match.get("away") or "").strip()) if p)
+        head = fs_part(" ".join(p for p in (str(match.get("date") or "")[:10], teams) if p), 50)
+    cat = fs_part(category, 50)
+    room = limit - len(".mp4") - len(base) - 1
+    if len(cat) + 1 > room:
+        cat = cat[: max(0, room - 1)].rstrip(" .")
+    room -= len(cat) + 1 if cat else 0
+    head = head[: max(0, room - 1)].rstrip(" .") if len(head) + 1 > room else head
+    return " ".join(p for p in (head, cat, base) if p)[: limit - 4].rstrip(" .") + ".mp4"
+
+
 def card_signature(lines: Sequence[str]) -> str:
     """Odcisk treści planszy: gdy tytuł albo kategoria się zmienią, stary wariant przestaje być aktualny."""
     return hashlib.sha1("\n".join(lines).encode("utf-8")).hexdigest()[:16]

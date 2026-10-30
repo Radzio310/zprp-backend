@@ -125,3 +125,19 @@ def test_sygnatura_planszy_zmienia_sie_z_trescia():
     assert D.card_signature(["a", "b"]) == D.card_signature(["a", "b"])
     assert D.card_signature(["a", "b"]) != D.card_signature(["a", "c"])
     assert D.estimate_s("bastion", True) > D.estimate_s("bastion", False) > D.estimate_s("file", False)
+
+
+def test_pelna_nazwa_niesie_mecz_i_kategorie():
+    card = {"date": "2026-10-10", "home": "AGH Kraków", "away": "Gwardia", "code": "LCM-32"}
+    assert D.full_filename(card, "Do dyskusji", "23m20 Kara 2 min - czerwona.mp4") == "LCM-32 Do dyskusji 23m20 Kara 2 min - czerwona.mp4"
+    # Bez numeru: data i drużyny; znaki zakazane znikają.
+    assert D.full_filename({**card, "code": ""}, "Istotne", "5m01 Gol.mp4") == "2026-10-10 AGH Kraków - Gwardia Istotne 5m01 Gol.mp4"
+    assert D.full_filename({}, "", "5m01 Gol.mp4") == "5m01 Gol.mp4"
+    assert "/" not in D.full_filename(card, "A/B?", "1m00 x.mp4")
+
+
+def test_pelna_nazwa_ma_limit_a_minuta_i_tytul_zostaja():
+    card = {"code": "M" * 30, "date": "", "home": "", "away": ""}
+    out = D.full_filename(card, "K" * 50, "26m23 " + "t" * 60 + ".mp4", limit=100)
+    assert len(out) <= 100 and out.endswith(".mp4")
+    assert "26m23 " + "t" * 60 in out

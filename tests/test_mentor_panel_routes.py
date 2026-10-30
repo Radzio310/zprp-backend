@@ -474,9 +474,9 @@ def test_wgrywanie_transkodowanie_i_mp4(env, monkeypatch, tmp_path):
         clip = await env.library.create_clip(PAIR, clip_body(env, video_id=video["id"], start_s=60, end_s=90), mentor)
         link_mp4 = await raises(M.request_mp4((await env.library.create_clip(PAIR, clip_body(env), mentor))["id"], mentor))
         queued = await M.request_mp4(clip["id"], mentor)
-        not_ready = await raises(M.download_mp4(clip["id"], mentor, title_card=False))
+        not_ready = await raises(M.download_mp4(clip["id"], mentor, title_card=False, full_name=False))
         await M.process_next()
-        download = await M.download_mp4(clip["id"], pair, title_card=False)
+        download = await M.download_mp4(clip["id"], pair, title_card=False, full_name=False)
         idle = await M.process_next()
         return started, more, stranger_complete, missing, done, status_before, room_before, worked, status_after, video, \
             link_mp4, queued, not_ready, download, idle

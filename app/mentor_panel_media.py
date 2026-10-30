@@ -556,7 +556,8 @@ async def request_mp4(clip_id: str, actor: Actor = Depends(mentor_actor), body: 
 
 
 @router.get("/clips/{clip_id}/mp4")
-async def download_mp4(clip_id: str, actor: Actor = Depends(mentor_actor), title_card: bool = Query(False)):
+async def download_mp4(clip_id: str, actor: Actor = Depends(mentor_actor), title_card: bool = Query(False),
+                       full_name: bool = Query(False)):
     clip = await C.one(select(mentor_clips).where(mentor_clips.c.id == clip_id))
     if not clip or clip.get("deleted_at") is not None:
         raise C.err(404, "NOT_FOUND", "Nie ma takiego klipu.")
@@ -569,9 +570,15 @@ async def download_mp4(clip_id: str, actor: Actor = Depends(mentor_actor), title
             raise C.err(409, "MP4_NOT_READY", "Wariant z planszą nie jest jeszcze gotowy.")
         key, size = clip["card_key"], clip.get("card_size")
     from app import mentor_clip_download as D
+    from app import mentor_clip_download_rules as DR
 
     try:
-        filename = (await D.build_plan(D.Context(ctx), clip, actor, title_card=title_card))["filename"]
+        shared = D.Context(ctx)
+        plan = await D.build_plan(shared, clip, actor, title_card=title_card)
+        filename = plan["filename"]
+        if full_name:
+            # Zwykłe pobranie nie ma folderów: mecz i kategoria jadą w samej nazwie.
+            filename = DR.full_filename(await shared.card(clip["match_id"]), plan["folder"]["category"], filename)
     except Exception:  # noqa: BLE001 - nazwa to wygoda, nie warunek pobrania
         filename = R.clip_filename(clip.get("title"), None, float(clip["start_s"]))
     url = presign_get(key, DOWNLOAD_TTL, filename)
