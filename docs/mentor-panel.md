@@ -494,3 +494,32 @@ Jeden na mecz, po ostatniej próbie: najwcześniej start + 2 h (nigdy w trakcie 
 - `target` pusha to `match` (kontrakt: "jak istniejące pushe otwierające mecz pary"; te używają `sheet`/`clip`/`thread` z `matchId`, osobnego celu `match` nie było). Klient bez obsługi `match` powinien otworzyć pokój meczu po `matchId`.
 - Mecze bez godziny w obsadzie ZPRP nie są obsługiwane (brak punktu odniesienia dla prób).
 - `accept` po `undo` przywraca TO SAMO nagranie z kosza (ten sam `video_id`), zamiast tworzyć nowe.
+
+
+## 10. Pobieranie klipów (30.10.2026)
+Rozwinięcie istniejącego przepływu MP4 („Ciemnia”), bez drugiego systemu. Kod: `app/mentor_clip_download.py` (trasy, plan, zamówienie, plansza), `app/mentor_clip_download_rules.py` (reguły czyste: przeliczenie czasu, wybór źródła, nazwy, limit paczki). Decyzje właściciela: pamięć `pobieranie-klipow-decyzje`.
+
+### 10.1 Źródło i przeliczenie czasu
+- Klip na własnym pliku (`kind=upload`) albo na nagraniu Bastionu: jak dotąd, bez synchronizacji.
+- Klip na wideo-linku (YouTube/Vimeo): zakres przeliczamy na drugie nagranie meczu. Synchronizacja to istniejące `mentor_match_videos.sync_json` (`clean_sync`): `match_start_s` = sekunda pierwszego gwizdka, `second_half_s` = sekunda początku II połowy. Nie ma osobnej kalibracji. Obie kotwice muszą być ustawione na OBU nagraniach (źródle i docelowym).
+- Przesunięcie liczone per połowa: `cel.match_start_s - zrodlo.match_start_s` do początku II połowy źródła, od niej `cel.second_half_s - zrodlo.second_half_s`. Wynik nie schodzi poniżej 0; zakres krótszy niż 0,5 s po przeliczeniu to `BAD_RANGE`.
+- Kolejność źródeł: własny plik, potem Bastion (Bastion tylko przy `BASTION_ENABLED`). Pierwsze zsynchronizowane i gotowe wygrywa; gdy żadne nie jest zsynchronizowane, `missing` dotyczy tego, któremu brakuje najmniej gwizdków (remis: plik).
+
+### 10.2 `GET /mentor-panel/clips/{clip_id}/download-plan?title_card=false`
+Pola: `clip_id`, `can_download`, `source` (`file`/`bastion`/`null`), `reason` (`null`/`NEED_SYNC`/`NO_SOURCE`/`NOT_READY`/`BAD_RANGE`), `missing` (`[{video_id, label, whistle: "start"|"second_half"}]`, tylko przy `NEED_SYNC`), `hint` (zdanie po polsku), `mp4_status` (`none`/`queued`/`working`/`ready`/`failed`; z `title_card=true` dotyczy wariantu z planszą), `url` (podpisany adres pobrania albo `null`), `estimated_s` (plik 12 s, Bastion 90 s, plansza +8 s), `filename`, `folder` (`{match, category}`), `title_card_available`, `title_card`, `card_signature`, `source_range` (`{video_id, start_s, end_s}` po przeliczeniu).
+- `filename`: `26m23 Kara 2 min - czerwona.mp4` (minuta meczu z protokołu `match_ms`, inaczej z synchronizacji nagrania klipu, inaczej sam czas nagrania). `folder.match`: `2026-10-10 AGH Kraków - Gwardia (LCM-32)`. `folder.category`: pierwsza kategoria klipu, inaczej `Do dyskusji` / `Istotne` / `Bez kategorii`. Wszystko oczyszczone ze znaków zakazanych (`<>:"/\|?*`), długich myślników, końcowych kropek; polskie litery zostają (nagłówek pobrania niesie też `filename*` RFC 5987).
+- `reason=BAD_RANGE` (poza planem z zamówienia): zakres poza limitem Bastionu (2 do 300 s) albo poza nagraniem docelowym.
+
+### 10.3 `POST /mentor-panel/clips/{clip_id}/mp4` (body opcjonalny `{title_card: bool}`)
+Bez body działa jak dotąd (odpowiedź `{mp4_status}` bez zmian). Błędy: 409 `NEED_SYNC` (+ `missing`, na wierzchu odpowiedzi), 409 `NO_SOURCE` (zamiast dawnego `MP4_LINK_VIDEO`), 409 `MP4_NOT_READY`, 422 `CLIP_RANGE`. Plik źródłowy: kolejka ffmpeg tnie przeliczony zakres (`mentor_clips.mp4_source_json`). Bastion: zadanie z przeliczonym zakresem; zmiana synchronizacji zmienia zakres, więc rośnie `media_rev` i powstaje nowe zadanie (stary wynik nie nadpisze nowego). `GET /clips/{id}/mp4?title_card=true` oddaje wariant z planszą (409 `MP4_NOT_READY`, dopóki go nie ma); nazwa pliku jak w planie.
+
+### 10.4 Plansza tytułowa
+MP4 Bastionu powstaje w BACKENDZIE (connector tnie, backend pobiera, sprawdza i wgrywa do R2), więc ffmpeg na wyniku jest wykonalny (`title_card_available` = magazyn gotowy). Wariant z planszą to osobny plik `card_key` (kolumny `card_status/card_key/card_size/card_sig` w `mentor_clips`), robiony przez kolejkę mediów (`mentor_panel_media`, 1 praca naraz) PO gotowym zwykłym MP4: 2 s planszy (Pillow, font Noto Sans: mecz, minuta, tytuł, kategoria) + klip, sklejone filtrem concat w rozmiarze klipu. Zwykły plik zostaje nietknięty. `card_sig` to odcisk treści planszy: zmiana tytułu/kategorii unieważnia wariant w planie (`mp4_status` wraca do `none`, kolejne zamówienie robi nowy).
+
+### 10.5 `POST /mentor-panel/pairs/{pair_id}/clips/download-batch` (`{clip_ids[] | match_id, title_card}`)
+Do 50 klipów. Zamiast `clip_ids` można podać `match_id`: wtedy wchodzą wszystkie nieusunięte klipy meczu tej pary, wg czasu w nagraniu („Pobierz wszystkie klipy meczu”); puste wejście to 422 `NO_CLIPS`. Odpowiedź `{items: [...]}`: każdy element to plan jak w 10.2 plus `ordered` (czy zamówiono teraz). Zamawia każdy możliwy, reszta wraca z powodem (`NEED_SYNC`, `NO_SOURCE`, `NOT_READY`, `BAD_RANGE`, `NOT_FOUND`, `QUEUE_LIMIT`). Limit kolejki Bastionu: łącznie 12 aktywnych zadań na użytkownika (`BASTION_ACTIVE_CAP`); pliki, klipy gotowe i już zamówione nie liczą się do limitu. Błąd jednego klipu nie wstrzymuje paczki.
+
+### 10.6 Odstępstwa
+- Dodatkowy powód `BAD_RANGE` (poza listą z kontraktu) i `QUEUE_LIMIT` (tylko paczka).
+- Wariant z planszą powstaje w kolejce mediów, która sprawdza bazę co 30 s; gdy zwykły MP4 z Bastionu skończy się później, plansza dojdzie przy najbliższym przebiegu (do ok. 30 s).
+- Dla klipu na linku `media` klipu (blok Bastionu) pozostaje `null`; stan pobierania czytaj z planu.

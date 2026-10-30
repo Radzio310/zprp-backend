@@ -94,6 +94,20 @@ def object_key(*parts: str) -> str:
     return "/".join([storage_config()["prefix"], *[str(p).strip("/") for p in parts]])
 
 
+def _disposition(filename: str) -> str:
+    """Nagłówek pobrania; nazwa z polskimi literami idzie też w formie RFC 5987 (`filename*`)."""
+    from urllib.parse import quote
+
+    try:
+        filename.encode("ascii")
+        return f'attachment; filename="{filename}"'
+    except UnicodeEncodeError:
+        import unicodedata
+
+        ascii_name = unicodedata.normalize("NFKD", filename.replace("ł", "l").replace("Ł", "L")).encode("ascii", "ignore").decode() or "klip.mp4"
+        return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
+
+
 def presign_get(key: Optional[str], expires: int = PLAY_URL_TTL, filename: Optional[str] = None) -> Optional[str]:
     if not key:
         return None
@@ -101,7 +115,7 @@ def presign_get(key: Optional[str], expires: int = PLAY_URL_TTL, filename: Optio
         config = storage_config()
         params: Dict[str, Any] = {"Bucket": config["bucket"], "Key": key}
         if filename:
-            params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
+            params["ResponseContentDisposition"] = _disposition(filename)
             params["ResponseContentType"] = "video/mp4"
         return s3_client(config).generate_presigned_url("get_object", Params=params, ExpiresIn=expires)
     except Exception:  # noqa: BLE001 - brak magazynu = brak odtwarzania, nie błąd ekranu
@@ -500,56 +514,70 @@ async def _clip_upload(clip: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return await C.one(select(mentor_uploads).where(mentor_uploads.c.id == video["upload_id"]))
 
 
-@router.post("/clips/{clip_id}/mp4")
-async def request_mp4(clip_id: str, actor: Actor = Depends(mentor_actor)):
-    clip = await C.one(select(mentor_clips).where(mentor_clips.c.id == clip_id))
-    if not clip or clip.get("deleted_at") is not None:
-        raise C.err(404, "NOT_FOUND", "Nie ma takiego klipu.")
-    ctx = await C.pair_context(clip["pair_id"], actor, action="create")
-    upload = await _clip_upload(clip)
-    if not upload:
-        from app import mentor_bastion_jobs as J
+class Mp4Request(BaseModel):
+    title_card: bool = False
 
-        video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == clip["video_id"])) or {}
-        if J.bastion_item_of(video):
-            from app.mentor_bastion import order_mp4
 
-            return await order_mp4(ctx, clip, video, actor)  # Bastion: zamówienie MP4 przez kolejkę (etap 4)
-        raise C.err(409, "MP4_LINK_VIDEO", "Plik MP4 robimy tylko z własnych nagrań. Klip z YouTube/Vimeo odtwarzasz w panelu.")
-    if upload.get("status") != "ready" or not upload.get("play_key"):
+async def queue_clip_file(ctx: Dict[str, Any], clip: Dict[str, Any], actor: Actor, source: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """MP4 z własnego pliku do kolejki ffmpeg. `source` = {video_id, start_s, end_s} przy klipie przeliczonym z innego nagrania
+    (wideo-link); None = klip leży na tym pliku. Zmiana źródła unieważnia gotowy plik i wariant z planszą."""
+    if source:
+        video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == source["video_id"]))
+        upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == video["upload_id"])) if video and video.get("upload_id") else None
+    else:
+        upload = await _clip_upload(clip)
+    if not upload or upload.get("status") != "ready" or not upload.get("play_key"):
         raise C.err(409, "MP4_NOT_READY", "Nagranie jeszcze się przetwarza - spróbuj za chwilę.")
     _storage_or_503()
-    if clip.get("mp4_status") in ("queued", "working", "ready"):
+    same = (R.json_value(clip.get("mp4_source_json"), {}) or None) == source
+    if clip.get("mp4_status") in ("queued", "working", "ready") and same:
         return {"mp4_status": clip["mp4_status"]}
-    await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip_id).values(mp4_status="queued"))
-    await C.touch(ctx, actor.judge_id, "clip_mp4", "clips", clip["match_id"], {"id": clip_id})
+    values: Dict[str, Any] = {"mp4_status": "queued", "mp4_source_json": json.dumps(source) if source else None}
+    if not same:
+        values.update(card_status="none", card_sig=None)
+    await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip["id"]).values(**values))
+    await C.touch(ctx, actor.judge_id, "clip_mp4", "clips", clip["match_id"], {"id": clip["id"]})
     wake_worker()
     return {"mp4_status": "queued"}
 
 
-@router.get("/clips/{clip_id}/mp4")
-async def download_mp4(clip_id: str, actor: Actor = Depends(mentor_actor)):
+@router.post("/clips/{clip_id}/mp4")
+async def request_mp4(clip_id: str, actor: Actor = Depends(mentor_actor), body: Optional[Mp4Request] = None):
+    """Zamów MP4. Źródło rozstrzyga `mentor_clip_download`: własny plik, Bastion albo (dla klipu z wideo-linku) przeliczony
+    zakres z synchronizacji nagrań. Brak synchronizacji = 409 NEED_SYNC z `missing`, sam link = 409 NO_SOURCE.
+    `title_card: true` dokłada osobny wariant z planszą (2 s)."""
     clip = await C.one(select(mentor_clips).where(mentor_clips.c.id == clip_id))
     if not clip or clip.get("deleted_at") is not None:
         raise C.err(404, "NOT_FOUND", "Nie ma takiego klipu.")
-    await C.pair_context(clip["pair_id"], actor)
+    ctx = await C.pair_context(clip["pair_id"], actor, action="create")
+    from app import mentor_clip_download as D
+
+    return await D.order(ctx, clip, actor, bool(body and body.title_card))
+
+
+@router.get("/clips/{clip_id}/mp4")
+async def download_mp4(clip_id: str, actor: Actor = Depends(mentor_actor), title_card: bool = Query(False)):
+    clip = await C.one(select(mentor_clips).where(mentor_clips.c.id == clip_id))
+    if not clip or clip.get("deleted_at") is not None:
+        raise C.err(404, "NOT_FOUND", "Nie ma takiego klipu.")
+    ctx = await C.pair_context(clip["pair_id"], actor)
     if clip.get("mp4_status") != "ready" or not clip.get("mp4_key"):
         raise C.err(409, "MP4_NOT_READY", "Plik MP4 tego klipu nie jest gotowy.")
-    card = None
-    try:
-        from app.mentoring_rules import json_value
-        from app.db import mentoring_pairs
+    key, size = clip["mp4_key"], clip.get("mp4_size")
+    if title_card:
+        if clip.get("card_status") != "ready" or not clip.get("card_key"):
+            raise C.err(409, "MP4_NOT_READY", "Wariant z planszą nie jest jeszcze gotowy.")
+        key, size = clip["card_key"], clip.get("card_size")
+    from app import mentor_clip_download as D
 
-        pair = await C.one(select(mentoring_pairs.c.judge_ids).where(mentoring_pairs.c.id == clip["pair_id"]))
-        cards = await C.pair_match_cards(json_value((pair or {}).get("judge_ids"), []))
-        card = next((c for c in cards if c["match_id"] == clip["match_id"]), None)
-    except Exception:  # noqa: BLE001
-        card = None
-    filename = R.clip_filename(clip.get("title"), (card or {}).get("match_code"), float(clip["start_s"]))
-    url = presign_get(clip["mp4_key"], DOWNLOAD_TTL, filename)
+    try:
+        filename = (await D.build_plan(D.Context(ctx), clip, actor, title_card=title_card))["filename"]
+    except Exception:  # noqa: BLE001 - nazwa to wygoda, nie warunek pobrania
+        filename = R.clip_filename(clip.get("title"), None, float(clip["start_s"]))
+    url = presign_get(key, DOWNLOAD_TTL, filename)
     if not url:
         raise C.err(503, "STORAGE_OFF", "Magazyn nagrań jest chwilowo niedostępny.")
-    return {"url": url, "filename": filename, "size": clip.get("mp4_size")}
+    return {"url": url, "filename": filename, "size": size}
 
 
 # ─── Kolejka ffmpeg (1 naraz) ───────────────────────────────────────────────
@@ -661,7 +689,14 @@ class UserFacingError(ValueError):
 
 
 async def process_clip(clip: Dict[str, Any]) -> None:
-    upload = await _clip_upload(clip)
+    start_s, end_s = float(clip["start_s"]), float(clip["end_s"])
+    override = R.json_value(clip.get("mp4_source_json"), {})
+    if override.get("video_id"):  # klip z wideo-linku, przeliczony na własny plik
+        video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == override["video_id"]))
+        upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == video["upload_id"])) if video and video.get("upload_id") else None
+        start_s, end_s = float(override["start_s"]), float(override["end_s"])
+    else:
+        upload = await _clip_upload(clip)
     if not upload or upload.get("status") != "ready" or not upload.get("play_key"):
         raise ValueError("Nagranie klipu nie jest jeszcze gotowe.")
     await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip["id"]).values(mp4_status="working"))
@@ -669,7 +704,7 @@ async def process_clip(clip: Dict[str, Any]) -> None:
     folder = await asyncio.to_thread(_tmpdir)
     try:
         target = os.path.join(folder, "clip.mp4")
-        done = await asyncio.to_thread(_run, R.cut_args(source, target, float(clip["start_s"]), float(clip["end_s"])), 1800)
+        done = await asyncio.to_thread(_run, R.cut_args(source, target, start_s, end_s), 1800)
         if done.returncode != 0 or not os.path.exists(target):
             raise RuntimeError(f"ffmpeg: {done.stderr[-400:]}")
         key = object_key(clip["pair_id"], "clips", f"{clip['id']}.mp4")
@@ -687,6 +722,11 @@ async def next_job() -> Optional[Tuple[str, Dict[str, Any]]]:
                        .order_by(mentor_clips.c.updated_at.asc()).limit(1))
     if clip:
         return "clip", clip
+    from app import mentor_clip_download as D
+
+    card = await D.next_card()
+    if card and card["id"] not in _failed_here:
+        return "card", card
     upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.status == "processing")
                          .where(mentor_uploads.c.id.notin_(list(_failed_here) or [""]))
                          .order_by(mentor_uploads.c.created_at.asc()).limit(1))
@@ -701,12 +741,18 @@ async def process_next() -> bool:
     try:
         if kind == "clip":
             await process_clip(row)
+        elif kind == "card":
+            from app import mentor_clip_download as D
+
+            await D.process_card(row)
         else:
             await process_upload(row)
     except Exception as exc:  # noqa: BLE001 - jedna zła praca nie zatrzymuje kolejki
         logger.warning("mentor: praca %s %s nieudana: %s", kind, row["id"], exc, exc_info=True)
         _failed_here.add(row["id"])
-        if kind == "clip":
+        if kind == "card":
+            await database.execute(update(mentor_clips).where(mentor_clips.c.id == row["id"]).values(card_status="failed"))
+        elif kind == "clip":
             await database.execute(update(mentor_clips).where(mentor_clips.c.id == row["id"]).values(mp4_status="failed"))
             await C.touch(row["pair_id"], row["author_id"], "clip_mp4_failed", "clips", row["match_id"], {"id": row["id"]})
         else:

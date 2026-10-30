@@ -497,8 +497,8 @@ def test_wgrywanie_transkodowanie_i_mp4(env, monkeypatch, tmp_path):
     assert video["playable"] and video["play_url"].endswith("/play.mp4?part=None") and video["poster_url"]
     assert video["provider"] == "upload" and video["duration_s"] == 3600.0
     assert ("upload", create["Key"].rsplit("/", 1)[0] + "/play.mp4") in s3.calls
-    assert link_mp4 == (409, "MP4_LINK_VIDEO") and queued == {"mp4_status": "queued"} and not_ready == (409, "MP4_NOT_READY")
-    assert download["filename"].endswith("01-00.mp4") and download["size"] == len(b"clip-bytes")
+    assert link_mp4 == (409, "NEED_SYNC") and queued == {"mp4_status": "queued"} and not_ready == (409, "MP4_NOT_READY")
+    assert download["filename"].startswith("1m00 ") and download["filename"].endswith(".mp4") and download["size"] == len(b"clip-bytes")
     assert any(c[0] == "sign" and c[3] and "attachment" in c[3] for c in s3.calls)
     assert idle is False
 

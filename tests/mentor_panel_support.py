@@ -26,7 +26,7 @@ from app.zprp_public_tables import define_tables as define_public
 
 MODULES = (
     "app.mentor_panel", "app.mentor_panel_core", "app.mentor_panel_auth", "app.mentor_panel_library",
-    "app.mentor_panel_media", "app.mentor_panel_reports", "app.mentor_panel_notify", "app.mentor_evaluations",
+    "app.mentor_panel_media", "app.mentor_clip_download", "app.mentor_panel_reports", "app.mentor_panel_notify", "app.mentor_evaluations",
     "app.mentor_panel_handoff", "app.mentor_bastion", "app.mentor_bastion_jobs", "app.mentor_bastion_client",
     "app.mentoring", "app.proel_auth", "app.streams.store", "app.streams.worker", "app.mentor_panel_streams", "app.mentor_video_trash",
     "app.mentor_bastion_search", "app.mentor_trybuna", "app.mentor_trybuna_rules", "app.mentor_trybuna_feed", "app.mentor_trybuna_thumbs", "app.mentor_trybuna_rank", "app.mentor_trybuna_suggest",
@@ -121,6 +121,7 @@ class Env:
         self.auth = importlib.import_module("app.mentor_panel_auth")
         self.library = importlib.import_module("app.mentor_panel_library")
         self.media = importlib.import_module("app.mentor_panel_media")
+        self.download = importlib.import_module("app.mentor_clip_download")
         self.reports = importlib.import_module("app.mentor_panel_reports")
         self.notify = importlib.import_module("app.mentor_panel_notify")
         self.bastion = importlib.import_module("app.mentor_bastion")

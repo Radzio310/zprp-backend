@@ -104,6 +104,13 @@ def define_tables(metadata):
         Column("to_discuss", Boolean, nullable=True, server_default=text("false")),
         #: Rewizja pliku klipu (Bastion, etap 4): rośnie przy zmianie zakresu; wynik starej rewizji nie liczy się dla nowej.
         Column("media_rev", Integer, nullable=False, server_default=text("1")),
+        #: Pobieranie (30.10.2026): źródło MP4 przeliczone z innego nagrania meczu {video_id, start_s, end_s} (JSON).
+        Column("mp4_source_json", Text, nullable=True),
+        #: Osobny wariant pliku z planszą tytułową (2 s): none | queued | working | ready | failed.
+        Column("card_status", String, nullable=False, server_default=text("'none'")),
+        Column("card_key", String, nullable=True),
+        Column("card_size", BigInteger, nullable=True),
+        Column("card_sig", String, nullable=True),
     )
     Index("ix_mentor_clips_pair_match", clips.c.pair_id, clips.c.match_id)
     Index("ix_mentor_clips_pair_created", clips.c.pair_id, clips.c.created_at)
@@ -335,6 +342,11 @@ MIGRATIONS = (
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS important BOOLEAN DEFAULT false",
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS to_discuss BOOLEAN DEFAULT false",
+    "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS mp4_source_json TEXT",
+    "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS card_status VARCHAR NOT NULL DEFAULT 'none'",
+    "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS card_key VARCHAR",
+    "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS card_size BIGINT",
+    "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS card_sig VARCHAR",
     "ALTER TABLE mentor_compilations ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_threads ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_comments ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
