@@ -538,7 +538,7 @@ async def sheets(pair_id: str, season: str = Query("", max_length=20), actor: Ac
 
 # ─── Zmiany na żywo i obecność ──────────────────────────────────────────────
 
-ALL_SCOPES = ["matches", "clips", "threads", "compilations", "sheets", "videos", "categories", "reports", "panel"]
+ALL_SCOPES = ["matches", "clips", "threads", "compilations", "sheets", "videos", "categories", "reports", "panel", "drive"]
 
 
 @router.get("/pairs/{pair_id}/changes")

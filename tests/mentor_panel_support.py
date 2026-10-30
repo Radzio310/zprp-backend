@@ -17,6 +17,7 @@ from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, String, Table, 
 
 from app.mentor_auto_found_tables import define_tables as define_auto_found
 from app.mentor_bastion_tables import define_tables as define_bastion
+from app.mentor_drive_tables import define_tables as define_drive
 from app.mentor_evaluation_tables import define_tables as define_evaluations
 from app.mentor_panel_tables import define_tables as define_panel
 from app.mentor_trybuna_tables import define_tables as define_trybuna
@@ -31,6 +32,7 @@ MODULES = (
     "app.mentoring", "app.proel_auth", "app.streams.store", "app.streams.worker", "app.mentor_panel_streams", "app.mentor_video_trash",
     "app.mentor_bastion_search", "app.mentor_trybuna", "app.mentor_trybuna_rules", "app.mentor_trybuna_feed", "app.mentor_trybuna_thumbs", "app.mentor_trybuna_rank", "app.mentor_trybuna_suggest",
     "app.delegate_sharing", "app.mentor_auto_found", "app.mentor_auto_found_rules",
+    "app.mentor_drive", "app.mentor_drive_google",
 )
 
 PAIR = "pair-1"
@@ -86,6 +88,8 @@ class Env:
             tables[table.name] = table
         for table in define_auto_found(metadata):
             tables[table.name] = table
+        for table in define_drive(metadata):
+            tables[table.name] = table
         for table in define_public(metadata):
             tables[table.name] = table
         for table in define_streams(metadata):
@@ -133,6 +137,8 @@ class Env:
         self.trybuna_suggest = importlib.import_module("app.mentor_trybuna_suggest")
         self.auto_found = importlib.import_module("app.mentor_auto_found")
         self.auto_rules = importlib.import_module("app.mentor_auto_found_rules")
+        self.drive = importlib.import_module("app.mentor_drive")
+        self.drive_google = importlib.import_module("app.mentor_drive_google")
         self.sent = []
 
         async def fake_notify(ctx, actor_id, title, body, **kwargs):
