@@ -63,6 +63,8 @@ def _row(index: int, result: RA.Result, polyline: bool) -> dict:
         "status": result.status,
         "km": round(result.km, 1) if ok else None,
         "polyline": (result.encoded or None) if (ok and polyline) else None,
+        "default_km": round(result.default_km, 1) if (ok and result.default_km) else None,
+        "default_polyline": (result.default_encoded or None) if (ok and result.default_km and polyline) else None,
         "source": result.source or None,
         "measured_at": result.measured_at.isoformat() if result.measured_at else None,
         "reason": result.reason or None,

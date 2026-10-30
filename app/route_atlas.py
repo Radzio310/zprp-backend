@@ -54,6 +54,9 @@ class Result:
     encoded: str = ""
     source: str = ""
     measured_at: Optional[datetime] = None
+    #: trasa "Domyslna"; None = brak (stary wpis) - klient liczy ja sam
+    default_km: Optional[float] = None
+    default_encoded: str = ""
     #: "cached" | "measured" | "same" | "stale" | "missing"
     status: str = "missing"
     #: gdy missing: "invalid" | "no_route" | "retry_later" | "budget" | "no_key" | "error"
@@ -103,6 +106,9 @@ class _Outcome:
     encoded: str
     #: "ok" | "no_route" | "transient" | "no_key"
     kind: str
+    #: trasa domyslna z pierwszego zapytania werdyktu (None = nie wiemy)
+    default_km: Optional[float] = None
+    default_encoded: str = ""
 
 
 def _query(endpoint: Endpoint, *, with_region: bool) -> str:
@@ -124,11 +130,15 @@ async def _google_measure(pair: Pair, client: Any) -> _Outcome:
     pb = R.valid_point(b.lat, b.lon) or b.hint
     origin = _query(a, with_region=False) or (f"{pa[0]},{pa[1]}" if pa else "")
     destination = _query(b, with_region=True) or (f"{pb[0]},{pb[1]}" if pb else "")
-    km, encoded, definitive = await SD.google_route_verdict(
+    km, encoded, definitive, default = await SD.google_route_full(
         client, origin, destination, a.region, pa, pb
     )
     if km is not None:
-        return _Outcome(km, encoded or "", "ok")
+        return _Outcome(
+            km, encoded or "", "ok",
+            default_km=default[0] if default else None,
+            default_encoded=(default[1] or "") if default else "",
+        )
     return _Outcome(None, "", "no_route" if definitive else "transient")
 
 
@@ -292,6 +302,8 @@ def _from_row(key: str, row: dict, status: str) -> Result:
         encoded=row.get("encoded") or "",
         source=row.get("source") or "",
         measured_at=row.get("measured_at"),
+        default_km=float(row["default_km"]) if row.get("default_km") else None,
+        default_encoded=row.get("default_polyline") or "",
         status=status,
     )
 
@@ -310,6 +322,8 @@ async def _settle(
             "km": float(outcome.km),
             "encoded": encoded,
             "source": R.SOURCE_MEASURED,
+            "default_km": float(outcome.default_km) if outcome.default_km else None,
+            "default_polyline": (outcome.default_encoded or None) if outcome.default_km else None,
             "measured_at": now,
         }
         try:
@@ -323,6 +337,7 @@ async def _settle(
         return Result(
             key=key, km=row["km"], encoded=encoded, source=R.SOURCE_MEASURED,
             measured_at=now, status="measured",
+            default_km=row["default_km"], default_encoded=row["default_polyline"] or "",
         )
     reason = {"no_route": "no_route", "no_key": "no_key"}.get(outcome.kind, "error")
     if outcome.kind in ("no_route", "transient"):
@@ -354,13 +369,15 @@ class DbStore:
         out: dict[str, dict] = {}
         for start in range(0, len(keys), CHUNK):
             rows = await database.fetch_all(
-                select(T.c.pair_key, T.c.km, T.c.encoded, T.c.source, T.c.measured_at)
+                select(T.c.pair_key, T.c.km, T.c.encoded, T.c.source, T.c.measured_at,
+                       T.c.default_km, T.c.default_polyline)
                 .where(T.c.pair_key.in_(keys[start:start + CHUNK]))
             )
             for r in rows:
                 out[r["pair_key"]] = {
                     "km": r["km"], "encoded": r["encoded"], "source": r["source"],
                     "measured_at": r["measured_at"],
+                    "default_km": r["default_km"], "default_polyline": r["default_polyline"],
                 }
         return out
 

@@ -4840,6 +4840,8 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS deleted_at timestamptz"))
     _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS deleted_by varchar"))
     _conn.execute(text("ALTER TABLE admin_settings ADD COLUMN IF NOT EXISTS allow_dev_pushes boolean NOT NULL DEFAULT false"))
+    _conn.execute(text("ALTER TABLE route_atlas ADD COLUMN IF NOT EXISTS default_km double precision"))
+    _conn.execute(text("ALTER TABLE route_atlas ADD COLUMN IF NOT EXISTS default_polyline text"))
     _conn.execute(text("ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS app_id varchar"))
     _conn.execute(text("ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS app_version varchar"))
     _conn.execute(text("ALTER TABLE push_schedules ADD COLUMN IF NOT EXISTS dedupe_key varchar"))

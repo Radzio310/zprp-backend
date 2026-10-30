@@ -268,3 +268,68 @@ async def test_endpoint_kontrakt_i_limity():
     only_read = AR.RoutesIn.model_validate({"pairs": [{"from": {"name": "X"}, "to": {"name": "Y"}}], "measure": False})
     out = await AR.run(only_read, store=store, measure=measure)
     assert out["routes"][0]["reason"] == "budget" and len(calls) == 1
+
+
+# --- trasa domyslna ---------------------------------------------------------
+
+def test_domyslna_to_pierwsza_trasa_pierwszego_zapytania(monkeypatch):
+    from app import settlement_distances as SD
+
+    monkeypatch.setattr(SD, "GOOGLE_MAPS_API_KEY", "k")
+    calls = []
+
+    def route(m, pts):
+        return {"legs": [{"distance": {"value": m}}], "overview_polyline": {"points": pts}}
+
+    class Resp:
+        def __init__(self, routes):
+            self.status_code = 200
+            self._d = {"status": "OK", "routes": routes}
+
+        def json(self):
+            return self._d
+
+    class Client:
+        async def get(self, url, params=None):
+            calls.append(params)
+            if params["avoid"] == "tolls" and "departure_time" not in params:
+                return Resp([route(102300, "DEF"), route(110000, "ALT")])
+            if "departure_time" in params and params["avoid"] == "tolls":
+                return Resp([route(98000, "SHORT")])
+            return Resp([route(120000, "OTHER")])
+
+    km, enc, definitive, default = asyncio.run(SD.google_route_full(Client(), "A", "B"))
+    assert (km, enc, definitive) == (98.0, "SHORT", False)
+    assert default == (102.3, "DEF")
+    assert len(calls) == 4  # zero dodatkowych zapytan
+
+
+@pytest.mark.asyncio
+async def test_endpoint_oddaje_trase_domyslna_i_stare_wpisy_bez_niej():
+    from app import atlas_routes as AR
+
+    async def measure(pair, client):
+        return RA._Outcome(98.0, "S", "ok", default_km=102.3, default_encoded="D")
+
+    store = MemStore()
+    body = AR.RoutesIn.model_validate({"pairs": [{"from": {"name": "Gliwice"}, "to": {"name": "Zabrze"}}]})
+    row = (await AR.run(body, store=store, measure=measure))["routes"][0]
+    assert row["default_km"] == 102.3 and row["default_polyline"] == "D"
+    assert store.rows[row_key(store)]["default_km"] == 102.3
+
+    cached = (await AR.run(body, store=store, measure=measure))["routes"][0]
+    assert cached["status"] == "cached" and cached["default_km"] == 102.3
+
+    no_poly = AR.RoutesIn.model_validate({
+        "pairs": [{"from": {"name": "Gliwice"}, "to": {"name": "Zabrze"}}], "polyline": False})
+    r = (await AR.run(no_poly, store=store, measure=measure))["routes"][0]
+    assert r["default_km"] == 102.3 and r["default_polyline"] is None
+
+    key = row_key(store)
+    store.rows[key].pop("default_km"); store.rows[key].pop("default_polyline")
+    old = (await AR.run(body, store=store, measure=measure))["routes"][0]
+    assert old["km"] == 98.0 and old["default_km"] is None and old["default_polyline"] is None
+
+
+def row_key(store):
+    return next(iter(store.rows))

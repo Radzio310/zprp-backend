@@ -327,7 +327,28 @@ async def google_route_verdict(
     origin_point: Optional[tuple[float, float]] = None,
     destination_point: Optional[tuple[float, float]] = None,
 ) -> tuple[Optional[float], str, bool]:
+    """Patrz `google_route_full` (tu bez trasy domyslnej)."""
+    km, encoded, definitive, _ = await google_route_full(
+        client, origin, destination, origin_region, origin_point, destination_point
+    )
+    return km, encoded, definitive
+
+
+async def google_route_full(
+    client: Any,
+    origin: str,
+    destination: str,
+    origin_region: str = "",
+    origin_point: Optional[tuple[float, float]] = None,
+    destination_point: Optional[tuple[float, float]] = None,
+) -> tuple[Optional[float], str, bool, Optional[tuple[float, str]]]:
     """
+    Czwarty element: trasa DOMYSLNA (km, geometria) albo None = pierwsza trasa
+    odpowiedzi na zapytanie "z autostradami, bez ruchu" (avoid=tolls,
+    alternatives=true) - dokladnie to, co aplikacja dociagala osobnym zapytaniem
+    (`directionsRoutes(.., {})[0]`). To pierwsze z czterech zapytan werdyktu,
+    wiec nie kosztuje nic ekstra.
+
     (km, geometria, trasy_nie_ma). Trzeci element jest True TYLKO wtedy, gdy
     KAZDY wariant zapytania zwrocil ZERO_RESULTS/NOT_FOUND. Wyjatek, timeout,
     limit zapytan, odmowa klucza i blad HTTP to "nie wiemy", nie "nie ma".
@@ -344,7 +365,7 @@ async def google_route_verdict(
     nazwą, gdy nazwa jest jednoznaczna.
     """
     if not GOOGLE_MAPS_API_KEY or not origin or not destination:
-        return None, "", False
+        return None, "", False, None
     start = (
         f"{origin_point[0]},{origin_point[1]}" if origin_point
         else f"{origin}, {origin_region}, Polska" if origin_region else f"{origin}, Polska"
@@ -360,9 +381,11 @@ async def google_route_verdict(
     )
     values = [item for routes, _ in answers for item in routes]
     if not values:
-        return None, "", all(status in DEFINITIVE_NO_ROUTE for _, status in answers)
+        return None, "", all(status in DEFINITIVE_NO_ROUTE for _, status in answers), None
     km, encoded = min(values, key=lambda item: item[0])
-    return round(km, 1), encoded, False
+    first = answers[0][0]
+    default = (round(first[0][0], 1), first[0][1]) if first else None
+    return round(km, 1), encoded, False, default
 
 
 async def google_distance(

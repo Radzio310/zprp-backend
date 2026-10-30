@@ -22,6 +22,10 @@ def define_tables(metadata: MetaData) -> tuple[Table, Table]:
         Column("km", Float, nullable=False),
         Column("encoded", Text, nullable=True),
         Column("source", String, nullable=False),
+        # Trasa "Domyslna" (pierwsza odpowiedz Directions z autostradami, bez ruchu);
+        # NULL = wpis sprzed tej kolumny albo pomiar bez niej.
+        Column("default_km", Float, nullable=True),
+        Column("default_polyline", Text, nullable=True),
         Column("measured_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("uses", Integer, nullable=False, server_default="0"),
         Column("last_used_at", DateTime(timezone=True), nullable=True),
