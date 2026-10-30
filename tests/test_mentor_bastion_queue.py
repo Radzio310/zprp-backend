@@ -26,6 +26,7 @@ class FakeConnector:
         self.create_mode = "ok"  # ok | 202 | down
         self.state_mode = "ok"  # ok | auth
         self.ready = True
+        self.download_status = 200
         self.match = {"home": "SPR Gliwice", "away": "KS Opole", "zprp_match_id": "m1"}
         self.playback_params = {}
 
@@ -49,6 +50,8 @@ class FakeConnector:
             return httpx.Response(200, json={"ready": self.ready, "download_available": self.ready})
         if path == "/clips/77/download-url" and method == "POST":
             self.download_calls += 1
+            if self.download_status != 200:
+                return httpx.Response(self.download_status, json={"error": "BOOM_REMOTE"})
             return httpx.Response(200, json={"url": "https://vz.b-cdn.net/f.mp4?token=SEKRET", "host": "vz.b-cdn.net"})
         return httpx.Response(404, json={"error": "NOT_FOUND"})
 
@@ -694,3 +697,98 @@ def test_licznik_developing_liczy_biezaca_rewizje_w_toku_bez_usunietych_i_gotowy
     # c2: stare zadanie (rewizja 1 przy media_rev 2), c3: gotowy, c4: usunięty
     assert sorted(on["clip_ids"]) == ["c5", "clip1"] and on["count"] == 2
     assert off == 404
+
+
+def test_wyczerpane_proby_zostawiaja_prawdziwy_ostatni_kod_i_gaszą_plansze(q):
+    async def go():
+        conn = await seed(q)
+        await q.core.database.execute(q.T["mentor_clips"].update().values(card_status="queued", mp4_status="none"))
+        await make_job(q, conn)
+        q.fake.download_status = 500
+        await drive(q, rounds=14)
+        return await job_of(q), await clip_of(q)
+
+    job, clip = q.run(go)
+    assert job["state"] == "failed" and job["last_error_code"] == "BASTION_RETRIES_EXHAUSTED"
+    note = job["last_error_message"]
+    assert note.startswith("BASTION_RETRIES_EXHAUSTED po: BASTION_UNAVAILABLE (HTTP 500, kod BOOM_REMOTE")
+    assert "SEKRET" not in note and "http" not in note
+    assert clip["card_status"] == "failed"  # plansza nie zostaje w kolejce na zawsze
+
+
+def test_retry_loguje_kod_i_szczegol_bez_adresu(q, caplog):
+    async def go():
+        conn = await seed(q)
+        await make_job(q, conn)
+        q.fake.download_status = 503
+        await q.bastion_jobs.run_once("w1", client=q.client)
+        return await job_of(q)
+
+    with caplog.at_level("WARNING"):
+        job = q.run(go)
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "BASTION_UNAVAILABLE" in text and "HTTP 503" in text and "BOOM_REMOTE" in text and job["id"] in text
+    assert "SEKRET" not in text and "token=" not in text
+
+
+def test_ponowienie_po_failed_zaklada_zadanie_od_poczatku(q):
+    async def go():
+        conn = await seed(q)
+        _, _, actor = await actor_for(q, A)
+        job = await make_job(q, conn)
+        T = q.T["mentor_bastion_clip_jobs"]
+        await q.core.database.execute(T.update().where(T.c.id == job["id"]).values(
+            state="failed", attempts=7, last_error_code="BASTION_RETRIES_EXHAUSTED", remote_clip_id="77"))
+        clip, video, ctx = await clip_of(q), await video_of(q), await q.core.pair_context(PAIR, actor)
+        await q.bastion.order_mp4(ctx, clip, video, actor)
+        return await job_of(q)
+
+    after = q.run(go)
+    assert after["state"] == "queued" and after["attempts"] == 0 and after["last_error_code"] is None
+
+
+def test_regula_notatki_wyczerpania_i_etapow_planu():
+    BR = __import__("app.mentor_bastion_rules", fromlist=["x"])
+    assert BR.exhausted_note("BASTION_UNAVAILABLE (HTTP 500)") == "BASTION_RETRIES_EXHAUSTED po: BASTION_UNAVAILABLE (HTTP 500)"
+    assert BR.exhausted_note(None, None) == "BASTION_RETRIES_EXHAUSTED"
+    assert "SEKRET" not in BR.retry_note("X", "https://a.b/f.mp4?token=SEKRET boom")
+    assert [BR.plan_job_stage(x) for x in ("queued", "submitted", "retryable_failed", "downloading", "uploading", "failed", "ready", None)] ==         ["queued", "bastion_cutting", "retrying", "downloading", "uploading", "failed", None, None]
+    assert BR.ERROR_MESSAGES["BASTION_RETRIES_EXHAUSTED"].startswith("Nie udało się")
+
+
+def test_nieistniejacy_katalog_roboczy_nie_wywala_zadania(q, tmp_path, monkeypatch):
+    async def go():
+        conn = await seed(q)
+        await make_job(q, conn)
+        monkeypatch.setenv("MENTOR_MEDIA_TMP", str(tmp_path / "brak" / "mentor-tmp"))
+        await drive(q)
+        return await job_of(q)
+
+    job = q.run(go)
+    assert job["state"] == "ready"
+    assert (tmp_path / "brak" / "mentor-tmp").is_dir()  # założony w locie
+
+
+def test_katalog_roboczy_nie_do_zalozenia_wraca_do_systemowego(q, tmp_path, monkeypatch):
+    blocker = tmp_path / "plik"
+    blocker.write_text("x")
+    monkeypatch.setenv("MENTOR_MEDIA_TMP", str(blocker / "pod"))
+    path = q.media.make_tmpdir("t-")
+    import os
+    assert os.path.isdir(path) and not path.startswith(str(blocker))
+
+
+def test_nieobsluzony_wyjatek_zapisuje_przyczyne(q):
+    async def go():
+        conn = await seed(q)
+        await make_job(q, conn)
+
+        async def boom(*a, **k):
+            raise FileNotFoundError("/data/mentor-tmp")
+
+        q.mp.setattr(q.bastion_jobs, "_store", boom)
+        await q.bastion_jobs.run_once("w1", client=q.client)
+        return await job_of(q)
+
+    job = q.run(go)
+    assert job["state"] == "retryable_failed" and "FileNotFoundError" in job["last_error_message"] and "mentor-tmp" in job["last_error_message"]

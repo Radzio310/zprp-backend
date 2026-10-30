@@ -181,6 +181,7 @@ async def build_plan(shared: Context, clip: Dict[str, Any], actor: Any, *, title
     lines = [folder["match"], D.match_clock(seconds), R.s(clip.get("title")) or "Klip", category]
     sig = D.card_signature(lines)
     status = await _mp4_status(clip, target, own)
+    job_info = _job_info(await _plan_job(clip, target, own))
     card_ready = clip.get("card_status") == "ready" and clip.get("card_key") and clip.get("card_sig") == sig
     effective = status
     if title_card and status == "ready":
@@ -198,6 +199,7 @@ async def build_plan(shared: Context, clip: Dict[str, Any], actor: Any, *, title
         "filename": filename, "folder": folder, "title_card_available": bool(M.storage_ready()),
         "title_card": bool(title_card), "card_signature": sig, "card_lines": lines,
         "source_range": {"video_id": option["id"], "start_s": start_s, "end_s": end_s} if can and option else None,
+        **job_info,
     }
     plan["_target"] = target
     return plan
@@ -225,6 +227,33 @@ async def _mp4_status(clip: Dict[str, Any], target: Optional[Dict[str, Any]], ow
         media = (await J.media_for_clips([clip])).get(clip["id"])
         return J.mp4_status_of(media, stored)
     return stored
+
+
+async def _plan_job(clip: Dict[str, Any], target: Optional[Dict[str, Any]], own: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Zadanie Bastionu, które obsługuje ten plan (własne nagranie z Bastionu albo klip przeliczony na Bastion)."""
+    from app import mentor_bastion_jobs as J
+
+    if target and target["mode"] == "convert":
+        if target["kind"] != "bastion":
+            return None
+        job = await J.current_job(clip)
+        if job and job["state"] != "cancelled" and job.get("source_video_id") == target["video_id"] and                 (float(job["start_s"]), float(job["end_s"])) == _bastion_pair(target):
+            return job
+        return None
+    if own["kind"] == "bastion":
+        job = await J.current_job(clip)
+        return job if job and job["state"] != "cancelled" else None
+    return None
+
+
+def _job_info(job: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Pola planu o zadaniu: etap, kod i polski komunikat błędu, liczba prób. Bez szczegółów technicznych i adresów."""
+    state = (job or {}).get("state")
+    stage = BR.plan_job_stage(state)
+    code = (job or {}).get("last_error_code") if state in ("failed", "retryable_failed", "needs_reconciliation") else None
+    message = BR.job_message(state, code, None) if code else None
+    return {"job_stage": stage, "error_code": code, "error_message": message,
+            "attempts": int((job or {}).get("attempts") or 0) if job else 0}
 
 
 def _bastion_pair(target: Dict[str, Any]) -> tuple:
@@ -278,7 +307,10 @@ async def place_order(ctx: Dict[str, Any], clip: Dict[str, Any], actor: Any, pla
     await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip["id"]).values(mp4_source_json=json.dumps(source)))
     fresh = await C.one(select(mentor_clips).where(mentor_clips.c.id == clip["id"])) or clip
     virtual = {**fresh, "start_s": target["start_s"], "end_s": target["end_s"], "video_id": target["video_id"]}
-    job = await J.after_clip_saved(virtual, video, actor, want_mp4=True)
+    if existing and existing["state"] == "failed" and not changed:
+        job = await J.resume_clip_media(fresh, video, actor)  # ponowienie po niepowodzeniu: zadanie od początku
+    else:
+        job = await J.after_clip_saved(virtual, video, actor, want_mp4=True)
     if job is None:
         from app.mentor_bastion import _unavailable
 

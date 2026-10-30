@@ -33,12 +33,15 @@ def main() -> None:
         print(f"Teraz (UTC): {datetime.now(timezone.utc).isoformat()}")
         show(conn, "zadania wg stanu", "SELECT state, COUNT(*) AS n FROM mentor_bastion_clip_jobs GROUP BY state ORDER BY state")
         show(conn, "ostatnie zadania", """
-            SELECT j.state, j.remote_clip_code, j.poll_count, j.attempts, j.last_error_code,
+            SELECT j.state, j.remote_clip_code, j.poll_count, j.attempts, j.last_error_code, j.last_error_message,
                    j.start_s, j.end_s, j.clip_revision, c.media_rev,
                    c.mp4_status, (c.mp4_key IS NOT NULL) AS has_file, c.card_status,
                    j.created_at, j.submitted_at, j.updated_at, j.next_attempt_at, j.lease_until, j.finished_at
             FROM mentor_bastion_clip_jobs j LEFT JOIN mentor_clips c ON c.id = j.clip_id
             ORDER BY j.created_at DESC LIMIT :limit""", limit=limit)
+        show(conn, "retryable_failed (ostatni szczegół przyczyny)", """
+            SELECT id, state, attempts, poll_count, last_error_code, last_error_message, next_attempt_at, updated_at
+            FROM mentor_bastion_clip_jobs WHERE state = 'retryable_failed' ORDER BY updated_at DESC LIMIT :limit""", limit=limit)
 
 
 if __name__ == "__main__":

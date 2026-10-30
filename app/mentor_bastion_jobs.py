@@ -24,6 +24,7 @@ import socket
 import tempfile
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from app import mentor_bastion_media as BM
 from app import mentor_bastion_rules as BR
@@ -549,23 +550,52 @@ async def _release(job: Dict[str, Any], worker_id: str, state: str, *, notify: O
         await _touch(job, notify)
 
 
-async def _fail(job: Dict[str, Any], wid: str, code: str) -> None:
+async def _fail(job: Dict[str, Any], wid: str, code: str, *, note: Optional[str] = None) -> None:
     from app import mentor_panel_core as C
 
+    logger.warning("bastion: zadanie %s kończy się błędem %s (%s)", job.get("id"), code, BR.clean_detail(note))
     await _release(job, wid, "failed", notify="clip_media_failed", last_error_code=code,
-                   last_error_message=BR.ERROR_MESSAGES.get(code), finished_at=C.now())
+                   last_error_message=note or BR.ERROR_MESSAGES.get(code), finished_at=C.now())
+    await _fail_card(job)
 
 
-async def _retry(job: Dict[str, Any], wid: str, code: str, *, delay: Optional[float] = None) -> None:
+async def _fail_card(job: Dict[str, Any]) -> None:
+    """Wariant z planszą czeka na zwykłe MP4: gdy zadanie padło, karta nie zostaje „w kolejce” w nieskończoność."""
+    try:
+        from sqlalchemy import update
+
+        from app.db import database, mentor_clips as K
+
+        await database.execute(update(K).where(K.c.id == job["clip_id"]).where(K.c.media_rev == int(job["clip_revision"]))
+                               .where(K.c.card_status.in_(("queued", "working"))).values(card_status="failed"))
+    except Exception:  # noqa: BLE001
+        logger.warning("bastion: oznaczenie planszy jako nieudanej nie powiodło się", exc_info=True)
+
+
+def retry_detail(status: Any = None, remote_code: Any = "", extra: Any = "") -> str:
+    """Szczegół ponowienia: status HTTP odpowiedzi connectora, jego kod i dodatek (host). Bez adresów i sekretów."""
+    parts = []
+    if status is not None:
+        parts.append(f"HTTP {status}")
+    if remote_code:
+        parts.append(f"kod {BR.clean_detail(remote_code, 60)}")
+    if extra:
+        parts.append(BR.clean_detail(extra, 80))
+    return ", ".join(parts)
+
+
+async def _retry(job: Dict[str, Any], wid: str, code: str, *, delay: Optional[float] = None, detail: str = "") -> None:
     from app import mentor_panel_core as C
 
     attempts = int(job.get("attempts") or 0) + 1
+    note = BR.retry_note(code, detail)
+    logger.warning("bastion: zadanie %s ponawia (próba %s/%s): %s", job.get("id"), attempts, BR.MAX_ATTEMPTS, note)
     if attempts >= BR.MAX_ATTEMPTS:
-        await _fail(job, wid, "BASTION_RETRIES_EXHAUSTED")
+        await _fail(job, wid, "BASTION_RETRIES_EXHAUSTED", note=BR.exhausted_note(note))
         return
     wait = delay if delay is not None else BR.backoff_s(attempts)
     await _release(job, wid, "retryable_failed", attempts=attempts, last_error_code=code,
-                   last_error_message=BR.ERROR_MESSAGES.get(code), next_attempt_at=C.now() + timedelta(seconds=wait))
+                   last_error_message=note, next_attempt_at=C.now() + timedelta(seconds=wait))
 
 
 async def _wait_auth(job: Dict[str, Any], wid: str, code: str = "BASTION_AUTH_REQUIRED") -> None:
@@ -635,8 +665,8 @@ async def process_job(job: Dict[str, Any], worker_id: str, *, client: Any = None
         if not await _check_ready(job, worker_id, client, conn, scope, owner):
             return
         await _store(job, clip, worker_id, client, conn, scope, owner)
-    except CL.ConnectorUnavailable:
-        await _retry(job, worker_id, "BASTION_UNAVAILABLE")
+    except CL.ConnectorUnavailable as exc:
+        await _retry(job, worker_id, "BASTION_UNAVAILABLE", detail=retry_detail(None, "", f"connector niedostępny: {type(exc).__name__}"))
 
 
 def _as_auth(code: str, status: int) -> bool:
@@ -672,11 +702,11 @@ async def _submit(job, wid, client, conn, scope, owner) -> bool:
     elif reply.status in (400, 422) or code == "FINGERPRINT_MISMATCH":
         await _fail(job, wid, "BASTION_SUBMIT_REJECTED")
     elif code == "CLIP_SUBMIT_IN_PROGRESS":
-        await _retry(job, wid, "BASTION_UNAVAILABLE", delay=20.0)
+        await _retry(job, wid, "BASTION_UNAVAILABLE", delay=20.0, detail=retry_detail(reply.status, code))
     elif reply.status == 429:
-        await _retry(job, wid, "BASTION_RATE_LIMITED")
+        await _retry(job, wid, "BASTION_RATE_LIMITED", detail=retry_detail(reply.status, code))
     else:
-        await _retry(job, wid, "BASTION_UNAVAILABLE")
+        await _retry(job, wid, "BASTION_UNAVAILABLE", detail=retry_detail(reply.status, code))
     return False
 
 
@@ -699,9 +729,9 @@ async def _check_ready(job, wid, client, conn, scope, owner) -> bool:
     elif code == "BASTION_CLIP_NOT_FOUND":
         await _fail(job, wid, "BASTION_CLIP_NOT_FOUND")
     elif reply.status == 429:
-        await _retry(job, wid, "BASTION_RATE_LIMITED")
+        await _retry(job, wid, "BASTION_RATE_LIMITED", detail=retry_detail(reply.status, code))
     else:
-        await _retry(job, wid, "BASTION_UNAVAILABLE")
+        await _retry(job, wid, "BASTION_UNAVAILABLE", detail=retry_detail(reply.status, code))
     return False
 
 
@@ -718,7 +748,9 @@ def put_and_verify(path: str, key: str, content_type: str) -> int:
 
 
 def _tmpdir() -> str:
-    return tempfile.mkdtemp(prefix="bastion-clip-", dir=os.getenv("MENTOR_MEDIA_TMP") or None)
+    from app import mentor_panel_media as M
+
+    return M.make_tmpdir("bastion-clip-")
 
 
 async def _delete_objects(keys: List[Optional[str]]) -> None:
@@ -739,7 +771,7 @@ async def _store(job, clip, wid, client, conn, scope, owner) -> None:
     from app.db import database, mentor_bastion_clip_jobs as J, mentor_clip_assets as A, mentor_clips as K
 
     if not M.storage_ready():
-        await _retry(job, wid, "STORAGE_OFF")
+        await _retry(job, wid, "STORAGE_OFF", detail="magazyn nieskonfigurowany")
         return
     await _save(job, wid, state="downloading")
     reply = await client.clip_download_url(scope, owner, job["remote_clip_id"])
@@ -755,9 +787,9 @@ async def _store(job, clip, wid, client, conn, scope, owner) -> None:
         elif code in ("DOWNLOAD_HOST_NOT_ALLOWED", "DOWNLOAD_ADDRESS_NOT_PUBLIC"):
             await _fail(job, wid, code)
         elif reply.status == 429:
-            await _retry(job, wid, "BASTION_RATE_LIMITED")
+            await _retry(job, wid, "BASTION_RATE_LIMITED", detail=retry_detail(reply.status, code, "pobranie"))
         else:
-            await _retry(job, wid, "BASTION_UNAVAILABLE")
+            await _retry(job, wid, "BASTION_UNAVAILABLE", detail=retry_detail(reply.status, code, "pobranie" if reply.status != 200 else "brak adresu pobrania"))
         return
     url = body["url"]  # sekret: tylko w tej zmiennej
     rev = int(job["clip_revision"])
@@ -765,10 +797,11 @@ async def _store(job, clip, wid, client, conn, scope, owner) -> None:
     uploaded: List[str] = []
     try:
         try:
+            host = urlsplit(url).hostname or ""
             dl = await BM.download_signed(url, folder)
         except BM.MediaError as exc:
             if exc.retryable:
-                await _retry(job, wid, "BASTION_UNAVAILABLE")
+                await _retry(job, wid, "BASTION_UNAVAILABLE", detail=retry_detail(None, exc.code, f"pobranie, host {host}, {exc.detail}"))
             else:
                 await _fail(job, wid, exc.code)
             return
@@ -778,7 +811,7 @@ async def _store(job, clip, wid, client, conn, scope, owner) -> None:
             probe = await asyncio.to_thread(BM.ffprobe_file, dl.path)
         except BM.MediaError as exc:
             if exc.retryable:
-                await _retry(job, wid, "BASTION_UNAVAILABLE")
+                await _retry(job, wid, "BASTION_UNAVAILABLE", detail=retry_detail(None, exc.code, f"ffprobe, {exc.detail}"))
             else:
                 await _fail(job, wid, exc.code)
             return
@@ -808,7 +841,7 @@ async def _store(job, clip, wid, client, conn, scope, owner) -> None:
         if size is None:
             await _delete_objects(uploaded)
             uploaded = []
-            await _retry(job, wid, "STORAGE_UPLOAD_FAILED")
+            await _retry(job, wid, "STORAGE_UPLOAD_FAILED", detail="upload do R2 nieudany 3 razy")
             return
         # Czy wciąż jesteśmy właścicielem zadania i czy rewizja jest aktualna? (restart, usunięcie, zmiana zakresu)
         mine = await C.one(select(J).where(J.c.id == job["id"]))
@@ -926,10 +959,10 @@ async def run_once(worker_id: str, *, lease_s: int = BR.LEASE_S, client: Any = N
         await process_job(job, worker_id, client=client)
     except asyncio.CancelledError:
         raise
-    except Exception:  # noqa: BLE001 - jedno złe zadanie nie zatrzymuje kolejki
+    except Exception as exc:  # noqa: BLE001 - jedno złe zadanie nie zatrzymuje kolejki
         logger.exception("bastion: przebieg zadania %s nieudany", job["id"])
         try:
-            await _retry(job, worker_id, "BASTION_UNAVAILABLE")
+            await _retry(job, worker_id, "BASTION_UNAVAILABLE", detail=f"wyjątek {type(exc).__name__}: {exc}")
         except Exception:  # noqa: BLE001
             logger.warning("bastion: zapis błędu zadania nieudany", exc_info=True)
     finally:

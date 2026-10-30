@@ -409,6 +409,40 @@ def job_stage(state: str, has_remote: bool) -> Optional[str]:
     return None
 
 
+#: Stan zadania -> etap w planie pobrania (`download-plan.job_stage`). Brak = null (np. gotowe, anulowane, czeka na połączenie).
+PLAN_STAGES = {
+    "queued": "queued", "submitting": "bastion_cutting", "submitted": "bastion_cutting", "waiting_for_remote": "bastion_cutting",
+    "retryable_failed": "retrying", "downloading": "downloading", "uploading": "uploading",
+    "failed": "failed", "needs_reconciliation": "failed",
+}
+
+
+def plan_job_stage(state: Optional[str]) -> Optional[str]:
+    return PLAN_STAGES.get(state or "")
+
+
+def clean_detail(text: Any, limit: int = 160) -> str:
+    """Szczegół błędu do logu i do `last_error_message`: jedna linia, bez adresów (sekrety w query podpisanego URL)."""
+    import re
+
+    out = re.sub(r"https?://\S+", "<url>", str(text or ""))
+    return " ".join(out.split())[:limit]
+
+
+def retry_note(code: str, detail: Any = "") -> str:
+    """Zapis ostatniej przyczyny ponowienia: `KOD (szczegół)`."""
+    d = clean_detail(detail)
+    return f"{code} ({d})" if d else code
+
+
+def exhausted_note(last_note: Optional[str], last_code: Optional[str] = None) -> str:
+    """`last_error_message` po wyczerpaniu prób: prawdziwy ostatni kod zamiast gołego BASTION_RETRIES_EXHAUSTED."""
+    prior = (last_note or last_code or "").strip()
+    if prior.startswith("BASTION_RETRIES_EXHAUSTED"):
+        return prior
+    return f"BASTION_RETRIES_EXHAUSTED po: {prior}" if prior else "BASTION_RETRIES_EXHAUSTED"
+
+
 def job_message(state: str, error_code: Optional[str], stored: Optional[str] = None) -> str:
     if state == "needs_reconciliation":
         return MSG_RECONCILE

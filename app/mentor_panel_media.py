@@ -648,9 +648,20 @@ def put_file(path: str, key: str, content_type: str) -> int:
     return os.path.getsize(path)
 
 
-def _tmpdir() -> str:
+def make_tmpdir(prefix: str = "mentor-") -> str:
+    """Katalog roboczy mediów: `MENTOR_MEDIA_TMP` zakładany w razie braku, a gdy się nie da - systemowy tempdir (z ostrzeżeniem)."""
     base = os.getenv("MENTOR_MEDIA_TMP") or None
-    return tempfile.mkdtemp(prefix="mentor-", dir=base)
+    if base:
+        try:
+            os.makedirs(base, exist_ok=True)
+            return tempfile.mkdtemp(prefix=prefix, dir=base)
+        except OSError:
+            logger.warning("media: katalog roboczy %s niedostępny, używam systemowego tempdir", base, exc_info=True)
+    return tempfile.mkdtemp(prefix=prefix)
+
+
+def _tmpdir() -> str:
+    return make_tmpdir("mentor-")
 
 
 async def process_upload(row: Dict[str, Any]) -> None:

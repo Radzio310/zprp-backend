@@ -304,3 +304,31 @@ def test_paczka_nie_przekracza_limitu_kolejki_bastionu(d):
     out, jobs = d.run(go)
     assert [i["ordered"] for i in out["items"]] == [True, True, False]
     assert out["items"][2]["reason"] == "QUEUE_LIMIT" and len(jobs) == 2
+
+
+def test_plan_niesie_etap_zadania_blad_i_proby_a_failed_pozwala_ponowic(d):
+    async def go():
+        await seed(d, file=False, bastion=True)
+        await add_clip(d)
+        actor = await actor_for(d)
+        before = await plan_of(d, actor=actor)
+        await d.media.request_mp4("c1", actor)
+        queued = await plan_of(d, actor=actor)
+        T = d.T["mentor_bastion_clip_jobs"]
+        await d.db.execute(T.update().values(state="retryable_failed", attempts=3, last_error_code="BASTION_UNAVAILABLE"))
+        retrying = await plan_of(d, actor=actor)
+        await d.db.execute(T.update().values(state="failed", attempts=7, last_error_code="BASTION_RETRIES_EXHAUSTED"))
+        failed = await plan_of(d, actor=actor)
+        conn = await d.bastion._ensure_connection("personal", A)
+        await d.bastion._set_connection(conn, status="ready", external_identity_id="u-1")
+        await d.media.request_mp4("c1", actor)  # ponowienie po failed
+        again = (await d.core.rows(select(T)))[0]
+        return before, queued, retrying, failed, again
+
+    before, queued, retrying, failed, again = d.run(go)
+    assert before["job_stage"] is None and before["error_code"] is None and before["attempts"] == 0
+    assert queued["job_stage"] in (None, "queued")  # bez połączenia: waiting_for_auth = null
+    assert retrying["job_stage"] == "retrying" and retrying["attempts"] == 3 and retrying["error_code"] == "BASTION_UNAVAILABLE"
+    assert failed["job_stage"] == "failed" and failed["can_download"] is True and failed["mp4_status"] == "failed"
+    assert failed["error_code"] == "BASTION_RETRIES_EXHAUSTED" and failed["error_message"].startswith("Nie udało się po kilku")
+    assert again["state"] == "queued" and again["attempts"] == 0

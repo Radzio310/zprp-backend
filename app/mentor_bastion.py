@@ -620,7 +620,11 @@ async def order_mp4(ctx: Dict[str, Any], clip: Dict[str, Any], video: Dict[str, 
     except BR.ClipRangeError as exc:
         raise C.err(422, "CLIP_RANGE", str(exc)) from exc
     existing = await J.current_job(clip)
-    if existing and existing["state"] != "cancelled":
+    if existing and existing["state"] == "failed":
+        # Ponowienie po niepowodzeniu: to samo zadanie wraca do kolejki od początku (nie zostaje martwe).
+        await J.resume_clip_media(clip, video, actor)
+        await C.touch(ctx, actor.judge_id, "clip_mp4", "clips", clip["match_id"], {"id": clip["id"], "retry": True})
+    elif existing and existing["state"] != "cancelled":
         job = existing
     else:
         job = await J.after_clip_saved(clip, video, actor, want_mp4=True)
