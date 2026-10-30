@@ -109,6 +109,8 @@ def define_tables(metadata):
         Column("trash_json", Text, nullable=True),
         #: Klucz idempotencji dodania (nagłówek `Idempotency-Key`): powtórka żądania zwraca ten sam wiersz.
         Column("idempotency_key", String, nullable=True),
+        #: Automat nagrań (30.10.2026): {at, source}, gdy nagranie dodał serwer sam; cofnięcie = zwykłe usunięcie (kosz).
+        Column("auto_added_json", Text, nullable=True),
         UniqueConstraint("match_id", "normalized_url", name="uq_mentor_match_video_url"),
     )
     Index("uq_mentor_match_video_idem", videos.c.pair_key, videos.c.match_id, videos.c.idempotency_key, unique=True,
@@ -133,4 +135,5 @@ MIGRATIONS = (
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS deleted_at timestamptz",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS deleted_by varchar",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS trash_json text",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS auto_added_json text",
 )

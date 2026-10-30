@@ -150,6 +150,13 @@ async def _uploads_by_id(ids: List[str]) -> Dict[str, Dict[str, Any]]:
     return {r["id"]: r for r in await C.rows(select(mentor_uploads).where(mentor_uploads.c.id.in_(ids)))}
 
 
+def _auto_added(raw: Any) -> Optional[Dict[str, Any]]:
+    found = R.json_value(raw, {})
+    if not found.get("at"):
+        return None
+    return {"at": found.get("at"), "source": found.get("source")}
+
+
 def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: Optional[Dict[str, Any]] = None,
                 ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from app.mentor_evaluation_request_rules import video_provider, youtube_thumbnail
@@ -170,6 +177,8 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
         #: Bastion: adres odtwarzania daje dopiero `POST .../videos/{id}/playback` (czasowy, wrażliwy, nie leży w nagraniu).
         "external_id": row.get("external_id") if provider == bastion.PROVIDER else None,
         "play_url": None, "poster_url": None, "upload_status": None,
+        #: Automat nagrań (30.10.2026): {at, source}, gdy nagranie dodał serwer sam; null przy dodanym ręcznie.
+        "auto_added": _auto_added(row.get("auto_added_json")),
     }
     if kind == "upload":
         upload = upload or {}

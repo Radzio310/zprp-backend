@@ -389,6 +389,9 @@ from app.mentor_trybuna_thumbs import router as mentor_trybuna_thumbs_router
 app.include_router(mentor_trybuna_thumbs_router)
 from app.mentor_trybuna_suggest import router as mentor_trybuna_suggest_router
 app.include_router(mentor_trybuna_suggest_router)
+# Automat nagrań w dniu meczu: trasy auto-found (seen/accept/dismiss/undo) - `docs/mentor-panel.md`, § "Automat nagrań".
+from app.mentor_auto_found import router as mentor_auto_found_router
+app.include_router(mentor_auto_found_router)
 app.include_router(short_result_records_router)
 # Dodatkowy raport sędziów/delegata: treść, PDF i adresaci.
 app.include_router(extra_report_router)
@@ -1657,6 +1660,9 @@ async def startup():
         asyncio.create_task(run_trybuna_feed_refresher())  # kanał obserwowanych liczony w tle co 30 min
         asyncio.create_task(run_trybuna_morning())  # "Dziś sędziuje" 8:00
         asyncio.create_task(run_thumb_worker())  # miniatury kaset (klatka przez connector, trzymana w magazynie BAZY)
+    # Automat nagrań w dniu meczu (Bastion + YouTube; bez Bastionu szuka samego YouTube) - wyłącznik MENTOR_AUTO_FOUND=0.
+    from app.mentor_auto_found import run_auto_found
+    asyncio.create_task(run_auto_found())
     logger.info("✅ Mentor panel: media worker, retencja i e-maile wystartowały")
     logger.info("✅ Publiczna hurtownia ZPRP wystartowała (lekki cykl 2/15 min + katalog 24 h)")
     logger.info("✅ MP protocol snapshot scheduler started")

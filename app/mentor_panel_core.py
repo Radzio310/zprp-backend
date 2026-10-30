@@ -653,11 +653,16 @@ async def enrich_cards(ctx: Dict[str, Any], cards: List[Dict[str, Any]]) -> List
     async def load_sheet_unseen() -> set:
         return set((await unseen_sheets(key, me)).values()) if me in ctx["judge_ids"] else set()
 
+    async def load_auto_found() -> Dict[str, Dict[str, Any]]:
+        from app.mentor_auto_found import list_for  # automat nagrań w dniu meczu (30.10.2026)
+
+        return await list_for(ctx, ids)
+
     # Niezależne odczyty równolegle (każdy na własnym połączeniu z puli).
     (flags, videos, clips, threads, delegate_points, mentor_points, (proel_ids, proel_codes),
-     unread, sheet_unseen) = await asyncio.gather(
+     unread, sheet_unseen, auto_found) = await asyncio.gather(
         load_flags(), load_videos(), load_clips(), load_threads(), load_delegate(), load_mentor(), load_proel(),
-        unread_threads(pair_id, me), load_sheet_unseen())
+        unread_threads(pair_id, me), load_sheet_unseen(), load_auto_found())
     unseen_by_match: Dict[str, int] = {}
     for mid in unread.values():
         unseen_by_match[R.s(mid)] = unseen_by_match.get(R.s(mid), 0) + 1
@@ -676,6 +681,7 @@ async def enrich_cards(ctx: Dict[str, Any], cards: List[Dict[str, Any]]) -> List
             "threads": threads.get(match_id, {"open": 0, "total": 0}),
             "sheets": {"delegate": delegate_points.get(match_id), "mentor": mentor_points.get(match_id)},
             "unseen": {"threads": unseen_by_match.get(match_id, 0), "sheet": match_id in sheet_unseen},
+            "auto_found": auto_found.get(match_id),
         })
         card.pop("source", None)
     return cards

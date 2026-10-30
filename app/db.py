@@ -4619,6 +4619,10 @@ from app.mentor_trybuna_tables import define_tables as _define_mentor_trybuna_ta
     mentor_trybuna_today,
 ) = _define_mentor_trybuna_tables(metadata)
 
+# Automat nagran w dniu meczu (30.10.2026): proby, wynik i "widzialem" (`app/mentor_auto_found_tables.py`).
+from app.mentor_auto_found_tables import define_tables as _define_mentor_auto_found_tables
+mentor_auto_found, mentor_auto_found_seen = _define_mentor_auto_found_tables(metadata)
+
 # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.
 from app.province_alert_tables import define_tables as _define_alert_tables
 province_alert_settings, province_alert_state = _define_alert_tables(metadata)
