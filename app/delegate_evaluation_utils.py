@@ -272,7 +272,9 @@ def pair_sharing_blocked(row: Dict[str, Any], opted_out: set, viewer: str = "") 
     ids = _ids_of(row)
     if not ids:
         return False
-    if all(judge_id in opted_out for judge_id in ids):
+    # Blokada wspólna wymaga OBU sędziów: arkusz z jednym numerem nie jest
+    # pieczętowany dla innych (zgodnie z `pair_status_blocked`).
+    if len(set(ids)) >= 2 and all(judge_id in opted_out for judge_id in ids):
         return True
     return bool(viewer) and viewer in opted_out and viewer in ids
 

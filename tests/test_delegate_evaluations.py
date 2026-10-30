@@ -312,3 +312,16 @@ def test_pair_status_blocked_tylko_gdy_obaj_wylaczyli():
     assert pair_status_blocked("1", {"1"}) is False
     assert pair_status_blocked("1,1", {"1"}) is False
     assert pair_status_blocked("1,2,3", {"1", "2", "3"}) is False
+
+
+def test_arkusz_z_jednym_numerem_nie_jest_pieczetowany_dla_innych():
+    from app.delegate_evaluation_utils import pair_sharing_blocked, pair_status_blocked
+
+    row = {"referee_ids": ["1"]}
+    assert not pair_sharing_blocked(row, {"1"})
+    assert not pair_sharing_blocked(row, {"1"}, viewer="2")
+    # sam wyłączający nadal nie widzi swojego arkusza
+    assert pair_sharing_blocked(row, {"1"}, viewer="1")
+    assert not pair_sharing_blocked({"referee_ids": ["1", "1"]}, {"1"}, viewer="2")
+    # zgodnie z pair_status_blocked
+    assert pair_status_blocked("1", {"1"}) is False
