@@ -503,12 +503,8 @@ def is_postgres() -> bool:
     return url.startswith("postgres")
 
 
-async def delegate_sheet_rows(judge_ids: List[str], match_ids: Iterable[str], viewer: str = "") -> List[Dict[str, Any]]:
-    """Arkusze delegatów meczów pary (nowa reguła dostępu: oboje sędziowie arkusza = para).
-
-    Bez arkuszy, których para nie udostępnia (obaj wyłączyli) oraz - dla
-    `viewer` - arkuszy, w których on sam wyłączył udostępnianie.
-    """
+async def delegate_sheet_split(judge_ids: List[str], match_ids: Iterable[str], viewer: str = ""):
+    """(widoczne arkusze, `sealed`) - `sealed` jak w /overview ocen delegatów: pary bez treści ocen."""
     D = delegate_evaluations
     ids = sorted({R.s(m) for m in match_ids if R.s(m)})
     if is_postgres():
@@ -516,12 +512,29 @@ async def delegate_sheet_rows(judge_ids: List[str], match_ids: Iterable[str], vi
     elif ids:
         query = select(D).where(D.c.match_id.in_(ids))
     else:
-        return []
+        from app.delegate_evaluation_utils import sealed_summary
+        return [], sealed_summary([])
     found = await rows(query)
     seen = [r for r in found if R.pair_role_sees_delegate_sheet("pair", R.json_value(r.get("referee_ids"), []), judge_ids)]
-    from app.delegate_sharing import drop_blocked_pairs
+    if len(ids) == 1:
+        seen = [r for r in seen if R.s(r.get("match_id")) == ids[0]]
+    from app.delegate_sharing import opted_out_judges
+    from app.delegate_evaluation_utils import split_shared, sealed_summary
 
-    return await drop_blocked_pairs(seen, R.s(viewer))
+    opted_out = await opted_out_judges()
+    if not opted_out:
+        return [dict(r) for r in seen], sealed_summary([])
+    visible, sealed = split_shared([dict(r) for r in seen], opted_out, R.s(viewer))
+    return visible, sealed_summary(sealed)
+
+
+async def delegate_sheet_rows(judge_ids: List[str], match_ids: Iterable[str], viewer: str = "") -> List[Dict[str, Any]]:
+    """Arkusze delegatów meczów pary (nowa reguła dostępu: oboje sędziowie arkusza = para).
+
+    Bez arkuszy, których para nie udostępnia (obaj wyłączyli) oraz - dla
+    `viewer` - arkuszy, w których on sam wyłączył udostępnianie.
+    """
+    return (await delegate_sheet_split(judge_ids, match_ids, viewer))[0]
 
 
 async def mentor_sheet_rows(pair_key: str) -> List[Dict[str, Any]]:

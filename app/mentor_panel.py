@@ -349,8 +349,9 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
 
     async def load_delegate():
         if watched:
-            return []  # Trybuna: bez arkuszy i ocen
-        return [r for r in await C.delegate_sheet_rows(ctx["judge_ids"], [mid], actor.judge_id) if R.s(r.get("match_id")) == mid]
+            return [], None  # Trybuna: bez arkuszy i ocen
+        found, sealed = await C.delegate_sheet_split(ctx["judge_ids"], [mid], actor.judge_id)
+        return [r for r in found if R.s(r.get("match_id")) == mid], sealed
 
     async def load_mentor():
         if watched:
@@ -364,7 +365,7 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
         return await C.threads_payload(ctx, found)
 
     # Niezależne odczyty pokoju (w tym oś ProEla) równolegle zamiast kolejno.
-    (videos, raw_videos, streams), clips, delegate, mentor_shapes, threads, timeline = await asyncio.gather(
+    (videos, raw_videos, streams), clips, (delegate, sealed), mentor_shapes, threads, timeline = await asyncio.gather(
         load_videos(), load_clips(), load_delegate(), load_mentor(), load_threads(),
         _timeline(R.s(card.get("zprp_match_id")) if watched else mid, R.s(card.get("proel_key") or card.get("match_code"))))
     markers: List[Dict[str, Any]] = []
@@ -394,6 +395,7 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
         "timeline": timeline,
         "sheet_situations": situations,
         "delegate_sheets": [delegate_sheet_shape(r) for r in delegate], "mentor_sheets": mentor_shapes,
+        **({"sealed": sealed} if sealed and sealed.get("sheets") else {}),
         "threads": threads, "rev": ctx["rev"],
         "can": {action: C.may(ctx, action) for action in ("flag", "video", "create", "categories", "publish")},
         "watched": watched,
@@ -510,7 +512,7 @@ async def sheets(pair_id: str, season: str = Query("", max_length=20), actor: Ac
     ctx = await C.pair_context(pair_id, actor, action="sheets")
     cards = await C.pair_match_cards(ctx["judge_ids"])
     seasons = {c["match_id"]: c.get("season") for c in cards}
-    delegate = await C.delegate_sheet_rows(ctx["judge_ids"], list(seasons), actor.judge_id)
+    delegate, sealed = await C.delegate_sheet_split(ctx["judge_ids"], list(seasons), actor.judge_id)
     mentor = await C.mentor_sheet_rows(ctx["pair_key"])
 
     def keep(row: Dict[str, Any]) -> bool:
@@ -528,7 +530,10 @@ async def sheets(pair_id: str, season: str = Query("", max_length=20), actor: Ac
         [{"match_id": r.get("match_id"), "date": r.get("match_date"), "evaluation": R.json_value(r.get("evaluation_json"), {})} for r in delegate],
         [{"match_id": m["match_id"], "date": m["match_at"], "evaluation": m["sheet"], "points": m["points"]} for m in mentor_shapes],
     )
-    return {"delegate": [delegate_sheet_shape(r) for r in delegate], "mentor": mentor_shapes, "trends": trend}
+    out = {"delegate": [delegate_sheet_shape(r) for r in delegate], "mentor": mentor_shapes, "trends": trend}
+    if sealed["sheets"]:
+        out["sealed"] = sealed
+    return out
 
 
 # ─── Zmiany na żywo i obecność ──────────────────────────────────────────────

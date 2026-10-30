@@ -582,6 +582,25 @@ def test_arkusze_pary_z_wersjami_mentora(env):
     assert {p["text"] for p in out["trends"]["priorities"]} == {"Współpraca przy linii 6 m", "Ruch"}
 
 
+def test_arkusze_zablokowanej_pary_daja_piecz(env):
+    async def go():
+        committee = await env.actor(COMMITTEE)
+        before = await env.panel.sheets(PAIR, "", committee)
+        await env.ins("delegate_evaluation_sharing", judge_id=JUDGES[0], sharing_enabled=False)
+        one = await env.panel.sheets(PAIR, "", committee)
+        await env.ins("delegate_evaluation_sharing", judge_id=JUDGES[1], sharing_enabled=False)
+        both = await env.panel.sheets(PAIR, "", committee)
+        room = await env.panel.match_room(PAIR, "m1", committee)
+        return before, one, both, room
+
+    before, one, both, room = env.run(go)
+    assert "sealed" not in before and "sealed" not in one and len(one["delegate"]) == 1
+    assert both["delegate"] == [] and both["sealed"]["sheets"] == 1
+    pair = both["sealed"]["pairs"][0]
+    assert sorted(pair["judge_ids"]) == sorted(JUDGES) and pair["sheets"] == 1 and "evaluation" not in pair
+    assert room["delegate_sheets"] == [] and room["sealed"]["sheets"] == 1
+
+
 
 def _weasyprint_ok():
     try:
