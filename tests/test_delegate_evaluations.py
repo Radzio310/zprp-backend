@@ -298,3 +298,17 @@ def test_partner_dostaje_sama_liczbe():
     assert partner_opt_outs(rows, "1", {"2", "3", "5"}) == 2
     assert partner_opt_outs(rows, "1", {"1", "2"}) == 0  # sam też wyłączył - nic do dopełnienia
     assert partner_opt_outs(rows, "1", set()) == 0
+
+
+def test_pair_status_blocked_tylko_gdy_obaj_wylaczyli():
+    from app.delegate_evaluation_utils import pair_status_blocked
+
+    assert pair_status_blocked("1,2", {"1", "2"}) is True
+    assert pair_status_blocked("2, 1", {"1", "2", "3"}) is True
+    assert pair_status_blocked("1,2", {"1"}) is False
+    assert pair_status_blocked("1,2", set()) is False
+    # niejednoznaczne wejscie = false (ocena otwiera sie jak dotad)
+    assert pair_status_blocked("", {"1", "2"}) is False
+    assert pair_status_blocked("1", {"1"}) is False
+    assert pair_status_blocked("1,1", {"1"}) is False
+    assert pair_status_blocked("1,2,3", {"1", "2", "3"}) is False

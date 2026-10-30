@@ -277,6 +277,18 @@ def pair_sharing_blocked(row: Dict[str, Any], opted_out: set, viewer: str = "") 
     return bool(viewer) and viewer in opted_out and viewer in ids
 
 
+def pair_status_blocked(judge_ids: str, opted_out: set) -> bool:
+    """Czy para z `judge_ids` ("a,b") zablokowała arkusze: obaj wyłączyli.
+
+    Wszystko niejednoznaczne (inna liczba numerów niż dwa, puste, powtórzone)
+    = false, żeby ocena otwierała się jak dotąd.
+    """
+    ids = sorted({part.strip() for part in str(judge_ids or "").split(",") if part.strip()})
+    if len(ids) != 2:
+        return False
+    return pair_sharing_blocked({"referee_ids": ids}, opted_out)
+
+
 def partner_opt_outs(rows: List[Dict[str, Any]], viewer: str, opted_out: set) -> int:
     """Ilu partnerów sędziego wyłączyło udostępnianie, gdy on sam jeszcze nie.
 

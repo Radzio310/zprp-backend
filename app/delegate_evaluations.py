@@ -28,6 +28,7 @@ from app.delegate_evaluation_utils import (
     safe_source_fingerprint,
     season_start,
     partner_opt_outs,
+    pair_status_blocked,
     sealed_summary,
     split_shared,
 )
@@ -248,6 +249,12 @@ async def get_sharing(payload: dict = Depends(get_jwt_payload)):
         # Ilu partnerów już wyłączyło (bez nazwisk) - "brakuje Twojej zgody".
         "partners_opted_out": partner_opt_outs([dict(r) for r in own], actor, opted_out),
     }
+
+
+@router.get("/sharing/pair-status")
+async def get_pair_status(judge_ids: str = Query("", max_length=200), payload: dict = Depends(get_jwt_payload)):
+    """Tylko {blocked}: czy obaj sędziowie pary wyłączyli udostępnianie (bez innych danych)."""
+    return {"blocked": pair_status_blocked(judge_ids, await opted_out_judges())}
 
 
 @router.put("/sharing")
