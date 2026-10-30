@@ -216,7 +216,7 @@ async def dashboard(pair_id: str, actor: Actor = Depends(mentor_actor)):
         C.enrich_cards(ctx, raw_cards),
         C.people([*ctx["judge_ids"], *ctx["mentor_ids"]]),
         load_clips(), load_threads(), load_compilations(),
-        C.delegate_sheet_rows(ctx["judge_ids"], raw_ids),
+        C.delegate_sheet_rows(ctx["judge_ids"], raw_ids, actor.judge_id),
         C.mentor_sheet_rows(ctx["pair_key"]),
         _dots(ctx["pair"], actor.judge_id))
     nxt, last = R.next_and_last(cards, C.now())
@@ -350,7 +350,7 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
     async def load_delegate():
         if watched:
             return []  # Trybuna: bez arkuszy i ocen
-        return [r for r in await C.delegate_sheet_rows(ctx["judge_ids"], [mid]) if R.s(r.get("match_id")) == mid]
+        return [r for r in await C.delegate_sheet_rows(ctx["judge_ids"], [mid], actor.judge_id) if R.s(r.get("match_id")) == mid]
 
     async def load_mentor():
         if watched:
@@ -510,7 +510,7 @@ async def sheets(pair_id: str, season: str = Query("", max_length=20), actor: Ac
     ctx = await C.pair_context(pair_id, actor, action="sheets")
     cards = await C.pair_match_cards(ctx["judge_ids"])
     seasons = {c["match_id"]: c.get("season") for c in cards}
-    delegate = await C.delegate_sheet_rows(ctx["judge_ids"], list(seasons))
+    delegate = await C.delegate_sheet_rows(ctx["judge_ids"], list(seasons), actor.judge_id)
     mentor = await C.mentor_sheet_rows(ctx["pair_key"])
 
     def keep(row: Dict[str, Any]) -> bool:

@@ -239,3 +239,62 @@ def test_okreg_bez_listy_sedziow_ma_wlasny_powod():
     rows = [{"id": 1, "referee_ids": ["10", "11"]}, {"id": 2, "referee_ids": []}]
     assert hidden_summary(rows, set()) == {"sheets": 2, "pairs": 1, "reason": "no_district_judges"}
     assert hidden_summary([], set())["sheets"] == 0
+
+
+# --- Udostępnianie arkuszy (Ustawienia -> Udostępniane dane), decyzje 30.10.2026 ---
+
+from app.delegate_evaluation_utils import pair_sharing_blocked, partner_opt_outs, sealed_summary, split_shared
+
+
+def _sheet(*ids, kind="delegate"):
+    return {"referee_ids": list(ids), "referee_names": [f"Sędzia {i}" for i in ids], "kind": kind,
+            "evaluation_json": {"sections": [{"key": "I", "mainGrade": "D"}]}}
+
+
+def test_brak_wylaczen_niczego_nie_zmienia():
+    rows = [_sheet("1", "2"), _sheet("3", "4")]
+    visible, sealed = split_shared(rows, set())
+    assert visible == rows and sealed == []
+
+
+def test_jeden_z_pary_wylaczyl_inni_widza_normalnie():
+    rows = [_sheet("1", "2")]
+    visible, sealed = split_shared(rows, {"1"})
+    assert visible == rows and sealed == []
+    visible, _ = split_shared(rows, {"1"}, viewer="2")
+    assert visible == rows
+
+
+def test_wylaczajacy_sam_nie_widzi_swoich_arkuszy():
+    assert pair_sharing_blocked(_sheet("1", "2"), {"1"}, viewer="1")
+    visible, sealed = split_shared([_sheet("1", "2"), _sheet("3", "4")], {"1"}, viewer="1")
+    assert [r["referee_ids"] for r in visible] == [["3", "4"]]
+    assert sealed[0]["judge_ids"] == ["1", "2"]
+
+
+def test_obaj_wylaczyli_nikt_nie_widzi_tresci():
+    rows = [_sheet("1", "2"), _sheet("1", "2"), _sheet("1", "5")]
+    for viewer in ("", "9", "1", "2"):
+        visible, sealed = split_shared(rows, {"1", "2"}, viewer=viewer)
+        assert all(r["referee_ids"] != ["1", "2"] for r in visible)
+    visible, sealed = split_shared(rows, {"1", "2"})
+    assert [r["referee_ids"] for r in visible] == [["1", "5"]]  # mecz z innym partnerem bez zmian
+    assert sealed == [{"key": "1|2", "judge_ids": ["1", "2"], "names": ["Sędzia 1", "Sędzia 2"], "sheets": 2}]
+    assert "evaluation_json" not in sealed[0]
+    assert sealed_summary(sealed)["sheets"] == 2
+
+
+def test_oceny_mentora_nie_znaja_flagi():
+    assert not pair_sharing_blocked(_sheet("1", "2", kind="mentor"), {"1", "2"}, viewer="1")
+
+
+def test_referee_ids_jako_napis_json():
+    assert pair_sharing_blocked({"referee_ids": '["1", "2"]'}, {"1", "2"})
+    assert not pair_sharing_blocked({"referee_ids": []}, {"1"})
+
+
+def test_partner_dostaje_sama_liczbe():
+    rows = [_sheet("1", "2"), _sheet("1", "3"), _sheet("4", "5")]
+    assert partner_opt_outs(rows, "1", {"2", "3", "5"}) == 2
+    assert partner_opt_outs(rows, "1", {"1", "2"}) == 0  # sam też wyłączył - nic do dopełnienia
+    assert partner_opt_outs(rows, "1", set()) == 0

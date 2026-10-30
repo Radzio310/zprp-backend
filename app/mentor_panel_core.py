@@ -503,8 +503,12 @@ def is_postgres() -> bool:
     return url.startswith("postgres")
 
 
-async def delegate_sheet_rows(judge_ids: List[str], match_ids: Iterable[str]) -> List[Dict[str, Any]]:
-    """Arkusze delegatów meczów pary (nowa reguła dostępu: oboje sędziowie arkusza = para)."""
+async def delegate_sheet_rows(judge_ids: List[str], match_ids: Iterable[str], viewer: str = "") -> List[Dict[str, Any]]:
+    """Arkusze delegatów meczów pary (nowa reguła dostępu: oboje sędziowie arkusza = para).
+
+    Bez arkuszy, których para nie udostępnia (obaj wyłączyli) oraz - dla
+    `viewer` - arkuszy, w których on sam wyłączył udostępnianie.
+    """
     D = delegate_evaluations
     ids = sorted({R.s(m) for m in match_ids if R.s(m)})
     if is_postgres():
@@ -514,7 +518,10 @@ async def delegate_sheet_rows(judge_ids: List[str], match_ids: Iterable[str]) ->
     else:
         return []
     found = await rows(query)
-    return [r for r in found if R.pair_role_sees_delegate_sheet("pair", R.json_value(r.get("referee_ids"), []), judge_ids)]
+    seen = [r for r in found if R.pair_role_sees_delegate_sheet("pair", R.json_value(r.get("referee_ids"), []), judge_ids)]
+    from app.delegate_sharing import drop_blocked_pairs
+
+    return await drop_blocked_pairs(seen, R.s(viewer))
 
 
 async def mentor_sheet_rows(pair_key: str) -> List[Dict[str, Any]]:

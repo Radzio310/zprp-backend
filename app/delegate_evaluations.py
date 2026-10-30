@@ -27,17 +27,22 @@ from app.delegate_evaluation_utils import (
     restrict_to_district,
     safe_source_fingerprint,
     season_start,
+    partner_opt_outs,
+    sealed_summary,
+    split_shared,
 )
 from app.delegate_evaluation_comparisons import comparisons_for_form
 from app.admin_guard import admin_write_guard
 from app.db import (
     database,
     delegate_evaluation_access,
+    delegate_evaluation_sharing,
     delegate_evaluation_versions,
     delegate_evaluations,
     baza_vips,
     province_judges,
 )
+from app.delegate_sharing import drop_blocked_pairs, opted_out_judges  # noqa: F401 (drop_blocked_pairs - dla innych modułów)
 from app.deps import get_jwt_payload
 from app.province_access import normalize_province
 from app.province_panel_access import choose_vip_row, vip_covers_province
@@ -71,6 +76,10 @@ class EvaluationIn(BaseModel):
 
 class SyncIn(BaseModel):
     evaluations: List[EvaluationIn] = Field(default_factory=list, max_length=100)
+
+
+class SharingIn(BaseModel):
+    enabled: bool
 
 
 class AccessIn(BaseModel):
@@ -223,14 +232,50 @@ async def district_judge_ids(province: str) -> set:
     return {str(row["judge_id"]).strip() for row in rows}
 
 
+@router.get("/sharing")
+async def get_sharing(payload: dict = Depends(get_jwt_payload)):
+    actor = _actor(payload, judge_required=True)
+    row = await database.fetch_one(
+        select(delegate_evaluation_sharing).where(delegate_evaluation_sharing.c.judge_id == actor)
+    )
+    opted_out = await opted_out_judges()
+    own = await database.fetch_all(
+        select(delegate_evaluations.c.referee_ids).where(delegate_evaluations.c.referee_ids.contains([actor]))
+    )
+    return {
+        "enabled": True if row is None else bool(row["sharing_enabled"]),
+        "updated_at": row["updated_at"].isoformat() if row and row["updated_at"] else None,
+        # Ilu partnerów już wyłączyło (bez nazwisk) - "brakuje Twojej zgody".
+        "partners_opted_out": partner_opt_outs([dict(r) for r in own], actor, opted_out),
+    }
+
+
+@router.put("/sharing")
+async def put_sharing(req: SharingIn, payload: dict = Depends(get_jwt_payload)):
+    """Włącza/wyłącza udostępnianie arkuszy. Nic nie kasuje - arkusze zostają na serwerze."""
+    actor = _actor(payload, judge_required=True)
+    await database.execute(
+        pg_insert(delegate_evaluation_sharing).values(
+            judge_id=actor, sharing_enabled=bool(req.enabled), updated_at=func.now()
+        ).on_conflict_do_update(
+            index_elements=[delegate_evaluation_sharing.c.judge_id],
+            set_={"sharing_enabled": bool(req.enabled), "updated_at": func.now()},
+        )
+    )
+    return {"ok": True, "enabled": bool(req.enabled)}
+
+
 async def _all_rows(
-    judge_id: str, province: str, season: str, source: str, district_ids: Optional[set] = None
-) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    judge_id: str, province: str, season: str, source: str, district_ids: Optional[set] = None,
+    opted_out: Optional[set] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """Arkusze delegatów i/lub opublikowane oceny mentora w JEDNYM kształcie wiersza.
 
     Ocena mentora niesie `kind: "mentor"` i `source_kind: "mentor"` - ekrany
     liczą ją tak samo, a rysują z innym oznaczeniem. Drugi element to licznik
     arkuszy ukrytych filtrem okręgu (`None`, gdy filtra nie ma - admin, własne).
+    Trzeci - pary z pieczęcią: obaj sędziowie wyłączyli udostępnianie, więc
+    zamiast ocen idą same nazwiska i liczba arkuszy (dla każdego, także admina).
     """
     source = source if source in SOURCES else "delegate"
     rows: List[Dict[str, Any]] = []
@@ -241,11 +286,13 @@ async def _all_rows(
 
         rows += await mentor_form_rows(judge_id, province, season)
         rows.sort(key=lambda r: str(r.get("match_date") or ""), reverse=True)
+    rows, sealed = split_shared(rows, opted_out or set(), judge_id)
     hidden = None
     if district_ids is not None:
         hidden = hidden_summary(rows, district_ids)
         rows = restrict_to_district(rows, district_ids)
-    return rows, hidden
+        sealed = [p for p in sealed if district_ids & set(p["judge_ids"])]
+    return rows, hidden, sealed
 
 
 async def _national_rows(judge_id: str, season: str, source: str) -> List[Dict[str, Any]]:
@@ -261,7 +308,7 @@ async def _national_rows(judge_id: str, season: str, source: str) -> List[Dict[s
         from app.mentor_evaluations import mentor_form_rows
 
         rows += await mentor_form_rows(judge_id, season=season, all_provinces=True)
-    return rows
+    return split_shared(rows, await opted_out_judges())[0]
 
 
 async def _rows_for(judge_id: str, province: str, season: str = ""):
@@ -291,7 +338,8 @@ async def overview(
         raise HTTPException(403, access.get("reason") or "Brak dostępu do statystyk ocen")
     # Okręg widzi tylko pary ze swoim sędzią; administrator - wszystko.
     district_ids = await district_judge_ids(province) if province and not access.get("admin") else None
-    rows, hidden = await _all_rows(actor, province, season, source, district_ids)
+    opted_out = await opted_out_judges()
+    rows, hidden, sealed = await _all_rows(actor, province, season, source, district_ids, opted_out)
     people: Dict[str, Dict[str, Any]] = {}
     pairs: Dict[str, Dict[str, Any]] = {}
     # Worek „Łącznie": WSZYSTKIE arkusze z tego zapytania w jednym zbiorze, więc
@@ -347,6 +395,9 @@ async def overview(
         "source": source if source in SOURCES else "delegate",
         "seasons": sorted((value for value in available_seasons if value), reverse=True),
         "grade_scale": GRADE_POINTS,
+        "sealed": sealed_summary(sealed),
+        "sharing_enabled": actor not in opted_out,
+        "partners_opted_out": partner_opt_outs(rows, actor, opted_out),
     }
     if hidden is not None:
         result["hidden"] = hidden
@@ -392,7 +443,8 @@ async def forms(
     if province and not access["full"]:
         raise HTTPException(403, access.get("reason") or "Brak dostępu do pełnych arkuszy")
     district_ids = await district_judge_ids(province) if province and not access.get("admin") else None
-    rows, hidden = await _all_rows(actor, province, season, source, district_ids)
+    opted_out = await opted_out_judges()
+    rows, hidden, sealed = await _all_rows(actor, province, season, source, district_ids, opted_out)
     items = [dict(row) for row in rows]
     if comparisons:
         national = await _national_rows(actor, season, source) if province and access.get("admin") else None
@@ -406,7 +458,11 @@ async def forms(
                 include_combined=source == "all",
                 metric_cache=metric_cache,
             )
-    result: Dict[str, Any] = {"items": items}
+    result: Dict[str, Any] = {
+        "items": items,
+        "sealed": sealed_summary(sealed),
+        "sharing_enabled": actor not in opted_out,
+    }
     if hidden is not None:
         result["hidden"] = hidden
     return result

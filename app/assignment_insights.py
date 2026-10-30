@@ -126,6 +126,10 @@ async def _evaluations(province: str) -> Dict[str, List[dict]]:
             delegate_evaluations.c.evaluation_json,
         ).where(delegate_evaluations.c.province.in_(spellings(province)))
     )
+    # Pary, które obie wyłączyły udostępnianie, nie wchodzą do analiz okręgu.
+    from app.delegate_sharing import drop_blocked_pairs
+
+    rows = await drop_blocked_pairs(rows)
     out: Dict[str, List[dict]] = {}
     for row in rows:
         out.setdefault(_s(row["match_id"]), []).append(

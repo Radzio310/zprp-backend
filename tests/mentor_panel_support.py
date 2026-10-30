@@ -29,6 +29,7 @@ MODULES = (
     "app.mentor_panel_handoff", "app.mentor_bastion", "app.mentor_bastion_jobs", "app.mentor_bastion_client",
     "app.mentoring", "app.proel_auth", "app.streams.store", "app.streams.worker", "app.mentor_panel_streams", "app.mentor_video_trash",
     "app.mentor_bastion_search", "app.mentor_trybuna", "app.mentor_trybuna_rules", "app.mentor_trybuna_feed", "app.mentor_trybuna_thumbs", "app.mentor_trybuna_rank", "app.mentor_trybuna_suggest",
+    "app.delegate_sharing",
 )
 
 PAIR = "pair-1"
@@ -57,11 +58,14 @@ def _extra_tables(metadata):
                      Column("match_id", String), Column("season", String), Column("province", String),
                      Column("match_number", String), Column("match_date", String), Column("referee_ids", JSON),
                      Column("referee_names", JSON), Column("delegate_name", String), Column("evaluation_json", JSON))
+    sharing = Table("delegate_evaluation_sharing", metadata, Column("judge_id", String, primary_key=True),
+                    Column("sharing_enabled", Boolean), Column("updated_at", DateTime(timezone=True)))
     saved = Table("proel_matches", metadata, Column("match_number", String, primary_key=True), Column("zprp_match_id", String),
                   Column("data_json", JSON), Column("status", String), Column("updated_at", DateTime(timezone=True)))
     admins = Table("admin_settings", metadata, Column("id", Integer, primary_key=True), Column("allowed_admins", JSON))
     return {"province_judges": judges, "province_matches": matches, "province_match_judges": match_judges,
             "zprp_archive_matches": archive, "delegate_evaluations": delegate, "saved_matches": saved,
+            "delegate_evaluation_sharing": sharing,
             "admin_settings": admins}
 
 

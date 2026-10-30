@@ -242,3 +242,81 @@ def hidden_summary(rows: List[Dict[str, Any]], district_ids: set) -> Dict[str, A
         "pairs": len(pairs),
         "reason": HIDDEN_OTHER_DISTRICT if district_ids else HIDDEN_NO_DISTRICT_JUDGES,
     }
+
+
+# ---------------------------------------------------------------------------
+# Udostępnianie arkuszy (Ustawienia -> Udostępniane dane)
+# ---------------------------------------------------------------------------
+
+def _ids_of(row: Dict[str, Any]) -> List[str]:
+    raw = row.get("referee_ids") or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = []
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
+def pair_sharing_blocked(row: Dict[str, Any], opted_out: set, viewer: str = "") -> bool:
+    """Czy treść tego arkusza delegata zostaje na serwerze (decyzje z 30.10.2026).
+
+    - OBAJ sędziowie TEGO meczu wyłączyli udostępnianie: nikt nie widzi treści
+      (komisja, mentorzy, admin, oni sami).
+    - Wyłączył jeden: inni widzą arkusz jak dotąd, a sam wyłączający - nie
+      (`viewer`), bo wyłączenie znaczy dla niego "nie pokazuj mi".
+    Mecze z innym partnerem liczą się osobno. Oceny mentora tej flagi nie znają.
+    """
+    if not opted_out or row.get("kind") == "mentor":
+        return False
+    ids = _ids_of(row)
+    if not ids:
+        return False
+    if all(judge_id in opted_out for judge_id in ids):
+        return True
+    return bool(viewer) and viewer in opted_out and viewer in ids
+
+
+def partner_opt_outs(rows: List[Dict[str, Any]], viewer: str, opted_out: set) -> int:
+    """Ilu partnerów sędziego wyłączyło udostępnianie, gdy on sam jeszcze nie.
+
+    Same liczby, bez nazwisk: "do pełnej blokady brakuje Twojej zgody".
+    """
+    viewer = str(viewer or "").strip()
+    if not viewer or viewer in opted_out:
+        return 0
+    partners = set()
+    for row in rows:
+        ids = _ids_of(row)
+        if viewer in ids:
+            partners.update(judge_id for judge_id in ids if judge_id != viewer and judge_id in opted_out)
+    return len(partners)
+
+
+def split_shared(rows: List[Dict[str, Any]], opted_out: set, viewer: str = ""):
+    """(widoczne, pieczęć) - pieczęć to pary bez ocen, z samą liczbą arkuszy.
+
+    Nazwiska pary zostają (komisja i mentorzy widzą, KTO zablokował),
+    treść arkusza nie wychodzi z serwera do nikogo, także do admina.
+    """
+    visible: List[Dict[str, Any]] = []
+    sealed: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        if not pair_sharing_blocked(row, opted_out, viewer):
+            visible.append(row)
+            continue
+        ids = _ids_of(row)
+        key = "|".join(sorted(ids))
+        entry = sealed.setdefault(key, {
+            "key": key,
+            "judge_ids": sorted(ids),
+            "names": pair_names(ids, list(row.get("referee_names") or [])),
+            "sheets": 0,
+        })
+        entry["sheets"] += 1
+    pairs = sorted(sealed.values(), key=lambda item: " ".join(item["names"]).casefold())
+    return visible, pairs
+
+
+def sealed_summary(pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {"sheets": sum(p["sheets"] for p in pairs), "pairs": pairs}

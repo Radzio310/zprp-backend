@@ -3202,6 +3202,16 @@ delegate_evaluation_versions = Table(
     UniqueConstraint("evaluation_id", "content_hash", name="uq_delegate_evaluation_version"),
 )
 
+# Czy sędzia udostępnia swoje arkusze delegatów (Ustawienia -> Udostępniane dane).
+# Brak wiersza = udostępnia, jak dotąd. Arkusze dalej się zapisują; serwer
+# przestaje wydawać treść arkusza dopiero, gdy wyłączyli OBAJ sędziowie pary.
+delegate_evaluation_sharing = Table(
+    "delegate_evaluation_sharing", metadata,
+    Column("judge_id", String, primary_key=True),
+    Column("sharing_enabled", Boolean, nullable=False, server_default=text("true")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
 # -------------------------
 # BEACH: nowe tabele (nowa appka)
 # -------------------------
