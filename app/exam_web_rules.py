@@ -279,6 +279,14 @@ def label_events(events: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def guard_heard_since(link: Optional[Mapping[str, Any]], started_at: Any) -> bool:
+    """Czy strażnik odezwał się w tej sesji. Stare sparowanie (np. telefon z logowania kodem), które milczy od
+    początku egzaminu, to brak strażnika, a nie naruszenie - zamilknąć może tylko ten, który działał."""
+    seen = _at(link.get("guard_seen_at")) if link else None
+    start = _at(started_at)
+    return bool(seen and start and seen >= start)
+
+
 def guard_state(link: Optional[Mapping[str, Any]], now: datetime) -> Dict[str, Any]:
     """Stan telefonu-strażnika dla strony: `none` (nie sparowany) | `ok` | `away` (w tle) | `silent`."""
     if not link or not _s(link.get("guard_device_id")):

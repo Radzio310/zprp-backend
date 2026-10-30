@@ -85,6 +85,10 @@ def test_os_zdarzen_t_ms_i_etykiety():
 
 def test_stan_straznika():
     assert R.guard_state(None, NOW)["state"] == "none"
+    # Zamilknąć może tylko strażnik, który odezwał się w tej sesji; stare sparowanie to brak strażnika.
+    assert R.guard_heard_since(None, NOW) is False
+    assert R.guard_heard_since({"guard_seen_at": NOW - timedelta(days=2)}, NOW - timedelta(minutes=5)) is False
+    assert R.guard_heard_since({"guard_seen_at": NOW - timedelta(minutes=1)}, NOW - timedelta(minutes=5)) is True
     link = {"guard_device_id": "d1", "guard_seen_at": NOW - timedelta(seconds=3), "guard_state": "ok", "guard_label": "iPhone"}
     assert R.guard_state(link, NOW)["state"] == "ok"
     assert R.guard_state({**link, "guard_state": "away"}, NOW)["state"] == "away"

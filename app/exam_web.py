@@ -530,7 +530,8 @@ async def session_beat(sid: str, body: BeatBody, payload: Dict[str, Any] = Depen
     if guard["state"] != "none":
         attempt = await S._attempt_row(st, session["attempt_id"])
         exam = await S._exam(st, attempt["exam_id"], deleted_ok=True)
-        if guard["state"] == "silent" and not session.get("guard_alarm") and attempt["status"] == "in_progress":
+        if (guard["state"] == "silent" and not session.get("guard_alarm") and attempt["status"] == "in_progress"
+                and R.guard_heard_since(link, session.get("started_at"))):
             await database.execute(update(sessions).where(sessions.c.id == sid).values(guard_alarm="lost"))
             await _record(attempt, "guard_lost", {"seen_s": guard.get("seen_s")}, None, now)
             decision = await _react(session, attempt, R.web_policy(exam["config"]), 1, now)
