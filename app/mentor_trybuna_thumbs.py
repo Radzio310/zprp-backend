@@ -17,6 +17,7 @@ import hmac
 import logging
 import os
 import tempfile
+import time
 from datetime import timedelta
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -34,6 +35,13 @@ router = APIRouter(prefix="/mentor-panel", tags=["Mentor Trybuna"])
 
 MAX_ATTEMPTS = 5
 BACKOFF_S = 300
+RETRY_AFTER_S = 6 * 3600  # nieudana miniatura z kodem przejsciowym dostaje nowa szanse co 6 h
+LIFETIME_MAX_ATTEMPTS = 13  # 5 zwyklych + 8 ponowien (~2 doby), potem koniec
+SWEEP_EVERY_S = 600
+TRANSIENT = {"BASTION_NOT_CONNECTED", "BASTION_AUTH_REQUIRED", "BASTION_UNAVAILABLE", "BASTION_FRAME_FAILED",
+             "BASTION_BAD_RESPONSE", "HTTP"}
+SOFT = {"BASTION_NOT_CONNECTED", "BASTION_AUTH_REQUIRED"}  # brak polaczenia w zakresie: nie zakrywa prawdziwej przyczyny
+_last_sweep = 0.0
 ENQUEUE_LIMIT = 12
 IDLE_S = 20.0
 _wake: Optional[asyncio.Event] = None
@@ -103,6 +111,33 @@ def R_s(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
+def error_code(error: Any) -> str:
+    return R_s(error).replace(":", " ").split(" ")[0]
+
+
+def merge_error(prev: Optional[str], code: str, detail: Any = None) -> str:
+    """Blad kolejnego zakresu nie nadpisuje wczesniejszego, konkretnego: brak polaczenia (409) jest slabszy niz 502."""
+    new = (f"{code}: {R_s(detail)}" if R_s(detail) else code)[:200]
+    if prev and error_code(prev) not in SOFT and code in SOFT:
+        return prev
+    return new
+
+
+def reply_error(reply: Any) -> tuple:
+    body = reply.body if isinstance(getattr(reply, "body", None), dict) else {}
+    code = R_s(body.get("code") or body.get("error")) or f"HTTP {reply.status}"
+    return code, body.get("detail")
+
+
+def should_retry(row: Dict[str, Any], now: Any) -> bool:
+    """Czy nieudana miniatura ma dostac nowa szanse: kod przejsciowy, minelo 6 h, nie przekroczono limitu zycia."""
+    if row.get("status") != "failed" or error_code(row.get("error")) not in TRANSIENT:
+        return False
+    if int(row.get("attempts") or 0) >= LIFETIME_MAX_ATTEMPTS or row.get("updated_at") is None:
+        return False
+    return (now - R.aware(row["updated_at"])).total_seconds() >= RETRY_AFTER_S
+
+
 def pick_scopes(flags: BR.Flags, requested_by: str):
     """(scope, judge_id) do zrobienia klatki: połączenie domyślne, potem osobiste zlecającego."""
     out = []
@@ -126,21 +161,23 @@ async def make_one(row: Dict[str, Any]) -> bool:
     if not flags.enabled or not flags.configured or not M.storage_ready():
         return False
     client = _client()
-    error = "BASTION_AUTH_REQUIRED"
+    error: Optional[str] = None
     body: Optional[Dict[str, Any]] = None
     for scope, judge in pick_scopes(flags, R_s(row.get("requested_by"))):
         try:
             reply = await client.request("POST", "/frame", json={"scope": scope, "judge_id": judge, "bunny_item_id": item}, timeout=80.0)
         except CL.ConnectorUnavailable:
-            error = "BASTION_UNAVAILABLE"
+            error = merge_error(error, "BASTION_UNAVAILABLE")
             break
         if reply.status == 200 and isinstance(reply.body.get("jpeg_b64"), str):
             body = reply.body
             break
-        error = R_s(reply.body.get("code") or reply.body.get("error")) or f"HTTP {reply.status}"
+        code, detail = reply_error(reply)
+        error = merge_error(error, code, detail)
         if reply.status in (429, 503):
             break
     attempts = int(row.get("attempts") or 0) + 1
+    error = error or "BASTION_AUTH_REQUIRED"  # zadnego zakresu do proby
     if body is None:
         failed = attempts >= MAX_ATTEMPTS
         await database.execute(update(TH).where(TH.c.bunny_item_id == item).values(
@@ -163,8 +200,29 @@ async def make_one(row: Dict[str, Any]) -> bool:
     return True
 
 
-async def run_once() -> bool:
+async def revive_failed() -> int:
+    """Nieudane miniatury z kodem przejsciowym wracaja do kolejki (jedna proba na 6 h, do limitu zycia)."""
     now = C.now()
+    rows = await C.rows(select(TH).where(TH.c.status == "failed").order_by(TH.c.updated_at.asc()).limit(20))
+    n = 0
+    for r in rows:
+        if should_retry(r, now):
+            await database.execute(update(TH).where(TH.c.bunny_item_id == r["bunny_item_id"]).where(TH.c.status == "failed").values(
+                status="pending", next_attempt_at=None, updated_at=now))
+            n += 1
+    return n
+
+
+async def run_once() -> bool:
+    global _last_sweep
+    now = C.now()
+    if time.monotonic() - _last_sweep >= SWEEP_EVERY_S:
+        _last_sweep = time.monotonic()
+        try:
+            if await revive_failed():
+                wake()
+        except Exception:  # noqa: BLE001
+            logger.warning("trybuna: ponowienia miniatur", exc_info=True)
     rows = await C.rows(select(TH).where(TH.c.status == "pending").order_by(TH.c.updated_at.asc()).limit(10))
     row = next((r for r in rows if r.get("next_attempt_at") is None or R.aware(r["next_attempt_at"]) <= now), None)
     if row is None:

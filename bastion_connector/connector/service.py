@@ -427,8 +427,6 @@ class Service:
     async def frame(self, scope: str, judge_id: str | None, item_id: int, at_s: float | None = None) -> dict:
         """Miniatura kasety: klatka z odtwarzacza Bunny (Chromium z zapisanym stanem polaczenia). Zwraca JPEG w base64.
         Jedna klatka naraz (semafor), limity czasu na kazdym kroku; blad = BASTION_FRAME_FAILED (BAZA ponowi pozniej)."""
-        from .bastion import frame_time
-
         if not hasattr(self, "_frame_sem"):
             self._frame_sem = asyncio.Semaphore(1)
         res, _info = await self.game_context(scope, judge_id, item_id)
@@ -443,30 +441,65 @@ class Service:
             raise ConnectorError("BASTION_NOT_CONNECTED", 409)
         state, _meta = loaded
         async with self._frame_sem:
-            browser = await self._get_browser()
-            ctx = await browser.new_context(storage_state=state, viewport=VIEWPORT, locale="pl-PL", timezone_id="Europe/Warsaw")
+            jpeg, at, duration = await self._frame_capture(state, res.embed_url, at_s)
+        if not jpeg or len(jpeg) < 1000:
+            raise ConnectorError("BASTION_FRAME_FAILED", 502, "screenshot:pusta klatka")
+        return {"jpeg_b64": base64.b64encode(jpeg).decode("ascii"), "at_s": round(at, 1), "duration_s": int(duration), "bytes": len(jpeg)}
+
+    async def _frame_capture(self, state: dict, embed_url: str, at_s: float | None):
+        """Etapy: goto -> ffprobe/ffmpeg z adresu playlisty (Chromium z Playwrighta nie dekoduje H264) albo, zapasowo,
+        video -> duration -> seek -> screenshot w przegladarce. Blad niesie etap i nazwe wyjatku w `detail` (bez adresow)."""
+        from . import frame as F
+        from .bastion import frame_time
+
+        browser = await self._get_browser()
+        ctx = await browser.new_context(storage_state=state, viewport=VIEWPORT, locale="pl-PL", timezone_id="Europe/Warsaw")
+        stage, media, ff_err = "goto", [], None
+        try:
+            page = await ctx.new_page()
+            page.on("request", lambda r: media.append(r.url) if F.is_media_request(r.url) else None)
+            ua = await page.evaluate("() => navigator.userAgent")
             try:
-                page = await ctx.new_page()
-                await page.goto(res.embed_url, wait_until="domcontentloaded", timeout=25000)
+                await page.goto(embed_url, wait_until="domcontentloaded", timeout=25000)
+                for _ in range(24):  # do ~12 s na pierwsze zapytanie o playliste
+                    if F.pick_media_url(media):
+                        break
+                    await page.wait_for_timeout(500)
+                url = F.pick_media_url(media)
+                if url:
+                    stage = "ffprobe"
+                    duration = await F.probe_duration(url, ua)
+                    at = frame_time(duration, at_s)
+                    stage = "ffmpeg"
+                    return await F.grab_jpeg(url, at, ua), at, duration
+                ff_err = "media:brak adresu playlisty"
+            except F.FrameError as e:
+                ff_err = F.describe(e.stage, e.detail)
+            except Exception as e:  # noqa: BLE001
+                ff_err = F.describe(stage, e)
+            stage = "video"
+            try:
                 await page.wait_for_selector("video", timeout=20000, state="attached")
+                stage = "duration"
                 await page.wait_for_function(
                     "() => { const v = document.querySelector('video'); return v && isFinite(v.duration) && v.duration > 0 }", timeout=25000)
                 duration = float(await page.evaluate("() => document.querySelector('video').duration"))
                 at = frame_time(duration, at_s)
+                stage = "seek"
                 await page.evaluate(
                     "(t) => new Promise((ok) => { const v = document.querySelector('video'); v.muted = true; "
                     "v.addEventListener('seeked', () => ok(true), {once: true}); v.currentTime = t; setTimeout(() => ok(false), 15000); })", at)
                 await page.wait_for_timeout(600)
-                jpeg = await page.locator("video").first.screenshot(type="jpeg", quality=72, timeout=15000)
-            except ConnectorError:
-                raise
+                stage = "screenshot"
+                return await page.locator("video").first.screenshot(type="jpeg", quality=72, timeout=15000), at, duration
             except Exception as e:  # noqa: BLE001 - przegladarka bywa kapryśna; BAZA ponowi z odstepem
-                raise ConnectorError("BASTION_FRAME_FAILED", 502, type(e).__name__) from e
-            finally:
-                await ctx.close()
-        if not jpeg or len(jpeg) < 1000:
-            raise ConnectorError("BASTION_FRAME_FAILED", 502, "pusta klatka")
-        return {"jpeg_b64": base64.b64encode(jpeg).decode("ascii"), "at_s": round(at, 1), "duration_s": int(duration), "bytes": len(jpeg)}
+                raise ConnectorError("BASTION_FRAME_FAILED", 502, f"{ff_err or '-'} | {F.describe(stage, e)}"[:200]) from e
+        except ConnectorError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise ConnectorError("BASTION_FRAME_FAILED", 502, F.describe(stage, e)) from e
+        finally:
+            await ctx.close()
 
     async def clip_download(self, scope: str, judge_id: str | None, clip_id: str) -> dict:
         """Probne (P8): connector sam pobiera podpisany adres osobnym klientem bez ciasteczek, mierzy i kasuje plik."""

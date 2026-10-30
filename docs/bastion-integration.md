@@ -247,3 +247,13 @@ Host przekierowania **nieznany do P8**; lista dozwolonych sufiksów: `b-cdn.net,
    Potem `ffprobe` (czas, rozdzielczość, kodeki, obecność obrazu), SHA-256, i katalog zawsze jest kasowany. Ograniczenie: DNS jest
    sprawdzany przed połączeniem, nie przypięty do gniazda (DNS rebinding nie jest wykluczony; to próba, nie produkcja).
 5. `ffmpeg` (zawiera `ffprobe`) jest w obrazie (Dockerfile).
+
+## Miniatury kaset (`/frame`): ffmpeg zamiast dekodowania w przeglądarce (30.10.2026)
+
+Chromium z Playwrighta nie ma kodeków H264/AAC (hipoteza z produkcji: `video.duration` nie przychodzi, Timeout -> 502). Connector
+(`connector/frame.py`) nasłuchuje zapytań strony embedu, bierze adres playlisty HLS (`.m3u8`, wariant przed `playlist.m3u8`) albo `.mp4`,
+`ffprobe` mierzy czas, `ffmpeg -ss` z nagłówkiem `Referer: https://iframe.mediadelivery.net/` i UA przeglądarki robi jeden JPEG (limit
+30 s na polecenie). Stara ścieżka (`<video>` + screenshot) zostaje jako zapasowa. Oficjalnej miniatury CDN nie używamy: to nie klatka z ~5 min meczu.
+- Błąd 502 `BASTION_FRAME_FAILED` niesie w `detail` etap i nazwę wyjątku (`goto|ffprobe|ffmpeg|video|duration|seek|screenshot`), adresy podpisane są wycinane.
+- BAZA (`mentor_trybuna_thumbs.make_one`) zapisuje w `error` "kod: detail"; 409 `BASTION_NOT_CONNECTED` z kolejnego zakresu nie nadpisuje wcześniejszego konkretnego błędu.
+- Miniatury `failed` z kodem przejściowym (brak połączenia, 502/503, nieudana klatka) wracają do kolejki co 6 h (sprawdzenie co 10 min), do 13 prób łącznie.
