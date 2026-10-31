@@ -970,7 +970,7 @@ def test_limits_guests_and_invites_per_day_persisted(env, monkeypatch):
         # dobowy limit czyta dziennik w bazie, nie pamięć procesu
         monkeypatch.setattr(DR, "INVITE_DAY_LIMIT", 22)
         one = await env.drive.get_access(PAIR, Response(), actor)
-        for p in one["people"][1:3]:
+        for p in one["people"][1:4]:
             await env.drive.remove_access(PAIR, p["permission_id"], actor)
         await env.drive.invite_access(PAIR, env.drive.AccessBody(email="n1@example.com"), actor)
         await env.drive.invite_access(PAIR, env.drive.AccessBody(email="n2@example.com"), actor)
@@ -1092,13 +1092,12 @@ def test_backfill_clip_saved_is_idempotent_and_matches_live_ids(env):
 
 
 def test_log_failure_never_breaks_the_action(env, monkeypatch):
-    class Boom:
-        def insert(self):
-            raise RuntimeError("baza dziennika padła")
+    def boom(*args, **kwargs):
+        raise RuntimeError("baza dziennika padła")
 
     async def go():
         actor, _ = await with_folder(env, A)
-        monkeypatch.setattr(env.drive, "LOG", Boom())
+        monkeypatch.setattr(env.T["mentor_drive_log"], "insert", boom, raising=False)
         view = await env.drive.invite_access(PAIR, env.drive.AccessBody(email="g@example.com"), actor)
         assert any(p["email"] == "g@example.com" for p in view["people"])
         row = await saved_clip(env, "c1", "k1")
@@ -1118,6 +1117,6 @@ def test_new_folder_keeps_guests_on_old_folder_only(env):
         assert new != old
         access = await env.drive.get_access(PAIR, Response(), actor)
         assert [p["email"] for p in access["people"]] == ["ala@gmail.com"]  # gość nie przeszedł
-        assert any(p["email"] == "g@example.com" for p in env.g.perm_store[old])  # a stary folder zachował uprawnienia
+        assert any(p.get("emailAddress") == "g@example.com" for p in env.g.perm_store[old])  # a stary folder zachował uprawnienia
 
     env.run(go)

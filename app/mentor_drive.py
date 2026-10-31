@@ -575,6 +575,13 @@ def _can_manage(ctx: Dict[str, Any], conn: Dict[str, Any], actor: Actor) -> bool
     return bool(actor.judge_id in ctx["judge_ids"] or actor.judge_id == R.s(conn["owner_judge_id"]) or actor.is_admin)
 
 
+def _snapshot_time(snap: Dict[str, Any]) -> datetime:
+    try:
+        return R.aware(datetime.fromisoformat(R.s(snap.get("checked_at")).replace("Z", "+00:00"))) or C.now()
+    except ValueError:
+        return C.now()
+
+
 def _snapshot_perm(p: Dict[str, Any]) -> Dict[str, Any]:
     keys = ("id", "emailAddress", "displayName", "role", "photoLink", "type")
     return {k: p.get(k) for k in keys if p.get(k) is not None}
@@ -641,10 +648,10 @@ async def _live_access(ctx: Dict[str, Any], actor: Actor, *, strict: bool = Fals
         perms = await _google(pid, lambda token: G.api().list_permissions(token, folder_id))
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, dict) else {}
-        snap = R.json_value(conn.get("access_snapshot"), None)
-        if strict or R.s(detail.get("code")) == "DRIVE_NEEDS_RECONNECT" or not isinstance(snap, dict) or not snap.get("perms"):
+        snap = R.json_value(conn.get("access_snapshot"), {})
+        if strict or R.s(detail.get("code")) == "DRIVE_NEEDS_RECONNECT" or not snap.get("perms"):
             raise
-        return await _access_view(ctx, conn, actor, snap["perms"], R.aware(snap.get("checked_at")) or C.now(), True)
+        return await _access_view(ctx, conn, actor, snap["perms"], _snapshot_time(snap), True)
     stamp = C.now()
     slim = [_snapshot_perm(p) for p in perms]
     try:
