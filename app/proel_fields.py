@@ -195,6 +195,33 @@ def merge_lww(existing: Optional[dict], incoming: Any, force: bool) -> Any:
     return incoming
 
 
+def is_stale_own_write(
+    existing: Optional[dict], client_ts: Any, install: Any
+) -> bool:
+    """Czy zapis jest STARSZY niż to, co to samo urządzenie już zapisało.
+
+    Kolejka offline i równoległe zapisy potrafiły dowieźć wartość pośrednią
+    („15") PO wartości końcowej („150") - ostatni wygrywał i liczba widzów
+    wracała do starej. Porównujemy wyłącznie zegar TEGO SAMEGO urządzenia:
+    zegarów dwóch telefonów nie da się ze sobą zestawić.
+
+    Brak znacznika po którejkolwiek stronie (stara aplikacja, stary wpis) =
+    zapis przechodzi jak dotąd.
+    """
+    if not existing or client_ts is None:
+        return False
+    try:
+        incoming_ts = int(client_ts)
+        stored_ts = int(existing.get("cts"))
+    except (TypeError, ValueError):
+        return False
+    mine = str(install or "").strip()
+    stored_install = str((existing.get("by") or {}).get("install") or "").strip()
+    if not mine or mine != stored_install:
+        return False
+    return incoming_ts < stored_ts
+
+
 def merge_write_once(existing: Optional[dict], incoming: Any, force: bool) -> Any:
     """Podpisu nie nadpisujemy po cichu — to dokument, nie pole formularza.
 

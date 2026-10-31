@@ -1056,6 +1056,9 @@ class ProElOp(BaseModel):
     if_base: Optional[str] = None
     #: Świadome wymuszenie (cofnięcie potwierdzenia, podmiana podpisu).
     force: Optional[bool] = False
+    #: Chwila wpisania wartości wg zegara urządzenia (ms od epoki). Starszy
+    #: zapis tego samego urządzenia nie nadpisuje nowszego (`is_stale_own_write`).
+    client_ts: Optional[int] = None
     #: Okoliczności czynności - WYŁĄCZNIE do dziennika meczu, nigdy do overlaya.
     #
     # Znacznik wysyłki („pełne dane poszły do ZPRP") jest jedynym polem, którego
@@ -1202,6 +1205,8 @@ class ProElStateResponse(BaseModel):
     #: Zapis szkoleniowy przeniesiony do oficjalnego - klucz oficjalnego meczu.
     promoted_to: Optional[str] = None
     promoted_from_rev: Optional[int] = None
+    #: Odpowiedź `/head` - wyłącznie przy `/state?with_head=1`, inaczej `None`.
+    head: Optional[Dict[str, Any]] = None
 
 
 # ------------------------- BEACH PROEL SAVED MATCHES -------------------------

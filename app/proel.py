@@ -133,6 +133,7 @@ from app.proel_fields import (
     PHASE_PRE,
     PathRejected,
     UnknownPath,
+    is_stale_own_write,
     live_signal,
     parse_path,
     phase_of,
@@ -625,6 +626,10 @@ async def get_proel_state(
     wait: float = Query(
         0.0, ge=0.0, description="Ile sekund czekać na zmianę (0 = odpowiedz od razu)"
     ),
+    with_head: bool = Query(
+        False,
+        description="Dołącz tablicę wyniku (`/head`) - jedno zapytanie przy wejściu do meczu",
+    ),
     actor: Actor = Depends(proel_actor),
     rights: AdminRights = Depends(proel_admin_rights),
 ):
@@ -649,7 +654,13 @@ async def get_proel_state(
                 break
             await asyncio.sleep(_WAIT_POLL_SECONDS)
 
-    return await _build_state_response(match, actor, rights)
+    response = await _build_state_response(match, actor, rights)
+    # Tylko na życzenie: nagłówek czyta `data_json`, a long-poll ma zostać lekki.
+    # Wejście do meczu pytało dotąd osobno o `/state` i `/head` - na słabym
+    # zasięgu to dwa uściski dłoni z serwerem zamiast jednego.
+    if with_head:
+        response.head = await _head_payload(match)
+    return response
 
 
 @router.post(
@@ -819,6 +830,16 @@ async def patch_proel_state(
                 )
                 continue
 
+            # Wartość pośrednia dowieziona PO końcowej (kolejka offline,
+            # równoległe żądania) nie cofa pola. Potwierdzamy ją jako przyjętą,
+            # żeby kolejka urządzenia przestała ją ponawiać - ale nie zapisujemy.
+            if is_stale_own_write(
+                overlay.get(path), op.client_ts, actor.installation_id
+            ):
+                if op_id:
+                    applied.append(op_id)
+                continue
+
             try:
                 merged_value = spec.merge(
                     overlay.get(path),
@@ -845,6 +866,8 @@ async def patch_proel_state(
                 "src": "patch",
                 "superseded_at": None,
             }
+            if op.client_ts is not None:
+                overlay[path]["cts"] = op.client_ts
             if op_id:
                 applied.append(op_id)
                 fresh_ops.append(op_id)
@@ -2722,7 +2745,11 @@ async def get_proel_match_head(
     """
     # Numer przychodzi w tej samej pisowni, co do `/state` - normalizuje go
     # klient (`proelMatchKey`), bo to on jest kluczem głównym tabeli.
-    match_number = match
+    return await _head_payload(match)
+
+
+async def _head_payload(match_number: str) -> Dict[str, Any]:
+    """Odpowiedź `/head` - wspólna z `/state?with_head=1`."""
     row = await database.fetch_one(
         select(
             saved_matches.c.data_json,
