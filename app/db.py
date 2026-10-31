@@ -5274,6 +5274,19 @@ for _statement in _MENTOR_BASTION_MIGRATIONS:
 
         _logging.getLogger("app.db").warning("Migracja Bastion nie przeszla: %s", _statement, exc_info=True)
 
+# Teczka pary: kolumna `verified_at` ksiegi zapisow (`app/mentor_drive_tables.py`) - kazda migracja osobno.
+from app.mentor_drive_tables import MIGRATIONS as _MENTOR_DRIVE_MIGRATIONS
+
+for _statement in _MENTOR_DRIVE_MIGRATIONS:
+    try:
+        with engine.connect() as _conn:
+            _conn.execute(text(_statement))
+            _conn.commit()
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("app.db").warning("Migracja Teczki pary nie przeszla: %s", _statement, exc_info=True)
+
 # Trybuna: klucz idempotencji nagrań i jego unikalny indeks (`app/mentor_trybuna_tables.py`) - kazda migracja osobno.
 from app.mentor_trybuna_tables import MIGRATIONS as _MENTOR_TRYBUNA_MIGRATIONS
 

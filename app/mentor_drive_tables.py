@@ -64,6 +64,8 @@ def define_tables(metadata):
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("done_at", DateTime(timezone=True), nullable=True),
+        #: Ostatnie sprawdzenie u Google, czy plik nadal jest (`/drive/verify`, tło). NULL = jeszcze nie sprawdzany.
+        Column("verified_at", DateTime(timezone=True), nullable=True),
         UniqueConstraint("pair_id", "clip_id", "variant", name="uq_mentor_drive_files_clip"),
         Index("ix_mentor_drive_files_pair_updated", "pair_id", "updated_at"),
         Index("ix_mentor_drive_files_state", "state"),
@@ -78,3 +80,9 @@ def define_tables(metadata):
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
     return connections, files, folders
+
+
+#: Wykonywane przy starcie przez `app/db.py` (PostgreSQL), każde osobno. Samo dokładanie kolumny.
+MIGRATIONS = (
+    "ALTER TABLE mentor_drive_files ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ",
+)

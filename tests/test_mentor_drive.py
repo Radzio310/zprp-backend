@@ -95,6 +95,8 @@ class FakeGoogle:
         self.n = 0
         self.scope = DR.SCOPE
         self.refresh_error = None
+        self.gone = set()  # id skasowane na Dysku (404)
+        self.trashed = set()  # id w koszu
 
     def _maybe_fail(self, name):
         err = self.fail.get(name)
@@ -122,9 +124,20 @@ class FakeGoogle:
     async def about(self, access):
         return {"emailAddress": "ala@gmail.com", "displayName": "Ala"}
 
+    async def file_state(self, access, file_id):
+        self.calls.append(("file_state", file_id))
+        self._maybe_fail("file_state")
+        if file_id in self.gone:
+            raise gerr(404, "notFound")
+        return {"id": file_id, "trashed": file_id in self.trashed, "webViewLink": f"https://drive/{file_id}?v=2"}
+
     async def get_file(self, access, file_id):
         self.calls.append(("get_file", file_id))
         self._maybe_fail("get_file")
+        if file_id in self.gone:
+            raise gerr(404, "notFound")
+        if file_id in self.trashed:
+            return {"id": file_id, "name": "x", "mimeType": "application/vnd.google-apps.folder", "trashed": True}
         if file_id.startswith("FILE"):
             return {"id": file_id, "name": "plik.mp4", "mimeType": "video/mp4"}
         return {"id": file_id, "name": "Teczka", "mimeType": "application/vnd.google-apps.folder", "webViewLink": f"https://drive/{file_id}"}
@@ -138,11 +151,11 @@ class FakeGoogle:
 
     async def find_folder(self, access, parent, name):
         fid = self.folders.get((parent, name))
-        return {"id": fid, "name": name} if fid else None
+        return {"id": fid, "name": name} if fid and fid not in self.gone else None
 
     async def find_by_prop(self, access, parent, key, value):
         for fid, f in self.files.items():
-            if f["parent"] == parent and f["props"].get(key) == value:
+            if fid not in self.gone and fid not in self.trashed and f["parent"] == parent and f["props"].get(key) == value:
                 return {"id": fid, "webViewLink": f"https://drive/{fid}", "size": str(len(f["data"]))}
         return None
 
@@ -637,5 +650,152 @@ def test_disconnect_cancels_queue_keeps_saved_and_drops_tokens(env):
         assert states == {"c1": "done", "c2": "cancelled"}
         tree = await env.drive.drive_tree(PAIR, Response(), None, actor)
         assert [i["clip_id"] for i in tree["items"]] == ["c1"] and tree["state"] == "disconnected"
+
+    env.run(go)
+
+
+# ─── prostowanie księgi z Dyskiem (/drive/verify) ────────────────────────────
+
+
+async def saved_clip(env, clip_id="c1", key="k1"):
+    actor = await env.actor(A)
+    await add_clip(env, clip_id, key)
+    await env.drive.save_clips(PAIR, env.drive.SaveBody(clip_ids=[clip_id]), actor)
+    await env.drive.work_once("w1")
+    files = env.T["mentor_drive_files"]
+    return await env.core.one(select(files).where(files.c.clip_id == clip_id))
+
+
+def test_verify_gone_on_404_and_trashed_then_save_again_and_tree_hides_it(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        partner = await env.actor(B)
+        files = env.T["mentor_drive_files"]
+        r1, r2 = await saved_clip(env, "c1", "k1"), await saved_clip(env, "c2", "k2")
+        env.g.gone.add(r1["drive_file_id"])
+        env.g.trashed.add(r2["drive_file_id"])
+        out = await env.drive.verify_drive(PAIR, None, partner)  # widzi też partner, bez tokenu właściciela
+        assert out["checked"] == 2 and out["gone"] == 2
+        assert {i["clip_id"]: i["status"] for i in out["items"]} == {"c1": "gone", "c2": "gone"}
+        assert all(i["web_view_link"] is None for i in out["items"])
+        tree = await env.drive.drive_tree(PAIR, Response(), None, actor)
+        assert tree["items"] == []
+        assert (await env.drive.counts_of(PAIR))["saved"] == 0
+        # stary klient w trybie delta widzi znany mu stan "cancelled"
+        delta = await env.drive.drive_tree(PAIR, Response(), "1970-01-01T00:00:00Z", actor)
+        assert {i["status"] for i in delta["items"]} == {"cancelled"}
+        # ponowny zapis działa od nowa i wgrywa plik
+        again = await env.drive.save_clips(PAIR, env.drive.SaveBody(clip_ids=["c1"]), actor)
+        assert again["items"][0]["status"] == "requeued" and again["accepted"] == 1
+        await env.drive.work_once("w1")
+        row = await env.core.one(select(files).where(files.c.clip_id == "c1"))
+        assert row["state"] == "done" and row["drive_file_id"] != r1["drive_file_id"]
+
+    env.run(go)
+
+
+def test_verify_saved_updates_stale_link(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        row = await saved_clip(env)
+        out = await env.drive.verify_drive(PAIR, env.drive.VerifyBody(clip_ids=["c1"]), actor)
+        assert out == {"items": [{"clip_id": "c1", "status": "saved", "web_view_link": f"https://drive/{row['drive_file_id']}?v=2"}],
+                       "checked": 1, "gone": 0}
+        after = await env.core.one(select(env.T["mentor_drive_files"]))
+        assert after["web_view_link"].endswith("?v=2") and after["verified_at"] is not None and after["state"] == "done"
+
+    env.run(go)
+
+
+@pytest.mark.parametrize("error", [gerr(403, "forbidden"), gerr(403, "appNotAuthorizedToFile"), gerr(0, "network"),
+                                   gerr(429, "rateLimitExceeded"), gerr(503, "")])
+def test_verify_never_deletes_on_ambiguous_errors(env, error):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        row = await saved_clip(env)
+        env.g.fail["file_state"] = error
+        out = await env.drive.verify_drive(PAIR, None, actor)
+        assert out["gone"] == 0 and out["items"][0]["status"] == "saved"
+        assert (await env.core.one(select(env.T["mentor_drive_files"])))["drive_file_id"] == row["drive_file_id"]
+        assert (await env.drive.get_conn(PAIR))["state"] == "connected"  # 403/sieć nie psuje połączenia
+
+    env.run(go)
+
+
+def test_verify_revoked_token_marks_reconnect_and_keeps_saved(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        await saved_clip(env, "c1", "k1")
+        await saved_clip(env, "c2", "k2")
+        env.g.fail["file_state"] = gerr(401, "authError")
+        out = await env.drive.verify_drive(PAIR, None, actor)
+        assert out["gone"] == 0 and {i["status"] for i in out["items"]} == {"saved"}
+        assert (await env.drive.get_conn(PAIR))["state"] == "needs_reconnect"
+        assert len([p for p in env.pushes if p[2] == "reconnect"]) == 1
+        exc = await code_of(env.drive.verify_drive(PAIR, None, actor))
+        assert exc.status_code == 409 and exc.error_code == "DRIVE_NEEDS_RECONNECT"
+        assert (await env.drive.counts_of(PAIR))["saved"] == 2
+
+    env.run(go)
+
+
+def test_verify_limit_oldest_checked_first_and_skips_in_flight(env, monkeypatch):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        monkeypatch.setattr(env.drive, "VERIFY_LIMIT", 2)
+        for n in (1, 2, 3):
+            await add_clip(env, f"c{n}", "k1")
+            await env.drive.save_clips(PAIR, env.drive.SaveBody(clip_ids=[f"c{n}"]), actor)
+            await env.drive.work_once("w1")
+        await add_clip(env, "c9", "k2")
+        await env.drive.save_clips(PAIR, env.drive.SaveBody(clip_ids=["c9"]), actor)  # w kolejce, nie sprawdzany
+        first = await env.drive.verify_drive(PAIR, None, actor)
+        assert first["checked"] == 2
+        second = await env.drive.verify_drive(PAIR, None, actor)
+        seen = {i["clip_id"] for i in first["items"]} | {i["clip_id"] for i in second["items"]}
+        assert seen == {"c1", "c2", "c3"}
+        assert len([c for c in env.g.calls if c[0] == "file_state"]) == 4
+
+    env.run(go)
+
+
+def test_save_on_already_saved_but_deleted_file_saves_again(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        row = await saved_clip(env)
+        env.g.gone.add(row["drive_file_id"])
+        again = await env.drive.save_clips(PAIR, env.drive.SaveBody(clip_ids=["c1"]), actor)
+        assert again["items"][0]["status"] == "requeued"
+        await env.drive.work_once("w1")
+        assert (await env.core.one(select(env.T["mentor_drive_files"])))["state"] == "done"
+
+    env.run(go)
+
+
+def test_ensure_path_recreates_deleted_remembered_subfolder(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        files = env.T["mentor_drive_files"]
+        await saved_clip(env, "c1", "k1")
+        conn = await env.drive.get_conn(PAIR)
+        match_dir = env.g.folders[(conn["folder_id"], "2026-10-10 SPR - KS (ISM/1)")]
+        old_cat = env.g.folders[(match_dir, "Do dyskusji")]
+        env.g.gone.add(old_cat)
+        await add_clip(env, "c2", "k2")
+        await env.drive.save_clips(PAIR, env.drive.SaveBody(clip_ids=["c2"]), actor)
+        await env.drive.work_once("w1")
+        row = await env.core.one(select(files).where(files.c.clip_id == "c2"))
+        assert row["state"] == "done" and env.g.files[row["drive_file_id"]]["parent"] != old_cat
+
+    env.run(go)
+
+
+def test_verify_due_background_respects_age(env):
+    async def go():
+        await with_folder(env, A)
+        await saved_clip(env)
+        assert await env.drive.verify_due() == 1
+        assert await env.drive.verify_due() == 0  # świeżo sprawdzone
+        assert await env.drive.verify_due(NOW + timedelta(days=400)) == 1
 
     env.run(go)

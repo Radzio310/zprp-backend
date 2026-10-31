@@ -111,6 +111,11 @@ class GoogleApi:
         params = {"fields": FILE_FIELDS, "supportsAllDrives": "true"}
         return (await self._send("GET", f"{FILES}/{file_id}", params=params, headers=self._bearer(access))).json()
 
+    async def file_state(self, access: str, file_id: str) -> Dict[str, Any]:
+        """Lekki odczyt do sprawdzania, czy zapisany plik nadal jest: `id,trashed,webViewLink`. 404 = pliku nie ma."""
+        params = {"fields": "id,trashed,webViewLink", "supportsAllDrives": "true"}
+        return (await self._send("GET", f"{FILES}/{file_id}", params=params, headers=self._bearer(access))).json()
+
     async def create_folder(self, access: str, name: str, parent: Optional[str] = None) -> Dict[str, Any]:
         body: Dict[str, Any] = {"name": name, "mimeType": FOLDER_MIME}
         if parent:

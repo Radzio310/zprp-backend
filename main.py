@@ -1667,9 +1667,10 @@ async def startup():
     from app.mentor_auto_found import run_auto_found
     asyncio.create_task(run_auto_found())
     # Teczka pary: kolejka wysyłki klipów na Dysk Google (bez MENTOR_DRIVE_ENABLED kończy się od razu).
-    from app.mentor_drive import run_drive_worker
+    from app.mentor_drive import run_drive_verifier, run_drive_worker
     for _n in (1, 2):
         asyncio.create_task(run_drive_worker(_n))
+    asyncio.create_task(run_drive_verifier())  # raz na dobę prostuje księgę z Dyskiem (MENTOR_DRIVE_VERIFY=0 wyłącza)
     logger.info("✅ Mentor panel: media worker, retencja i e-maile wystartowały")
     logger.info("✅ Publiczna hurtownia ZPRP wystartowała (lekki cykl 2/15 min + katalog 24 h)")
     logger.info("✅ MP protocol snapshot scheduler started")

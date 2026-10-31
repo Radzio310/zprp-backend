@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import secrets
 from datetime import datetime, timedelta
@@ -526,6 +527,164 @@ async def drive_tree(pair_id: str, response: Response, since: Optional[str] = Qu
             "state": R.s((conn or {}).get("state")) or "disconnected", "layout": R.s((conn or {}).get("layout")) or DR.DEFAULT_LAYOUT}
 
 
+# ─── Sprawdzanie, czy zapisane pliki nadal są na Dysku ───────────────────────
+
+VERIFY_LIMIT = 50  # bez filtra: tyle najdawniej sprawdzanych wpisów naraz
+VERIFY_FILTERED_LIMIT = 200
+VERIFY_PARALLEL = 5
+VERIFY_FRESH = timedelta(minutes=10)  # `save` nie pyta Google o plik sprawdzony przed chwilą
+VERIFY_EVERY = timedelta(hours=24)  # tło: każda para raz na dobę
+
+
+class VerifyBody(BaseModel):
+    clip_ids: Optional[List[str]] = Field(default=None, max_length=VERIFY_FILTERED_LIMIT)
+    match_id: Optional[str] = Field(default=None, max_length=120)
+
+
+async def _probe(access: str, drive_file_id: str) -> Dict[str, Any]:
+    """Jednoznaczna odpowiedź Google albo `unknown`. `gone` WYŁĄCZNIE: 404 pliku albo `trashed=true`.
+    401/cofnięty token = `revoked`; sieć, 403, limity, 5xx = `unknown` (plik zostaje zapisany)."""
+    try:
+        meta = await G.api().file_state(access, drive_file_id)
+    except G.GoogleError as exc:
+        if exc.status == 404:
+            return {"result": "gone"}
+        return {"result": "revoked" if exc.kind == "revoked" else "unknown"}
+    except Exception:  # noqa: BLE001 - nic poza jednoznaczną odpowiedzią Google nie kasuje wpisu
+        return {"result": "unknown"}
+    if not isinstance(meta, dict):
+        return {"result": "unknown"}
+    if meta.get("trashed") is True:
+        return {"result": "gone"}
+    return {"result": "saved", "link": meta.get("webViewLink")}
+
+
+async def _mark_gone(row: Dict[str, Any], stamp: datetime) -> None:
+    """Wpis przestaje być zapisem: `cancelled` (stare buildy znają ten stan: klip wygląda na niezapisany, drzewo go nie
+    pokazuje), a `save` zapisze go od nowa. Warunek na stan i id pliku chroni przed wyścigiem z ponownym zapisem."""
+    await database.execute(update(FILES).where(FILES.c.id == row["id"]).where(FILES.c.state == "done")
+                           .where(FILES.c.drive_file_id == row["drive_file_id"])
+                           .values(state="cancelled", error="DRIVE_GONE", drive_file_id=None, web_view_link=None, size=None,
+                                   done_at=None, lease_until=None, worker_id=None, verified_at=stamp, updated_at=stamp))
+
+
+async def verify_pair(pair_id: str, judge_id: str, *, clip_ids: Optional[List[str]] = None, match_id: Optional[str] = None,
+                      limit: Optional[int] = None, access: Optional[str] = None) -> Dict[str, Any]:
+    """Sprawdza u Google zapisy (`done`) pary, najdawniej sprawdzane najpierw. Sesji bazy nie trzymamy na czas Google."""
+    filtered = bool(clip_ids or match_id)
+    cap = limit or (VERIFY_FILTERED_LIMIT if filtered else VERIFY_LIMIT)
+    query = select(FILES).where(FILES.c.pair_id == pair_id).where(FILES.c.state == "done").where(FILES.c.drive_file_id.is_not(None))
+    if clip_ids:
+        query = query.where(FILES.c.clip_id.in_([R.s(i) for i in clip_ids if R.s(i)]))
+    if match_id:
+        query = query.where(FILES.c.match_id == match_id)
+    rows = await C.rows(query.limit(2000))
+    floor = datetime(1970, 1, 1, tzinfo=C.now().tzinfo)
+    rows.sort(key=lambda r: (R.aware(r.get("verified_at")) or floor, R.s(r["id"])))
+    rows = rows[:cap]
+    if not rows:
+        return {"items": [], "checked": 0, "gone": 0}
+    token = access or await access_for(pair_id)  # NeedsReconnect idzie do wołającego
+    gate = asyncio.Semaphore(VERIFY_PARALLEL)
+    state = {"revoked": False}
+
+    async def probe(row: Dict[str, Any]) -> Dict[str, Any]:
+        async with gate:
+            if state["revoked"]:
+                return {"result": "unknown"}
+            out = await _probe(token, row["drive_file_id"])
+        if out["result"] == "revoked":
+            state["revoked"] = True
+            await mark_needs_reconnect(pair_id, "REVOKED")
+            return {"result": "unknown"}
+        return out
+
+    results = await asyncio.gather(*(probe(r) for r in rows))
+    stamp = C.now()
+    per_clip: Dict[str, Dict[str, Any]] = {}
+    changed = 0
+    for row, out in zip(rows, results):
+        entry = per_clip.setdefault(row["clip_id"], {"saved": False, "link": None})
+        link = row.get("web_view_link")
+        if out["result"] == "gone":
+            await _mark_gone(row, stamp)
+            changed += 1
+            continue
+        values: Dict[str, Any] = {"verified_at": stamp}
+        if out["result"] == "saved" and out.get("link") and out["link"] != link:
+            link = out["link"]
+            values.update(web_view_link=link, updated_at=stamp)
+            changed += 1
+        if not state["revoked"]:
+            await database.execute(update(FILES).where(FILES.c.id == row["id"]).where(FILES.c.state == "done").values(**values))
+        entry["saved"], entry["link"] = True, entry["link"] or link
+    if changed:
+        try:
+            await C.touch(pair_id, judge_id, "drive_verify", "drive", match_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("mentor: rewizja po sprawdzeniu Dysku nieudana", exc_info=True)
+    items = [{"clip_id": cid, "status": "saved" if v["saved"] else "gone", "web_view_link": v["link"] if v["saved"] else None}
+             for cid, v in per_clip.items()]
+    return {"items": items, "checked": len(items), "gone": sum(1 for i in items if i["status"] == "gone")}
+
+
+@router.post("/pairs/{pair_id}/drive/verify")
+async def verify_drive(pair_id: str, body: Optional[VerifyBody] = None, actor: Actor = Depends(mentor_actor)):
+    """Prostuje księgę z Dyskiem: dla zapisanych plików pyta Google (`files.get`). `gone` tylko przy jednoznacznym 404 albo
+    koszu; błąd sieci, 403, limit czy wygasły token zostawiają wpis jako `saved`. Widzą oboje z pary (token właściciela)."""
+    ctx = await _context(pair_id, actor)
+    pid = ctx["pair_id"]
+    if not await get_conn(pid):
+        raise derr(409, "DRIVE_NOT_CONNECTED", "Teczka pary nie jest jeszcze połączona z Dyskiem Google.")
+    try:
+        access = await access_for(pid)
+    except NeedsReconnect as exc:
+        raise derr(409, "DRIVE_NEEDS_RECONNECT", "Połączenie z Dyskiem wygasło - połącz Dysk ponownie.", reason=exc.reason) from None
+    except G.GoogleError:
+        raise derr(502, "GOOGLE_UNAVAILABLE", "Dysk Google chwilowo nie odpowiada. Spróbuj za chwilę.") from None
+    body = body or VerifyBody()
+    return await verify_pair(pid, actor.judge_id, clip_ids=body.clip_ids, match_id=body.match_id, access=access)
+
+
+async def verify_due(now: Optional[datetime] = None) -> int:
+    """Tło: pary z zapisami niesprawdzanymi od doby (ten sam kod co trasa). Zwraca liczbę sprawdzonych par."""
+    now = now or C.now()
+    due = now - VERIFY_EVERY
+    pairs = {r["pair_id"] for r in await C.rows(select(FILES.c.pair_id, FILES.c.verified_at).where(FILES.c.state == "done")
+                                                .where(FILES.c.drive_file_id.is_not(None)).limit(5000))
+             if not r.get("verified_at") or (R.aware(r["verified_at"]) or now) < due}
+    done = 0
+    for pid in sorted(pairs):
+        conn = await get_conn(pid)
+        if not conn or conn.get("state") != "connected":
+            continue
+        try:
+            await verify_pair(pid, R.s(conn["owner_judge_id"]))
+            done += 1
+        except NeedsReconnect:
+            continue
+        except Exception:  # noqa: BLE001
+            logger.warning("mentor: sprawdzanie zapisów Dysku nieudane (para %s)", pid, exc_info=True)
+        await asyncio.sleep(1)
+    return done
+
+
+async def run_drive_verifier() -> None:
+    """Rzadka pętla w tle (start z `main.py`). Wyłączenie: `MENTOR_DRIVE_VERIFY=0` (poza tym wymaga `MENTOR_DRIVE_ENABLED`)."""
+    if not DR.enabled() or os.getenv("MENTOR_DRIVE_VERIFY", "1") == "0":
+        logger.info("mentor: sprawdzanie zapisów Dysku wyłączone")
+        return
+    await asyncio.sleep(180)
+    while True:
+        try:
+            await verify_due()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("mentor: pętla sprawdzania zapisów Dysku")
+        await asyncio.sleep(3600)
+
+
 # ─── Zapis klipów ────────────────────────────────────────────────────────────
 
 
@@ -588,6 +747,15 @@ async def _enqueue_clip(ctx: Dict[str, Any], conn: Dict[str, Any], clip: Dict[st
 
     pid, clip_id = ctx["pair_id"], clip["id"]
     existing = await C.one(select(FILES).where(FILES.c.pair_id == pid).where(FILES.c.clip_id == clip_id).where(FILES.c.variant == variant))
+    if existing and existing["state"] == "done" and existing.get("drive_file_id"):
+        verified = R.aware(existing.get("verified_at")) if existing.get("verified_at") else None
+        if not verified or verified + VERIFY_FRESH < C.now():
+            try:  # użytkownik mógł skasować plik na Dysku: sprawdzamy, zanim powiemy "już zapisane"
+                checked = await verify_pair(pid, actor.judge_id, clip_ids=[clip_id])
+                if any(i["status"] == "gone" for i in checked["items"]):
+                    existing = await C.one(select(FILES).where(FILES.c.id == existing["id"]))
+            except Exception:  # noqa: BLE001 - bez pewności zostaje "zapisane"
+                pass
     if existing and existing["state"] == "done":
         return {"clip_id": clip_id, "status": "already_saved", "file_id": existing["id"], "web_view_link": existing.get("web_view_link")}
     if existing and existing["state"] in DR.ACTIVE_STATES:
@@ -724,6 +892,17 @@ async def _release(job: Dict[str, Any]) -> None:
                            .values(state="queued", lease_until=None, worker_id=None))
 
 
+async def _folder_alive(access: str, folder_id: str) -> bool:
+    """Zapamiętany podfolder: `False` tylko przy jednoznacznym 404 albo koszu; inny błąd Google idzie dalej jak dotąd."""
+    try:
+        meta = await G.api().get_file(access, folder_id)
+    except G.GoogleError as exc:
+        if exc.status == 404:
+            return False
+        raise
+    return not (isinstance(meta, dict) and meta.get("trashed") is True)
+
+
 async def ensure_path(access: str, conn: Dict[str, Any], job: Dict[str, Any]) -> str:
     """Podfoldery wg układu pary; find-or-create z pamięcią id w księdze (bez dubli po restarcie)."""
     pid, parent = job["pair_id"], conn["folder_id"]
@@ -731,8 +910,11 @@ async def ensure_path(access: str, conn: Dict[str, Any], job: Dict[str, Any]) ->
         for name in DR.subpath(R.s(conn.get("layout")) or DR.DEFAULT_LAYOUT, job.get("match_label"), job.get("category")):
             memo = await C.one(select(FOLDERS).where(FOLDERS.c.pair_id == pid).where(FOLDERS.c.parent_id == parent).where(FOLDERS.c.name == name))
             if memo:
-                parent = memo["folder_id"]
-                continue
+                if await _folder_alive(access, memo["folder_id"]):
+                    parent = memo["folder_id"]
+                    continue
+                await database.execute(FOLDERS.delete().where(FOLDERS.c.pair_id == pid).where(FOLDERS.c.parent_id == parent)
+                                       .where(FOLDERS.c.name == name))  # podfolder skasowany na Dysku: zakładamy od nowa
             found = await G.api().find_folder(access, parent, name) or await G.api().create_folder(access, name, parent)
             try:
                 await database.execute(FOLDERS.insert().values(pair_id=pid, parent_id=parent, name=name, folder_id=found["id"], created_at=C.now()))
