@@ -30,6 +30,7 @@ from app import mentor_clip_download_rules as D
 from app import mentor_panel_core as C
 from app import mentor_panel_media as M
 from app import mentor_panel_rules as R
+from app import mentor_veo_rules as VR
 from app.db import database, mentor_clips, mentor_match_videos, mentor_uploads
 from app.mentor_panel_auth import mentor_actor
 
@@ -60,6 +61,8 @@ def _kind(video: Dict[str, Any]) -> str:
 
     if video.get("kind") == "upload" and video.get("upload_id"):
         return "file"
+    if video.get("provider") == "veo" or VR.is_veo_url(video.get("url")):
+        return "veo"
     if J.bastion_item_of(video):
         return "bastion"
     return "link"
@@ -71,6 +74,8 @@ def _label(video: Dict[str, Any], kind: str) -> str:
     title = R.s(video.get("title"))
     if title:
         return title[:60]
+    if kind == "veo":
+        return "Veo"
     return R.s(video.get("site_name")) or R.s(video.get("provider")).capitalize() or "Nagranie"
 
 
@@ -78,9 +83,13 @@ def _video_view(video: Dict[str, Any], uploads: Dict[str, Dict[str, Any]]) -> Di
     kind = _kind(video)
     up = uploads.get(R.s(video.get("upload_id"))) if kind == "file" else None
     ready = bool(up and up.get("status") == "ready" and up.get("play_key")) if kind == "file" else True
+    veo_status = None
+    if kind == "veo":
+        veo_status = VR.public_fields(R.json_value(video.get("veo_json"), {}))["veo_status"]
+        ready = veo_status == "ok"
     from app.mentor_video_rules import clean_sync
 
-    return {"id": video["id"], "kind": kind, "label": _label(video, kind), "ready": ready,
+    return {"id": video["id"], "kind": kind, "label": _label(video, kind), "ready": ready, "veo_status": veo_status,
             "sync": clean_sync(R.json_value(video.get("sync_json"), {})), "row": video}
 
 
@@ -201,7 +210,7 @@ async def build_plan(shared: Context, clip: Dict[str, Any], actor: Any, *, title
                                            {"id": clip["video_id"], "kind": "link", "label": "Nagranie", "ready": False, "sync": {}})
     flags_on = BR.load_flags().enabled
     options = [v for v in views.values() if v["id"] != own["id"] and not v["row"].get("deleted_at")
-               and (v["kind"] == "file" or (v["kind"] == "bastion" and flags_on))]
+               and (v["kind"] in ("file", "veo") or (v["kind"] == "bastion" and flags_on))]
     decision = D.choose_source(own, options)
     option = decision["option"]
     reason, missing = decision["reason"], decision["missing"]
@@ -224,6 +233,8 @@ async def build_plan(shared: Context, clip: Dict[str, Any], actor: Any, *, title
         if reason is None:
             target = {"mode": decision["mode"], "video_id": option["id"], "kind": source, "row": option["row"],
                       "start_s": start_s, "end_s": end_s}
+    if reason == "NOT_READY" and option and option["kind"] == "veo":
+        reason = D.VEO_REASONS.get(option.get("veo_status") or "unavailable", "VEO_UNAVAILABLE")
     if reason == "NEED_SYNC" or reason == "NO_SOURCE" or reason == "BAD_RANGE":
         source = None if reason != "NEED_SYNC" else source
     can = reason is None and target is not None
@@ -329,6 +340,8 @@ def fail_for(plan: Dict[str, Any]):
         return derr(409, "NEED_SYNC", plan["hint"], missing=plan["missing"])
     if reason == "NOT_READY":
         return derr(409, "MP4_NOT_READY", plan["hint"])
+    if reason in D.VEO_REASONS.values():
+        return derr(409, reason, plan["hint"])
     if reason == "BAD_RANGE":
         return derr(422, "CLIP_RANGE", plan["hint"])
     return derr(409, "NO_SOURCE", plan["hint"])
@@ -345,8 +358,12 @@ async def place_order(ctx: Dict[str, Any], clip: Dict[str, Any], actor: Any, pla
             from app.mentor_bastion import order_mp4
 
             return await order_mp4(ctx, clip, video, actor)
+        if target["kind"] == "veo":
+            return await M.queue_clip_veo(ctx, clip, actor, None, video)
         return await M.queue_clip_file(ctx, clip, actor, None)
     source = {"video_id": target["video_id"], "start_s": target["start_s"], "end_s": target["end_s"]}
+    if target["kind"] == "veo":
+        return await M.queue_clip_veo(ctx, clip, actor, source, video)
     if target["kind"] == "file":
         return await M.queue_clip_file(ctx, clip, actor, source)
     # Bastion z przeliczonego zakresu: zmiana źródła = nowa rewizja pliku (stary wynik nie nadpisze nowego).

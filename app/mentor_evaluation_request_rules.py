@@ -40,6 +40,12 @@ def normalized_video_url(value: Optional[str]) -> str:
         canonical = bastion.canonicalize(value)
         if canonical:
             return canonical
+    # Veo: jeden adres kanoniczny (https, bez zapytania i końcowego ukośnika), by ten sam mecz nie powstawał dwa razy.
+    from app import mentor_veo_rules as veo
+
+    slug = veo.parse_slug(value)
+    if slug:
+        return veo.canonical_url(slug)
     return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.params, parsed.query, parsed.fragment))
 
 
@@ -49,6 +55,10 @@ def video_provider(value: str) -> str:
     # Dokładny host portalu + /game + bunny_item_id; domeny podszywające się trafiają niżej jako zwykły link.
     if bastion.enabled() and bastion.is_bastion_url(value):
         return bastion.PROVIDER
+    from app import mentor_veo_rules as veo
+
+    if veo.is_veo_url(value):
+        return veo.PROVIDER
     host = (urlparse(value).hostname or "").lower()
     if host in {"youtu.be", "youtube.com"} or host.endswith(".youtube.com"):
         return "youtube"

@@ -175,11 +175,14 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
                 ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from app.mentor_evaluation_request_rules import video_provider, youtube_thumbnail
     from app import mentor_bastion_rules as bastion
+    from app import mentor_veo_rules as veo
     from app.mentor_video_rules import clean_sync
 
     kind = row.get("kind") or "link"
     sync_raw = R.json_value(row.get("sync_json"), {})
     provider = row.get("provider") or video_provider(R.s(row.get("url")))
+    if kind != "upload" and provider in ("video", "other") and veo.is_veo_url(row.get("url")):
+        provider = veo.PROVIDER  # stary zapis przed migracją
     if provider == bastion.PROVIDER and not bastion.enabled():
         provider = "video"  # flaga wyłączona: nagranie zostaje zwykłym linkiem, stare źródła działają bez zmian
     out = {
@@ -191,9 +194,18 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
         #: Bastion: adres odtwarzania daje dopiero `POST .../videos/{id}/playback` (czasowy, wrażliwy, nie leży w nagraniu).
         "external_id": row.get("external_id") if provider == bastion.PROVIDER else None,
         "play_url": None, "poster_url": None, "upload_status": None,
+        "veo_status": None, "veo_checked_at": None, "veo_message": None,
         #: Automat nagrań (30.10.2026): {at, source}, gdy nagranie dodał serwer sam; null przy dodanym ręcznie.
         "auto_added": _auto_added(row.get("auto_added_json")),
     }
+    if provider == veo.PROVIDER and kind != "upload":
+        # Veo (31.10.2026): odtwarzanie prosto z MP4 na c.veocdn.com; stan z zapisu (`veo_json`), odświeżany w tle.
+        fields = veo.public_fields(R.json_value(row.get("veo_json"), {}))
+        out.update(provider=veo.PROVIDER, play_url=fields["play_url"], playable=fields["playable"], veo_status=fields["veo_status"],
+                   veo_checked_at=fields["veo_checked_at"], veo_message=fields["veo_message"],
+                   title=row.get("title") or fields["title"] or "",
+                   thumbnail_url=row.get("thumbnail_url") or fields["thumbnail_url"],
+                   duration_s=row.get("duration_s") or fields["duration_s"])
     if kind == "upload":
         upload = upload or {}
         status = upload.get("status") or "failed"
@@ -213,12 +225,25 @@ async def video_list(ctx: Dict[str, Any], match_id: str) -> Tuple[List[Dict[str,
     found = await C.rows(select(mentor_match_videos).where(mentor_match_videos.c.match_id == R.s(match_id))
                          .where(mentor_match_videos.c.pair_key == ctx["pair_key"]).where(mentor_match_videos.c.deleted_at.is_(None))
                          .order_by(mentor_match_videos.c.created_at.asc()))
+    found = await _fresh_veo(found)
     names = await C.people({r.get("added_by") for r in found})
     uploads = await _uploads_by_id([r.get("upload_id") for r in found])
     return [video_shape(r, names, uploads.get(r.get("upload_id")), ctx) for r in found], found
 
 
+async def _fresh_veo(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Stan nagrań Veo: pierwszy odczyt (do 4 s), przeterminowany zapis odświeża się w tle. Nigdy nie psuje listy."""
+    try:
+        from app import mentor_veo
+
+        return await mentor_veo.ensure_fresh(rows)
+    except Exception:  # noqa: BLE001
+        logger.warning("mentor: odświeżanie stanu Veo nieudane", exc_info=True)
+        return rows
+
+
 async def public_video(row: Dict[str, Any]) -> Dict[str, Any]:
+    row = (await _fresh_veo([row]))[0]
     uploads = await _uploads_by_id([row.get("upload_id")])
     shaped = video_shape(row, {}, uploads.get(row.get("upload_id")))
     shaped.pop("added_by", None)
@@ -227,6 +252,7 @@ async def public_video(row: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _video_payload(ctx: Dict[str, Any], video_id: str) -> Dict[str, Any]:
     row = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == video_id))
+    row = (await _fresh_veo([row]))[0]
     names = await C.people([row.get("added_by")])
     uploads = await _uploads_by_id([row.get("upload_id")])
     return video_shape(row, names, uploads.get(row.get("upload_id")), ctx)
@@ -541,6 +567,32 @@ async def queue_clip_file(ctx: Dict[str, Any], clip: Dict[str, Any], actor: Acto
     return {"mp4_status": "queued"}
 
 
+async def queue_clip_veo(ctx: Dict[str, Any], clip: Dict[str, Any], actor: Actor, source: Optional[Dict[str, Any]],
+                         video: Dict[str, Any]) -> Dict[str, Any]:
+    """MP4 klipu z nagrania Veo do tej samej kolejki ffmpeg co własne pliki. `video` = wiersz nagrania Veo, `source` jak w
+    `queue_clip_file`. Stan Veo odświeżamy przy zamówieniu, żeby prywatne albo usunięte nagranie od razu dało czytelny błąd."""
+    from app import mentor_veo as veo
+    from app import mentor_veo_rules as vr
+
+    _storage_or_503()
+    fresh = await veo.check(video)
+    state = veo._state_of(fresh) or {}
+    status = state.get("status") or "unavailable"
+    if status != "ok":
+        code = {"private": "VEO_PRIVATE", "gone": "VEO_GONE", "processing": "VEO_PROCESSING"}.get(status, "VEO_UNAVAILABLE")
+        raise C.err(409, code, vr.clip_error(status))
+    same = (R.json_value(clip.get("mp4_source_json"), {}) or None) == source
+    if clip.get("mp4_status") in ("queued", "working", "ready") and same:
+        return {"mp4_status": clip["mp4_status"]}
+    values: Dict[str, Any] = {"mp4_status": "queued", "mp4_source_json": json.dumps(source) if source else None}
+    if not same:
+        values.update(card_status="none", card_sig=None)
+    await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip["id"]).values(**values))
+    await C.touch(ctx, actor.judge_id, "clip_mp4", "clips", clip["match_id"], {"id": clip["id"], "source": "veo"})
+    wake_worker()
+    return {"mp4_status": "queued"}
+
+
 @router.post("/clips/{clip_id}/mp4")
 async def request_mp4(clip_id: str, actor: Actor = Depends(mentor_actor), body: Optional[Mp4Request] = None):
     """Zamów MP4. Źródło rozstrzyga `mentor_clip_download`: własny plik, Bastion albo (dla klipu z wideo-linku) przeliczony
@@ -709,12 +761,15 @@ class UserFacingError(ValueError):
 async def process_clip(clip: Dict[str, Any]) -> None:
     start_s, end_s = float(clip["start_s"]), float(clip["end_s"])
     override = R.json_value(clip.get("mp4_source_json"), {})
-    if override.get("video_id"):  # klip z wideo-linku, przeliczony na własny plik
+    if override.get("video_id"):  # klip z wideo-linku, przeliczony na własny plik albo nagranie Veo
         video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == override["video_id"]))
         upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == video["upload_id"])) if video and video.get("upload_id") else None
         start_s, end_s = float(override["start_s"]), float(override["end_s"])
     else:
+        video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == clip["video_id"]))
         upload = await _clip_upload(clip)
+    if video and video.get("kind") != "upload" and video.get("provider") == "veo":
+        return await _process_clip_veo(clip, video, start_s, end_s)
     if not upload or upload.get("status") != "ready" or not upload.get("play_key"):
         raise ValueError("Nagranie klipu nie jest jeszcze gotowe.")
     await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip["id"]).values(mp4_status="working"))
@@ -730,6 +785,35 @@ async def process_clip(clip: Dict[str, Any]) -> None:
         await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip["id"])
                                .values(mp4_status="ready", mp4_key=key, mp4_size=size))
         await C.touch(clip["pair_id"], clip["author_id"], "clip_mp4_ready", "clips", clip["match_id"], {"id": clip["id"]})
+    finally:
+        await asyncio.to_thread(shutil.rmtree, folder, True)
+
+
+VEO_CUT_TIMEOUT_S = 900
+
+
+async def _process_clip_veo(clip: Dict[str, Any], video: Dict[str, Any], start_s: float, end_s: float) -> None:
+    """Klip z Veo: adres MP4 odświeżony tuż przed cięciem, ffmpeg `-ss` przed `-i` (skok po Range, bez pobierania całego pliku)."""
+    from app import mentor_veo
+    from app import mentor_veo_rules as vr
+
+    await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip["id"]).values(mp4_status="working"))
+    try:
+        source = await mentor_veo.resolve_media(video)
+    except mentor_veo.VeoError as exc:
+        raise UserFacingError(str(exc)) from exc
+    folder = await asyncio.to_thread(_tmpdir)
+    try:
+        target = os.path.join(folder, "clip.mp4")
+        args = vr.cut_args(R.cut_args(source, target, start_s, end_s), source)
+        done = await asyncio.to_thread(_run, args, VEO_CUT_TIMEOUT_S)
+        if done.returncode != 0 or not os.path.exists(target):
+            raise RuntimeError(f"ffmpeg: {done.stderr[-400:]}")
+        key = object_key(clip["pair_id"], "clips", f"{clip['id']}.mp4")
+        size = await asyncio.to_thread(put_file, target, key, "video/mp4")
+        await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip["id"])
+                               .values(mp4_status="ready", mp4_key=key, mp4_size=size))
+        await C.touch(clip["pair_id"], clip["author_id"], "clip_mp4_ready", "clips", clip["match_id"], {"id": clip["id"], "source": "veo"})
     finally:
         await asyncio.to_thread(shutil.rmtree, folder, True)
 

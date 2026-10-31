@@ -18,8 +18,10 @@ WHISTLES: Tuple[str, ...] = ("start", "second_half")
 SYNC_KEY = {"start": "match_start_s", "second_half": "second_half_s"}
 WHISTLE_LABEL = {"start": "pierwszy gwizdek", "second_half": "początek II połowy"}
 
-#: Pierwszeństwo źródła przy klipie z linku: własny plik, potem Bastion.
-SOURCE_ORDER = {"file": 0, "bastion": 1}
+#: Pierwszeństwo źródła przy klipie z linku: własny plik, potem Veo (cięcie w kilkanaście sekund), potem Bastion (kolejka connectora).
+SOURCE_ORDER = {"file": 0, "veo": 1, "bastion": 2}
+#: Powód planu dla nagrania Veo, którego nie da się teraz przeczytać: status Veo -> powód.
+VEO_REASONS = {"private": "VEO_PRIVATE", "gone": "VEO_GONE", "processing": "VEO_PROCESSING", "unavailable": "VEO_UNAVAILABLE"}
 
 #: Plansza tytułowa: tyle sekund przed klipem.
 CARD_SECONDS = 2
@@ -30,6 +32,7 @@ CARD_LOOK_VERSION = 2
 #: Szacowane czasy przygotowania (sekundy): plik tniemy lokalnie, Bastion przez kolejkę connectora.
 ESTIMATE_FILE_S = 12
 ESTIMATE_BASTION_S = 90
+ESTIMATE_VEO_S = 20
 ESTIMATE_CARD_S = 10
 
 
@@ -65,8 +68,8 @@ def _missing(video: Mapping[str, Any]) -> List[Dict[str, Any]]:
 def choose_source(clip_video: Mapping[str, Any], options: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     """Rozstrzyga, skąd wyciąć klip.
 
-    `clip_video`: {id, label, kind: "file"|"bastion"|"link", sync, ready}. `options`: pozostałe nagrania meczu
-    zdolne dać MP4, każde {id, label, kind: "file"|"bastion", sync, ready}.
+    `clip_video`: {id, label, kind: "file"|"veo"|"bastion"|"link", sync, ready}. `options`: pozostałe nagrania meczu
+    zdolne dać MP4, każde {id, label, kind: "file"|"veo"|"bastion", sync, ready}.
     Zwraca {mode: "direct"|"convert"|"none", option, reason, missing}; reason: None | NEED_SYNC | NO_SOURCE | NOT_READY.
     """
     if clip_video.get("kind") in SOURCE_ORDER:
@@ -87,6 +90,14 @@ def choose_source(clip_video: Mapping[str, Any], options: Sequence[Mapping[str, 
     return {"mode": "convert", "option": dict(best), "reason": "NEED_SYNC", "missing": missing}
 
 
+VEO_HINTS = {
+    "VEO_PRIVATE": "To nagranie w Veo jest prywatne, więc nie zrobimy z niego pliku. Poproś właściciela o udostępnienie go przez link i sprawdź ponownie.",
+    "VEO_GONE": "To nagranie zostało usunięte z Veo albo link jest nieprawidłowy, więc nie zrobimy z niego pliku.",
+    "VEO_PROCESSING": "Veo jeszcze przetwarza to nagranie. Spróbuj ponownie za kilka minut.",
+    "VEO_UNAVAILABLE": "Veo chwilowo nie odpowiada. Spróbuj ponownie za chwilę.",
+}
+
+
 def hint_for(reason: Optional[str], missing: Sequence[Mapping[str, Any]] = (), option: Optional[Mapping[str, Any]] = None) -> str:
     """Zdanie po polsku do pokazania pod przyciskiem „Pobierz”."""
     if reason == "NEED_SYNC":
@@ -94,14 +105,18 @@ def hint_for(reason: Optional[str], missing: Sequence[Mapping[str, Any]] = (), o
         return ("Żeby wyciąć ten klip z drugiego nagrania meczu, zsynchronizuj nagrania dwoma gwizdkami. Brakuje: "
                 + "; ".join(parts) + ".")
     if reason == "NO_SOURCE":
-        return ("Ten klip jest zaznaczony na wideo-linku (YouTube/Vimeo), z którego nie zrobimy pliku. "
-                "Dodaj do meczu nagranie z Bastionu albo wgraj własny plik, a potem zsynchronizuj je z linkiem.")
+        return ("Ten klip jest zaznaczony na wideo-linku (np. YouTube lub Vimeo), z którego nie zrobimy pliku. "
+                "Dodaj do meczu nagranie z Veo lub Bastionu albo wgraj własny plik, a potem zsynchronizuj je z linkiem.")
+    if reason in ("VEO_PRIVATE", "VEO_GONE", "VEO_PROCESSING", "VEO_UNAVAILABLE"):
+        return VEO_HINTS[reason]
     if reason == "NOT_READY":
         return "Nagranie jeszcze się przetwarza. Spróbuj za chwilę."
     if reason == "BAD_RANGE":
         return "Bastion przyjmuje klipy od 2 do 300 sekund. Skróć albo wydłuż zaznaczony fragment."
     if option and option.get("kind") == "bastion":
         return "Plik przygotuje Bastion, zwykle około półtorej minuty."
+    if option and option.get("kind") == "veo":
+        return "Fragment wytniemy prosto z nagrania w Veo, zwykle w pół minuty."
     return "Plik przygotujemy w kilkanaście sekund."
 
 
@@ -271,5 +286,5 @@ def allocate_batch(plans: Sequence[Mapping[str, Any]], active_bastion: int, cap:
 
 
 def estimate_s(source: Optional[str], title_card: bool) -> int:
-    base = ESTIMATE_BASTION_S if source == "bastion" else ESTIMATE_FILE_S
+    base = ESTIMATE_BASTION_S if source == "bastion" else ESTIMATE_VEO_S if source == "veo" else ESTIMATE_FILE_S
     return base + (ESTIMATE_CARD_S if title_card else 0)
