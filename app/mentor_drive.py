@@ -343,6 +343,8 @@ async def connect_drive(pair_id: str, body: Optional[ConnectBody] = None, actor:
     if return_url and not DR.return_url_ok(return_url):
         raise derr(422, "RETURN_URL", "Ten adres powrotu nie jest dozwolony.")
     conn = await get_conn(ctx["pair_id"])
+    if conn and R.s(conn["owner_judge_id"]) != actor.judge_id:
+        transfer.guard(conn)
     if conn and conn.get("state") == "connected" and R.s(conn["owner_judge_id"]) != actor.judge_id:
         names = await C.people([conn["owner_judge_id"]])
         raise derr(409, "DRIVE_ALREADY_CONNECTED", "Dysk tej pary jest już podłączony przez inną osobę.",
@@ -401,7 +403,12 @@ async def drive_callback(code: Optional[str] = Query(None), state: Optional[str]
         # Inne konto = inny Dysk: stary folder byłby dla nowego tokenu niewidoczny (drive.file), więc zaczynamy od wyboru.
         keep = {"partner_email": existing.get("partner_email")} if existing else {}
         if existing:
-            await database.execute(CONN.delete().where(CONN.c.pair_id == pair_id))
+            transfer.guard(existing)
+            await database.execute(CONN.delete().where(CONN.c.pair_id == pair_id)
+                                   .where(CONN.c.owner_judge_id == existing["owner_judge_id"])
+                                   .where(or_(CONN.c.folder_transfer_state.is_(None), CONN.c.folder_transfer_state.notin_(transfer.ACTIVE))))
+            if await get_conn(pair_id):
+                raise derr(409, "TRANSFER_ACTIVE", "Przenoszenie albo zmiana połączenia już trwa. Dokończ je przed zmianą konta.")
             await database.execute(FOLDERS.delete().where(FOLDERS.c.pair_id == pair_id))
         await database.execute(CONN.insert().values(pair_id=pair_id, connected_at=stamp, layout=DR.DEFAULT_LAYOUT,
                                                     share_status="none", **keep, **values))
@@ -435,6 +442,7 @@ async def picker_token(pair_id: str, response: Response, actor: Actor = Depends(
 
 
 class FolderBody(BaseModel):
+    expected_source_folder_id: Optional[str] = Field(default=None, max_length=120)
     file_id: Optional[str] = Field(default=None, max_length=120)
     create: bool = False
     name: Optional[str] = Field(default=None, max_length=120)
@@ -454,6 +462,9 @@ async def set_folder(pair_id: str, body: FolderBody, actor: Actor = Depends(ment
         raise derr(422, "LAYOUT", "Nieznany układ folderów.")
     if not body.file_id and not body.create and not layout:
         raise derr(422, "NOTHING_TO_DO", "Podaj file_id, create albo layout.")
+    transfer.guard(conn)
+    if body.expected_source_folder_id is not None and body.expected_source_folder_id != conn.get("folder_id"):
+        raise derr(409, "TRANSFER_SOURCE_CHANGED", "Folder Teczki zmienił się. Odśwież ustawienia.")
     pid = ctx["pair_id"]
     folder: Optional[Dict[str, Any]] = None
     if body.file_id:
@@ -475,7 +486,13 @@ async def set_folder(pair_id: str, body: FolderBody, actor: Actor = Depends(ment
     if folder:
         values.update(folder_id=folder["id"], folder_name=folder.get("name"), folder_url=folder.get("webViewLink"),
                       folder_problem=None, share_status="none", share_error=None, shared_at=None, access_snapshot=None)
-    await database.execute(update(CONN).where(CONN.c.pair_id == pid).values(**values))
+    await database.execute(update(CONN).where(CONN.c.pair_id == pid).where(CONN.c.folder_id == conn.get("folder_id"))
+                           .where(or_(CONN.c.folder_transfer_state.is_(None), CONN.c.folder_transfer_state.notin_(transfer.ACTIVE)))
+                           .values(**values))
+    applied = await get_conn(pid)
+    if (not applied or transfer.busy(applied) or (folder and applied.get("folder_id") != folder["id"])
+            or (layout and applied.get("layout") != layout)):
+        raise derr(409, "TRANSFER_ACTIVE", "W międzyczasie rozpoczęto inną zmianę folderu. Odśwież ustawienia.")
     if folder and conn.get("partner_email"):
         await attempt_share(pid, conn["partner_email"], actor)  # goście NIE przechodzą na nowy folder (mógłby mieć cudze pliki)
     await _touch(ctx, "drive_folder")
@@ -520,6 +537,7 @@ async def share_folder(pair_id: str, body: ShareBody, actor: Actor = Depends(men
     wynik czytaj z `partner.share_status` / `partner.share_error`."""
     ctx = await _context(pair_id, actor, "video")
     conn = _require_owner(await get_conn(ctx["pair_id"]), actor)
+    transfer.guard(conn)
     email = DR.clean_email(body.email)
     if not email:
         raise derr(422, "EMAIL", "Podaj poprawny adres e-mail konta Google partnera.")
@@ -536,6 +554,7 @@ async def disconnect_drive(pair_id: str, actor: Actor = Depends(mentor_actor)):
     """Odłączenie: token znika, kolejka się zamyka. Pliki zostają na Dysku (i w księdze jako zapisane)."""
     ctx = await _context(pair_id, actor, "video")
     conn = _require_owner(await get_conn(ctx["pair_id"]), actor)
+    transfer.guard(conn)
     tokens = DR.unseal_tokens(conn["token_enc"], DR.token_key(_secret()), _aad(ctx["pair_id"])) or {}
     if tokens.get("refresh_token"):
         try:
@@ -543,7 +562,10 @@ async def disconnect_drive(pair_id: str, actor: Actor = Depends(mentor_actor)):
         except Exception:  # noqa: BLE001
             pass
     pid = ctx["pair_id"]
-    await database.execute(CONN.delete().where(CONN.c.pair_id == pid))
+    await database.execute(CONN.delete().where(CONN.c.pair_id == pid).where(CONN.c.owner_judge_id == conn["owner_judge_id"])
+                           .where(or_(CONN.c.folder_transfer_state.is_(None), CONN.c.folder_transfer_state.notin_(transfer.ACTIVE))))
+    if await get_conn(pid):
+        raise derr(409, "TRANSFER_ACTIVE", "W międzyczasie rozpoczęto zmianę folderu. Połączenie pozostaje zapisane; w razie potrzeby połącz Dysk ponownie.")
     await database.execute(FOLDERS.delete().where(FOLDERS.c.pair_id == pid))
     await database.execute(update(FILES).where(FILES.c.pair_id == pid).where(FILES.c.state.in_(DR.ACTIVE_STATES))
                            .values(state="cancelled", lease_until=None, worker_id=None, updated_at=C.now()))
@@ -675,6 +697,7 @@ async def _access_ctx(pair_id: str, actor: Actor):
     conn = await get_conn(ctx["pair_id"])
     if not conn:
         raise derr(409, "DRIVE_NOT_CONNECTED", "Teczka pary nie jest jeszcze połączona z Dyskiem Google.")
+    transfer.guard(conn)
     if not _can_manage(ctx, conn, actor):
         raise derr(403, "DRIVE_NOT_MANAGER", "Dostępem do folderu zarządzają obie osoby z pary.")
     if not conn.get("folder_id"):
@@ -1233,7 +1256,8 @@ async def claim_next(worker_id: str, now: Optional[datetime] = None) -> Optional
     ważnego połączenia i folderu czekają nietknięte (nie zużywają prób)."""
     now = now or C.now()
     usable = {r["pair_id"] for r in await C.rows(select(CONN.c.pair_id).where(CONN.c.state == "connected")
-                                                 .where(CONN.c.folder_id.is_not(None)).where(CONN.c.folder_problem.is_(None)))}
+                                                 .where(CONN.c.folder_id.is_not(None)).where(CONN.c.folder_problem.is_(None))
+                                                 .where(or_(CONN.c.folder_transfer_state.is_(None), CONN.c.folder_transfer_state.notin_(transfer.ACTIVE))))}
     for job in await C.rows(select(FILES).where(FILES.c.state.in_(("queued", "working"))).order_by(FILES.c.created_at.asc()).limit(200)):
         if job["pair_id"] not in usable:
             continue
@@ -1346,7 +1370,7 @@ async def process(job: Dict[str, Any], worker_id: str) -> str:
             return "waiting"
         access = await access_for(pid)
         conn = await get_conn(pid)
-        if not conn or not conn.get("folder_id"):
+        if not conn or not conn.get("folder_id") or transfer.busy(conn):
             await _release(job)
             return "waiting"
         parent = await ensure_path(access, conn, job)
@@ -1415,10 +1439,11 @@ async def _handle_google_error(job: Dict[str, Any], exc: G.GoogleError) -> str:
 
 
 async def work_once(worker_id: str, now: Optional[datetime] = None) -> bool:
+    transfer_busy = await transfer.work_once(worker_id, now)
     await promote_waiting(now or C.now())
     job = await claim_next(worker_id, now)
     if not job:
-        return False
+        return transfer_busy
     await process(job, worker_id)
     return True
 
@@ -1454,3 +1479,7 @@ async def run_drive_worker(number: int = 1) -> None:
             except asyncio.TimeoutError:
                 pass
             _wake.clear()
+
+
+from app import mentor_drive_transfer as transfer
+router.include_router(transfer.router)
