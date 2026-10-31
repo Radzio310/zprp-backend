@@ -23,10 +23,14 @@ SOURCE_ORDER = {"file": 0, "bastion": 1}
 
 #: Plansza tytułowa: tyle sekund przed klipem.
 CARD_SECONDS = 2
+#: Ostatnie tyle sekund planszy przenika się z początkiem klipu (wliczone w CARD_SECONDS).
+CARD_FADE_S = 0.25
+#: Wersja wyglądu planszy w jej podpisie: podbicie = stare warianty przerenderują się przy następnym pobraniu.
+CARD_LOOK_VERSION = 2
 #: Szacowane czasy przygotowania (sekundy): plik tniemy lokalnie, Bastion przez kolejkę connectora.
 ESTIMATE_FILE_S = 12
 ESTIMATE_BASTION_S = 90
-ESTIMATE_CARD_S = 8
+ESTIMATE_CARD_S = 10
 
 
 def sync_gaps(sync: Optional[Mapping[str, Any]]) -> List[str]:
@@ -164,9 +168,65 @@ def full_filename(match: Mapping[str, Any], category: Any, filename: str, limit:
     return " ".join(p for p in (head, cat, base) if p)[: limit - 4].rstrip(" .") + ".mp4"
 
 
-def card_signature(lines: Sequence[str]) -> str:
-    """Odcisk treści planszy: gdy tytuł albo kategoria się zmienią, stary wariant przestaje być aktualny."""
-    return hashlib.sha1("\n".join(lines).encode("utf-8")).hexdigest()[:16]
+def card_signature(lines: Sequence[str], details: Optional[Mapping[str, Any]] = None) -> str:
+    """Odcisk treści i wyglądu planszy: gdy tytuł, kategoria, dane meczu albo wersja wyglądu się zmienią, stary wariant
+    przestaje być aktualny. Adresów herbów tu nie ma: chwilowy błąd ich odczytu nie może unieważniać gotowych plików."""
+    extra = [f"{key}={details[key]}" for key in sorted(details or {})]
+    return hashlib.sha1("\n".join([f"look={CARD_LOOK_VERSION}", *lines, *extra]).encode("utf-8")).hexdigest()[:16]
+
+
+def card_date(value: Any) -> str:
+    """„2026-10-10” -> „10.10.2026”. Inny kształt = pusto, plansza bez daty zamiast śmieci."""
+    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", str(value or "")[:10])
+    return f"{match.group(3)}.{match.group(2)}.{match.group(1)}" if match else ""
+
+
+def card_time_label(match_ms: Any, video_s: float, sync: Optional[Mapping[str, Any]]) -> str:
+    """Podpis pod minutą, ta sama kolejność źródeł co `match_time_s`. Bez protokołu i gwizdków minuta jest czasem
+    nagrania i tak ją podpisujemy, a nie zgadujemy połowy. Pusty napis = połowy nie da się ustalić uczciwie."""
+    data = sync if isinstance(sync, Mapping) else {}
+    second, start, half = data.get("second_half_s"), data.get("match_start_s"), data.get("half_minutes")
+    if match_ms is not None:
+        return "II połowa" if float(match_ms) / 1000.0 >= float(half or 30) * 60 else "I połowa"
+    if second is not None and float(video_s) >= float(second) and (half or start is not None):
+        return "II połowa"
+    if start is None:
+        return "Czas nagrania"
+    if second is not None:
+        return "I połowa"
+    return "I połowa" if float(video_s) - float(start) < float(half or 30) * 60 else ""
+
+
+# Barwa numeru meczu: 1:1 z `utils/matchCategoryColor.ts` (BAZA i BAZA_web, tablica ciemna, `matchNumberColor`), bo numer ma znaczyć
+# to samo co na kafelku meczu. Zmiana palety tam = zmiana tutaj. Kolejność ma znaczenie: „IM” jest częścią „IIM”.
+MATCH_NUMBER_COLORS: Dict[str, str] = {
+    "MP": "#cb997e", "PP": "#ddbea9", "SPM": "#F72585", "SPK": "#F72585", "MłM1213": "#cdb4db", "MłK1213": "#cdb4db",
+    "MłM": "#bde0fe", "MłK": "#bde0fe", "JmM": "#83c5be", "JmK": "#83c5be", "JK": "#52b788", "JM": "#52b788",
+    "IIIM": "#ffaa00", "IIIK": "#ffaa00", "IIM": "#ffd6a5", "IIK": "#ffd6a5", "IK": "#e56b6f", "IM": "#e56b6f",
+    "LCM": "#8338ec", "LCK": "#8338ec", "OSM": "#3a86ff", "OSK": "#3a86ff", "SM": "#bb9457", "SK": "#936639",
+}
+MATCH_NUMBER_ALIASES: Dict[str, str] = {"DzM": "MłM1213", "DzK": "MłK1213"}
+MATCH_NUMBER_UNKNOWN = "#888888"
+
+
+def match_number_color(code: Any) -> str:
+    """Barwa plakietki numeru. Wielkość liter niesie znaczenie (JmK to nie JMK), nierozpoznany numer: szarość, jak w aplikacji."""
+    text = str(code or "")
+    for category, color in MATCH_NUMBER_COLORS.items():
+        if category in text:
+            return color
+    for alias, real in MATCH_NUMBER_ALIASES.items():
+        if alias in text:
+            return MATCH_NUMBER_COLORS[real]
+    return MATCH_NUMBER_UNKNOWN
+
+
+def card_details(match: Mapping[str, Any], *, category_color: Any, time_label: str) -> Dict[str, str]:
+    """Pola planszy obok `card_lines` (te cztery zachowują znaczenie). Nazwisk sędziów tu nie ma: plik często idzie dalej."""
+    return {"half": time_label, "competition": str(match.get("competition") or "").strip(), "date": card_date(match.get("date")),
+            "code": str(match.get("code") or "").strip(), "code_color": match_number_color(match.get("code")) if str(match.get("code") or "").strip() else "",
+            "home": str(match.get("home") or "").strip(),
+            "away": str(match.get("away") or "").strip(), "category_color": str(category_color or "")}
 
 
 def match_time_s(match_ms: Any, video_s: float, sync: Optional[Mapping[str, Any]]) -> float:

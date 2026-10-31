@@ -4,8 +4,8 @@ Rozwija istniejący przepływ MP4 („Ciemnia”), nie buduje drugiego:
   - klip na własnym pliku -> kolejka ffmpeg (`mentor_panel_media`), klip na Bastionie -> zadanie connectora,
   - klip na wideo-linku (YouTube/Vimeo) -> czas przeliczamy z synchronizacji nagrań meczu (`mentor_clip_download_rules`)
     na własny plik, a gdy go nie ma, na nagranie Bastionu; potem ta sama kolejka co wyżej,
-  - plansza tytułowa to OSOBNY wariant pliku (`card_*` w `mentor_clips`), robiony z gotowego zwykłego MP4 (Pillow + ffmpeg
-    w backendzie; zwykły plik zostaje nietknięty).
+  - plansza tytułowa to OSOBNY wariant pliku (`card_*` w `mentor_clips`), robiony z gotowego zwykłego MP4 (wygląd i ruch:
+    `mentor_clip_card`; zwykły plik zostaje nietknięty).
 Importy bazy na górze jak w reszcie panelu (`app.db` łączy się przy imporcie).
 """
 
@@ -16,24 +16,34 @@ import json
 import logging
 import os
 import shutil
-from typing import Any, Dict, List, Optional
+import time
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 
 from app import mentor_bastion_rules as BR
+from app import mentor_clip_card as CARD
 from app import mentor_clip_download_rules as D
 from app import mentor_panel_core as C
 from app import mentor_panel_media as M
 from app import mentor_panel_rules as R
-from app.db import database, mentor_categories, mentor_clips, mentor_match_videos, mentor_uploads
+from app.db import database, mentor_clips, mentor_match_videos, mentor_uploads
 from app.mentor_panel_auth import mentor_actor
 
 logger = logging.getLogger("app.mentor_clip_download")
 router = APIRouter(prefix="/mentor-panel", tags=["Mentor"])
 Actor = C.MentorActor
-FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "NotoSans-Regular.ttf")
+
+#: Herb na planszę: limity pobierania i pamięć wyników (herb + barwa). Błąd pamiętamy krócej, ale paczka nie czeka na każdy klip.
+CREST_MAX_BYTES = 1_500_000
+CREST_DEADLINE_S = 5.0
+CREST_CACHE_MAX = 48
+CREST_TTL_S = 6 * 3600.0
+CREST_FAIL_TTL_S = 600.0
+_crest_cache: "OrderedDict[str, Tuple[float, Optional[bytes], Optional[str]]]" = OrderedDict()
 
 
 def derr(status: int, code: str, message: str, **extra: Any):
@@ -83,6 +93,8 @@ class Context:
         self._uploads: Optional[Dict[str, Dict[str, Any]]] = None
         self._cards: Optional[Dict[str, Dict[str, Any]]] = None
         self._cats: Optional[Dict[str, str]] = None
+        self._category_rows: Optional[List[Dict[str, Any]]] = None
+        self._watched: Dict[str, Dict[str, Any]] = {}
 
     async def videos(self, match_id: str) -> List[Dict[str, Any]]:
         if match_id not in self._videos:
@@ -97,20 +109,40 @@ class Context:
             self._uploads = {r["id"]: r for r in rows}
         return self._uploads
 
-    async def card(self, match_id: str) -> Dict[str, Any]:
+    async def _raw_card(self, match_id: str) -> Dict[str, Any]:
+        """Karta meczu pary albo (przedrostek `tr_`) migawka meczu z Trybuny. Brak karty = puste pola, pobrania nie blokuje."""
+        if R.s(match_id).startswith("tr_"):
+            if match_id not in self._watched:
+                from app.mentor_trybuna import lookup_cards
+
+                try:
+                    self._watched.update(await lookup_cards(self.ctx["pair_id"], [match_id]))
+                except Exception:  # noqa: BLE001
+                    logger.warning("mentor: karta meczu z Trybuny %s nieczytelna", match_id, exc_info=True)
+                self._watched.setdefault(match_id, {})
+            return self._watched[match_id]
         if self._cards is None:
             try:
                 cards = await C.pair_match_cards(self.ctx["judge_ids"])
             except Exception:  # noqa: BLE001 - brak karty meczu nie blokuje pobrania
                 cards = []
             self._cards = {c["match_id"]: c for c in cards}
-        card = self._cards.get(match_id) or {}
-        return {"date": R.s(card.get("scheduled_at"))[:10], "home": (card.get("home") or {}).get("name"),
-                "away": (card.get("away") or {}).get("name"), "code": card.get("match_code")}
+        return self._cards.get(match_id) or {}
+
+    async def card(self, match_id: str) -> Dict[str, Any]:
+        card = await self._raw_card(match_id)
+        home, away = card.get("home") or {}, card.get("away") or {}
+        return {"date": R.s(card.get("scheduled_at"))[:10], "home": home.get("name"), "away": away.get("name"), "code": card.get("match_code"),
+                "competition": card.get("competition_name") or card.get("category"), "home_logo": home.get("logo_url"), "away_logo": away.get("logo_url")}
+
+    async def category_rows(self) -> List[Dict[str, Any]]:
+        if self._category_rows is None:
+            self._category_rows = await C.categories(self.ctx, seed=False)
+        return self._category_rows
 
     async def category_names(self) -> Dict[str, str]:
         if self._cats is None:
-            self._cats = {r["id"]: R.s(r.get("name")) for r in await C.categories(self.ctx, seed=False)}
+            self._cats = {r["id"]: R.s(r.get("name")) for r in await self.category_rows()}
         return self._cats
 
 
@@ -123,6 +155,29 @@ def _category_of(clip: Dict[str, Any], names: Dict[str, str]) -> str:
     if clip.get("important"):
         return "Istotne"
     return "Bez kategorii"
+
+
+def _category_color(clip: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
+    """Kolor kategorii z `_category_of`: ta sama kolejność, nazwa koloru z palety Mentora."""
+    named = {r["id"]: r for r in rows if R.s(r.get("name"))}
+    for cid in R.json_value(clip.get("category_ids"), []) or []:
+        if R.s(cid) in named:
+            return R.s(named[R.s(cid)].get("color")) or "slate"
+    if clip.get("to_discuss"):
+        return "amber"
+    return "orange" if clip.get("important") else "slate"
+
+
+async def _card_content(shared: Context, clip: Dict[str, Any], sync: Any) -> Tuple[List[str], Dict[str, str], Dict[str, Any]]:
+    """Treść planszy, wspólna dla planu i workera, żeby ich podpisy były równe: `card_lines`, pola dodatkowe, karta meczu."""
+    match = await shared.card(clip["match_id"])
+    rows = await shared.category_rows()
+    category = _category_of(clip, {r["id"]: R.s(r.get("name")) for r in rows})
+    video_s = float(clip["start_s"])
+    seconds = D.match_time_s(clip.get("match_ms"), video_s, sync)
+    lines = [D.folder_names(match, category)["match"], D.match_clock(seconds), R.s(clip.get("title")) or "Klip", category]
+    details = D.card_details(match, category_color=_category_color(clip, rows), time_label=D.card_time_label(clip.get("match_ms"), video_s, sync))
+    return lines, details, match
 
 
 def _stored_source(clip: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -173,13 +228,12 @@ async def build_plan(shared: Context, clip: Dict[str, Any], actor: Any, *, title
         source = None if reason != "NEED_SYNC" else source
     can = reason is None and target is not None
     # Nazwa pliku i folder.
-    cats = await shared.category_names()
-    category = _category_of(clip, cats)
+    category = _category_of(clip, await shared.category_names())
     seconds = D.match_time_s(clip.get("match_ms"), float(clip["start_s"]), own["sync"])
     folder = D.folder_names(await shared.card(clip["match_id"]), category)
     filename = D.download_filename(clip.get("title"), seconds)
-    lines = [folder["match"], D.match_clock(seconds), R.s(clip.get("title")) or "Klip", category]
-    sig = D.card_signature(lines)
+    lines, details, _match = await _card_content(shared, clip, own["sync"])
+    sig = D.card_signature(lines, details)
     status = await _mp4_status(clip, target, own)
     job_info = _job_info(await _plan_job(clip, target, own))
     card_ready = clip.get("card_status") == "ready" and clip.get("card_key") and clip.get("card_sig") == sig
@@ -197,7 +251,7 @@ async def build_plan(shared: Context, clip: Dict[str, Any], actor: Any, *, title
         "hint": D.hint_for(reason, missing, option) if reason else D.hint_for(None, option=option),
         "mp4_status": effective, "url": url, "estimated_s": D.estimate_s(source, title_card) if can else None,
         "filename": filename, "folder": folder, "title_card_available": bool(M.storage_ready()),
-        "title_card": bool(title_card), "card_signature": sig, "card_lines": lines,
+        "title_card": bool(title_card), "card_signature": sig, "card_lines": lines, "card_details": details,
         "source_range": {"video_id": option["id"], "start_s": start_s, "end_s": end_s} if can and option else None,
         **job_info,
     }
@@ -262,7 +316,7 @@ def _bastion_pair(target: Dict[str, Any]) -> tuple:
 
 
 def public_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: v for k, v in plan.items() if not k.startswith("_") and k not in ("card_lines",)}
+    return {k: v for k, v in plan.items() if not k.startswith("_") and k not in ("card_lines", "card_details")}
 
 
 # ─── Zamówienie ─────────────────────────────────────────────────────────────
@@ -353,67 +407,77 @@ async def queue_card(clip: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, An
 # ─── Plansza (worker) ───────────────────────────────────────────────────────
 
 
-def _wrap(draw, text: str, font, width: int, max_lines: int) -> List[str]:
-    words, lines, line = text.split(), [], ""
-    for word in words:
-        trial = f"{line} {word}".strip()
-        if draw.textlength(trial, font=font) <= width or not line:
-            line = trial
-        else:
-            lines.append(line)
-            line = word
-    if line:
-        lines.append(line)
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines[-1] = lines[-1].rstrip(" .") + "..."
-    return lines
+def render_card_png(lines: List[str], width: int, height: int, target: str, details: Optional[Dict[str, Any]] = None) -> None:
+    """Plansza po ustaniu ruchu jako jeden PNG (podgląd i testy; do pliku idą osobne warstwy z `CARD.write_layers`)."""
+    CARD.flatten(CARD.compose(CARD.card_data(lines, details), width, height)).save(target, "PNG")
 
 
-def render_card_png(lines: List[str], width: int, height: int, target: str) -> None:
-    """Plansza 2 s: mecz u góry, duża minuta, tytuł, kategoria. Ciemne tło i koralowy akcent Mentora."""
-    from PIL import Image, ImageDraw, ImageFont
+async def _fetch_crest(url: str) -> Tuple[Optional[bytes], Optional[str]]:
+    """(PNG herbu, barwa) albo (None, None). Tylko hosty z `zprp_public_clubs.logo_url` (SSRF), bez przekierowań, z limitem
+    czasu i rozmiaru strumienia."""
+    import httpx
 
-    match, clock, title, category = (list(lines) + ["", "", "", ""])[:4]
-    img = Image.new("RGB", (width, height), (14, 17, 22))
-    draw = ImageDraw.Draw(img)
-    unit = height / 720.0
-    big, mid, small = (ImageFont.truetype(FONT_PATH, max(12, int(size * unit))) for size in (120, 52, 32))
-    margin = int(width * 0.08)
-    inner = width - 2 * margin
-    draw.rectangle([margin, int(height * 0.2), margin + int(10 * unit), int(height * 0.82)], fill=(255, 122, 89))
-    left = margin + int(40 * unit)
-    y = int(height * 0.2)
-    for row in _wrap(draw, match, small, inner - int(40 * unit), 2):
-        draw.text((left, y), row, font=small, fill=(150, 160, 175))
-        y += int(42 * unit)
-    y += int(14 * unit)
-    draw.text((left, y), clock, font=big, fill=(255, 122, 89))
-    y += int(150 * unit)
-    for row in _wrap(draw, title, mid, inner - int(40 * unit), 2):
-        draw.text((left, y), row, font=mid, fill=(240, 243, 247))
-        y += int(64 * unit)
-    y += int(14 * unit)
-    draw.text((left, y), category, font=small, fill=(255, 122, 89))
-    img.save(target, "PNG")
+    from app.zprp_public import crest as Z
+
+    host = Z._host_ok(url)
+    if not host or host not in await Z.allowed_hosts():
+        return None, None
+    body = bytearray()
+    async with httpx.AsyncClient(follow_redirects=False, timeout=httpx.Timeout(3.0, connect=1.5)) as client:
+        async with client.stream("GET", url, headers={"Accept": "image/*"}) as response:
+            kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
+            if response.status_code != 200 or not kind.startswith("image/"):
+                return None, None
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > CREST_MAX_BYTES:
+                    return None, None
+    raw = bytes(body)
+    image = await asyncio.to_thread(CARD.normalize_crest, raw)
+    if not image:
+        return None, None
+    return image, await asyncio.to_thread(CARD.dominant_color, raw)
 
 
-def card_ffmpeg_args(card_png: str, source: str, target: str, width: int, height: int, has_audio: bool) -> List[str]:
-    """ffmpeg: plansza (obraz w pętli + cisza) i klip sklejone filtrem concat; ten sam rozmiar i klatkaż."""
-    seconds = D.CARD_SECONDS
-    scale = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p"
-    args = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loop", "1", "-framerate", "30", "-t", str(seconds), "-i", card_png]
-    if has_audio:
-        args += ["-f", "lavfi", "-t", str(seconds), "-i", "anullsrc=r=48000:cl=stereo", "-i", source]
-        graph = (f"[0:v]{scale}[v0];[2:v]{scale}[v1];[1:a]aformat=sample_rates=48000:channel_layouts=stereo[a0];"
-                 f"[2:a]aformat=sample_rates=48000:channel_layouts=stereo[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]")
-        maps = ["-map", "[v]", "-map", "[a]", "-c:a", "aac", "-b:a", "128k"]
-    else:
-        args += ["-i", source]
-        graph = f"[0:v]{scale}[v0];[1:v]{scale}[v1];[v0][v1]concat=n=2:v=1:a=0[v]"
-        maps = ["-map", "[v]", "-an"]
-    return [*args, "-filter_complex", graph, *maps, "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart", target]
+async def crest_asset(url: Optional[str]) -> Tuple[Optional[bytes], Optional[str]]:
+    """Herb i jego dominująca barwa z pamięcią wyników. Nigdy nie rzuca: bez herbu plansza dostaje zastępczą tarczę."""
+    target = R.s(url)
+    if not target:
+        return None, None
+    now = time.monotonic()
+    hit = _crest_cache.get(target)
+    if hit and hit[0] > now:
+        _crest_cache.move_to_end(target)
+        return hit[1], hit[2]
+    try:
+        image, color = await asyncio.wait_for(_fetch_crest(target), CREST_DEADLINE_S)
+    except Exception:  # noqa: BLE001 - sieć, limit czasu, zły obraz
+        logger.info("mentor: herb %s niedostępny na planszę", target, exc_info=True)
+        image, color = None, None
+    _crest_cache[target] = (now + (CREST_TTL_S if image else CREST_FAIL_TTL_S), image, color)
+    while len(_crest_cache) > CREST_CACHE_MAX:
+        _crest_cache.popitem(last=False)
+    return image, color
+
+
+async def _crest_url(logo: Any, name: Any) -> Optional[str]:
+    """Adres herbu: z karty meczu, inaczej po nazwie drużyny (monitor okręgu i archiwum kart nie mają `logo_url`)."""
+    if R.s(logo):
+        return R.s(logo)
+    try:
+        from app.mentor_bastion_search import crest_for
+
+        return await crest_for(name)
+    except Exception:  # noqa: BLE001
+        logger.info("mentor: indeks herbów niedostępny na planszę", exc_info=True)
+        return None
+
+
+async def card_assets(match: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Herby i barwy obu drużyn: (crests, colors). Braki to None."""
+    urls = [await _crest_url(match.get("home_logo"), match.get("home")), await _crest_url(match.get("away_logo"), match.get("away"))]
+    (home, home_color), (away, away_color) = await asyncio.gather(crest_asset(urls[0]), crest_asset(urls[1]))
+    return {"home": home, "away": away}, {"home": home_color, "away": away_color}
 
 
 async def next_card() -> Optional[Dict[str, Any]]:
@@ -434,21 +498,22 @@ async def process_card(clip: Dict[str, Any]) -> None:
     height = int(info.get("height") or 720) // 2 * 2
     folder = await asyncio.to_thread(M._tmpdir)
     try:
-        png, target = os.path.join(folder, "card.png"), os.path.join(folder, "card.mp4")
-        lines = await _card_lines(clip)
-        await asyncio.to_thread(render_card_png, lines, width, height, png)
-        done = await asyncio.to_thread(M._run, card_ffmpeg_args(png, source, target, width, height, bool(info.get("has_audio"))), 1800)
+        target = os.path.join(folder, "card.mp4")
+        lines, details, match = await _card_lines(clip)
+        crests, colors = await card_assets(match)
+        layers = await asyncio.to_thread(CARD.write_layers, CARD.card_data(lines, details, crests, colors), width, height, folder)
+        done = await asyncio.to_thread(M._run, CARD.ffmpeg_args(layers, source, target, width, height, bool(info.get("has_audio"))), 1800)
         if done.returncode != 0 or not os.path.exists(target):
             raise RuntimeError(f"ffmpeg: {done.stderr[-400:]}")
         key = M.object_key(clip["pair_id"], "clips", f"{clip['id']}-plansza.mp4")
         size = await asyncio.to_thread(M.put_file, target, key, "video/mp4")
         await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip["id"])
-                               .values(card_status="ready", card_key=key, card_size=size, card_sig=D.card_signature(lines)))
+                               .values(card_status="ready", card_key=key, card_size=size, card_sig=D.card_signature(lines, details)))
     finally:
         await asyncio.to_thread(shutil.rmtree, folder, True)
 
 
-async def _card_lines(clip: Dict[str, Any]) -> List[str]:
+async def _card_lines(clip: Dict[str, Any]) -> Tuple[List[str], Dict[str, str], Dict[str, Any]]:
     """Treść planszy z AKTUALNYCH danych klipu (tytuł mógł się zmienić od zamówienia); odcisk idzie do wiersza."""
     fresh = await C.one(select(mentor_clips).where(mentor_clips.c.id == clip["id"])) or clip
     from app.db import mentoring_pairs
@@ -459,12 +524,7 @@ async def _card_lines(clip: Dict[str, Any]) -> List[str]:
     video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == fresh["video_id"])) or {}
     from app.mentor_video_rules import clean_sync
 
-    sync = clean_sync(R.json_value(video.get("sync_json"), {}))
-    names = {r["id"]: R.s(r.get("name")) for r in await C.rows(select(mentor_categories).where(
-        (mentor_categories.c.pair_id == fresh["pair_id"]) | mentor_categories.c.pair_id.is_(None)))}
-    folder = D.folder_names(await shared.card(fresh["match_id"]), _category_of(fresh, names))
-    seconds = D.match_time_s(fresh.get("match_ms"), float(fresh["start_s"]), sync)
-    return [folder["match"], D.match_clock(seconds), R.s(fresh.get("title")) or "Klip", _category_of(fresh, names)]
+    return await _card_content(shared, fresh, clean_sync(R.json_value(video.get("sync_json"), {})))
 
 
 # ─── Trasy ──────────────────────────────────────────────────────────────────

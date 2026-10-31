@@ -231,7 +231,7 @@ def test_plansza_to_osobny_wariant_zwykly_plik_zostaje(d):
     assert row["mp4_status"] == "ready" and row["card_status"] == "ready" and row["card_key"] != row["mp4_key"]
     assert row["card_key"].endswith("c1-plansza.mp4") and row["mp4_key"].endswith("c1.mp4")
     ff = d.runs[1]
-    assert "-loop" in ff and "concat=n=2:v=1:a=1" in ff[ff.index("-filter_complex") + 1]
+    assert "xfade=transition=fade" in ff[ff.index("-filter_complex") + 1] and ff[-1].endswith("card.mp4")
     assert card_plan["mp4_status"] == "ready" and "c1-plansza.mp4" in card_plan["url"]
     assert plain_plan["mp4_status"] == "ready" and "c1.mp4" in plain_plan["url"] and "plansza" not in plain_plan["url"]
 
@@ -332,3 +332,139 @@ def test_plan_niesie_etap_zadania_blad_i_proby_a_failed_pozwala_ponowic(d):
     assert failed["job_stage"] == "failed" and failed["can_download"] is True and failed["mp4_status"] == "failed"
     assert failed["error_code"] == "BASTION_RETRIES_EXHAUSTED" and failed["error_message"].startswith("Nie udało się po kilku")
     assert again["state"] == "queued" and again["attempts"] == 0
+
+
+# ─── Plansza „Pojedynek herbów”: unieważnienie, herby przez sieć, Trybuna ───────
+
+
+def _png_bytes():
+    import io
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("RGB", (60, 60), (200, 20, 30)).save(out, "PNG")
+    return out.getvalue()
+
+
+def _crest_http(d, handler, hosts=("baza.zprp.pl",)):
+    """Sieć herbów pod atrapą httpx i lista dozwolonych hostów bez bazy."""
+    import httpx
+
+    from app.zprp_public import crest as Z
+
+    real = httpx.AsyncClient
+
+    def client(**kwargs):
+        return real(transport=httpx.MockTransport(handler), **kwargs)
+
+    async def allowed():
+        return set(hosts)
+
+    d.mp.setattr(httpx, "AsyncClient", client)
+    d.mp.setattr(Z, "allowed_hosts", allowed)
+    d.download._crest_cache.clear()
+
+
+def test_nowy_wyglad_uniewaznia_stary_wariant_planszy(d):
+    async def go():
+        await seed(d)
+        await add_clip(d)
+        actor = await actor_for(d)
+        await d.media.request_mp4("c1", actor, d.media.Mp4Request(title_card=True))
+        await d.media.process_next()
+        await d.media.process_next()
+        ready = await plan_of(d, actor=actor, title_card=True)
+        T = d.T["mentor_clips"]
+        import hashlib
+
+        row = await d.core.one(select(T).where(T.c.id == "c1"))
+        assert row["card_sig"] == ready["card_signature"]  # plan i worker liczą ten sam podpis
+        old = hashlib.sha1("\n".join(["Mecz", "26m23", "Kara 2 min - czerwona", "Bez kategorii"]).encode()).hexdigest()[:16]
+        await d.db.execute(T.update().where(T.c.id == "c1").values(card_sig=old))
+        return ready, await plan_of(d, actor=actor, title_card=True), await plan_of(d, actor=actor)
+
+    ready, stale, plain = d.run(go)
+    assert ready["mp4_status"] == "ready"
+    assert stale["mp4_status"] == "none" and stale["url"] is None
+    public = d.download.public_plan(plain)
+    assert plain["mp4_status"] == "ready" and "card_lines" not in public and "card_details" not in public
+
+
+def test_graf_workera_ma_warstwy_i_przenikanie(d):
+    async def go():
+        await seed(d)
+        await add_clip(d)
+        actor = await actor_for(d)
+        await d.media.request_mp4("c1", actor, d.media.Mp4Request(title_card=True))
+        await d.media.process_next()
+        await d.media.process_next()
+
+    d.run(go)
+    graph = d.runs[-1][d.runs[-1].index("-filter_complex") + 1]
+    assert "xfade=transition=fade" in graph and "adelay=1750" in graph and "overlay=" in graph
+
+
+def test_herb_spoza_naszych_hostow_nie_idzie_do_sieci(d):
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        raise AssertionError("to nie powinno wyjść do sieci")
+
+    _crest_http(d, handler)
+    async def go():
+        return [await d.download.crest_asset(url) for url in ("http://169.254.169.254/latest/meta-data", "http://127.0.0.1/x.png",
+                                                              "https://zly.example/x.png", "file:///etc/passwd")]
+
+    assert d.run(go) == [(None, None)] * 4 and calls == []
+
+
+def test_herb_pobrany_ma_barwe_i_jest_pamietany(d):
+    import httpx
+
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, headers={"content-type": "image/png"}, content=_png_bytes())
+
+    _crest_http(d, handler)
+    url = "https://baza.zprp.pl/klub_logo/27.jpg"
+    async def go():
+        return await d.download.crest_asset(url), await d.download.crest_asset(url)
+
+    first, second = d.run(go)
+    assert first[0] and first[1] == "#c8141e" and second == first and len(calls) == 1
+
+
+@pytest.mark.parametrize("response", ["redirect", "html", "huge", "boom", "garbage"])
+def test_blad_herbu_daje_brak_a_nie_wyjatek(d, response):
+    import httpx
+
+    def handler(request):
+        if response == "redirect":
+            return httpx.Response(302, headers={"location": "http://127.0.0.1/"})
+        if response == "html":
+            return httpx.Response(200, headers={"content-type": "text/html"}, content=b"<html>")
+        if response == "huge":
+            return httpx.Response(200, headers={"content-type": "image/png"}, content=b"x" * (d.download.CREST_MAX_BYTES + 1))
+        if response == "boom":
+            raise httpx.ConnectTimeout("timeout")
+        return httpx.Response(200, headers={"content-type": "image/png"}, content=b"to nie obraz")
+
+    _crest_http(d, handler)
+    assert d.run(lambda: d.download.crest_asset("https://baza.zprp.pl/klub_logo/1.jpg")) == (None, None)
+
+
+def test_mecz_z_trybuny_daje_plansze_dane_meczu(d):
+    async def lookup(pair_id, ids):
+        return {ids[0]: {"match_code": "TR-9", "scheduled_at": "2026-10-11T18:00:00", "competition_name": "Superliga",
+                         "home": {"name": "AZS", "logo_url": "https://baza.zprp.pl/klub_logo/1.jpg"}, "away": {"name": "ENE", "logo_url": None}}}
+
+    d.mp.setattr("app.mentor_trybuna.lookup_cards", lookup)
+    shared = d.download.Context({"pair_id": PAIR, "pair_key": PAIR_KEY, "judge_ids": JUDGES})
+    card = d.run(lambda: shared.card("tr_abc"))
+    assert card["home"] == "AZS" and card["code"] == "TR-9" and card["competition"] == "Superliga" and card["home_logo"].endswith("1.jpg")
+    details = d.download.D.card_details(card, category_color="amber", time_label="I połowa")
+    assert details["date"] == "11.10.2026" and not any("sedz" in k or "referee" in k for k in details)
