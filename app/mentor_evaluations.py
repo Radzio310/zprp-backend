@@ -574,6 +574,9 @@ async def insert_link_video(match_id: str, pair_key_value: str, url: str, added_
 
         preview, stream_start = {}, None
         external_id = str(bastion.parse_game_url(url) or "") or None
+    elif provider == "veo":
+        # Veo: podgląd z oficjalnego-nieoficjalnego API (tytuł, miniatura, czas), bez skrobania strony; stan zapisuje się niżej.
+        preview, stream_start, external_id = {}, None, None
     else:
         from app.link_preview import preview_or_instant
 

@@ -111,12 +111,21 @@ def define_tables(metadata):
         Column("idempotency_key", String, nullable=True),
         #: Automat nagrań (30.10.2026): {at, source}, gdy nagranie dodał serwer sam; cofnięcie = zwykłe usunięcie (kosz).
         Column("auto_added_json", Text, nullable=True),
+        #: Veo (31.10.2026): stan nagrania {slug, status, play_url, checked_at, ...} - `app/mentor_veo_rules.py`.
+        Column("veo_json", Text, nullable=True),
         UniqueConstraint("match_id", "normalized_url", name="uq_mentor_match_video_url"),
     )
     Index("uq_mentor_match_video_idem", videos.c.pair_key, videos.c.match_id, videos.c.idempotency_key, unique=True,
           postgresql_where=videos.c.idempotency_key.is_not(None), sqlite_where=videos.c.idempotency_key.is_not(None))
     return evaluations, versions, requests, videos
 
+
+#: Idempotentna migracja (31.10.2026): istniejące linki Veo zapisane jako zwykły link (`video`/`other`) stają się
+#: providerem `veo`. Adres musi być dokładnie ze ścieżką `/matches/` hosta `app.veo.co`.
+VEO_PROVIDER_MIGRATION = (
+    "UPDATE mentor_match_videos SET provider = 'veo' WHERE provider IN ('video', 'other') "
+    "AND (lower(normalized_url) LIKE 'https://app.veo.co/matches/%' OR lower(normalized_url) LIKE 'http://app.veo.co/matches/%')"
+)
 
 #: Kolumny dołożone po pierwszym wdrożeniu - tabele istnieją na produkcji,
 #: więc `create_all` ich nie doda. Wykonuje je `app/db.py` przy starcie.
@@ -136,4 +145,6 @@ MIGRATIONS = (
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS deleted_by varchar",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS trash_json text",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS auto_added_json text",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS veo_json text",
+    VEO_PROVIDER_MIGRATION,
 )

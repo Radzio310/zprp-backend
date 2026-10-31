@@ -576,9 +576,10 @@ def _assemble() -> APIRouter:
     from app.mentor_panel_media import router as media_router
     from app.mentor_panel_reports import router as reports_router
     from app.mentor_panel_streams import router as streams_router
+    from app.mentor_veo import router as veo_router
 
     combined = APIRouter()
-    for part in (auth_router, router, library_router, media_router, reports_router, handoff_router, streams_router, bastion_router, download_router):
+    for part in (auth_router, router, library_router, media_router, reports_router, handoff_router, streams_router, bastion_router, download_router, veo_router):
         combined.include_router(part)
     return combined
 

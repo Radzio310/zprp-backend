@@ -591,3 +591,30 @@ Dziennik: tabela `mentor_drive_log` (append-only; `id`, `pair_id`, `kind`, `acto
 Zmiana folderu: goście NIE przechodzą automatycznie na nowy folder (mógłby zawierać cudze pliki); partner tak jak dotąd. Stary folder zachowuje swoje uprawnienia, a dziennik zapisuje `folder_changed`. Lista dostępu pokazuje zawsze bieżący folder.
 
 Nie sprawdzono na prawdziwym Google: dokładna odpowiedź przy zaproszeniu adresu bez konta Google (kod traktuje każde 400 z `create_permission` jako `NOT_GOOGLE_ACCOUNT`), pole `photoLink` zwykle puste przy `drive.file`, a `permissions.list` dla folderu wybranego Pickerem.
+
+## 12. Nagrania Veo (31.10.2026)
+
+Link `https://app.veo.co/matches/<slug>/` jest pełnoprawnym nagraniem, `provider = "veo"`. Gra prosto z MP4 na `c.veocdn.com` (bez kopii u nas), na stronie i w aplikacji jak YouTube i Bastion. Veo blokuje iframe (`X-Frame-Options: DENY`). **API Veo jest nieoficjalne** (`app.veo.co/api/app/matches/<slug>/` i `.../videos/`, bez logowania), może się zmienić; warunków Veo nie sprawdzano. Kod: `app/mentor_veo_rules.py` (czyste), `app/mentor_veo.py` (sieć, baza, trasa).
+
+### 12.1 Obiekt Video (provider `veo`)
+Te same pola co reszta, plus: `play_url` (najlepszy MP4 1080p `standard`; czasowy, nie zapisuj go po stronie klienta), `playable` (bool: `veo_status == "ok"` i adres na `c.veocdn.com`), `thumbnail_url`, `duration_s`, `title`, **`veo_status`** `ok | private | gone | unavailable | processing`, **`veo_checked_at`** (ISO UTC ostatniego UDANEGO odczytu, `null` gdy jeszcze nie było) i dodatkowo `veo_message` (polski tekst do karty dla stanu innego niż `ok`, `null` przy `ok`). Dla innych providerów `veo_status`, `veo_checked_at`, `veo_message` to `null`. `url` zostaje kanonicznym adresem strony `https://app.veo.co/matches/<slug>` (do przycisku „Otwórz w Veo”). Kind nagrania: `link`.
+- `private`: 401/403 albo `is_accessible=false` albo `privacy` niepubliczne bez żadnego adresu pliku. `gone`: 404/410. `processing`: Veo nie wystawiło jeszcze wariantu. `unavailable`: Veo nie odpowiada, 5xx, zły kształt odpowiedzi, plik spoza `c.veocdn.com`.
+- **Błąd sieci, 5xx, 429 lub nieczytelna odpowiedź NIE zmieniają dobrego stanu** (np. `ok` nie staje się `gone`); `unavailable` dostaje tylko nagranie, które nigdy nie było czytane.
+
+### 12.2 Rozpoznawanie i odczyt
+- Slug ścisłym wzorcem `^[A-Za-z0-9][A-Za-z0-9_-]{5,119}$`, host dokładnie `app.veo.co`, ścieżka `/matches/<slug>[/]`. Dodanie linku (`POST .../matches/{m}/videos`, także `POST /mentor-evaluations/match/{m}/videos` aplikacji) sprowadza go do `https://app.veo.co/matches/<slug>` (bez zapytania i ukośnika), więc ten sam mecz nie powstaje dwa razy. Zły slug albo obca domena = zwykły link (`provider "video"`), Veo nie jest wołane.
+- Stan leży w `mentor_match_videos.veo_json` (nowa kolumna). `GET .../videos` i odpowiedź dodania/PATCH używają zapisu: świeży (TTL **6 h**) nie woła Veo; przeterminowany jest zwracany od razu, a odświeżenie idzie w tłe (lista się nie blokuje); nagranie sprawdzane pierwszy raz dostaje do 4 s, potem też dokończy się w tle. Po nieudanej próbie następna nie wcześniej niż po 5 min.
+- Wywołania tylko do https `app.veo.co` (przekierowania śledzone ręcznie i sprawdzane), odpowiedź JSON do 512 KB, limit 8 s. Plik tylko z https `c.veocdn.com`, także po przekierowaniach.
+- **Migracja** `provider in ('video','other')` + adres `.../app.veo.co/matches/...` na `veo` jest idempotentnym `UPDATE` w `MIGRATIONS` (`app/mentor_evaluation_tables.py`, `VEO_PROVIDER_MIGRATION`); do czasu jej wykonania odczyt sam rozpoznaje stary zapis. Uwaga: dotychczasowy zwykły link ma w bazie provider `video` (nie `other`), migracja obejmuje oba.
+
+### 12.3 `POST /mentor-panel/pairs/{pair_id}/matches/{match_id}/videos/{video_id}/veo/check`
+(adres zgodny z istniejącym wzorcem tras nagrań, z `match_id`). „Sprawdź ponownie”: odświeża stan i zwraca obiekt Video jak `PATCH .../videos/{id}`. Dostęp: każdy z pary i jej mentorów (jak odczyt). Częściej niż co 10 s zwraca zapis bez wołania Veo. `422 NOT_VEO`, gdy nagranie nie jest z Veo, `404 VIDEO_NOT_FOUND` jak wszędzie.
+
+### 12.4 Klipy MP4 z Veo
+- Pełne pobieranie MP4 jak dla Bastionu: klip na nagraniu Veo albo klip z YouTube/Vimeo przeliczony z synchronizacji dwoma gwizdkami (`NEED_SYNC` jak dotąd). Plansza, wariant `title_card`, nazwy, Teczka na Dysku bez zmian. Pierwszeństwo źródła przy klipie z linku: własny plik, **Veo**, Bastion. `source` w planie: `"veo"`, `estimated_s` około 20 s (+10 z planszą).
+- Wycinanie bez pobierania całego pliku: ta sama kolejka ffmpeg (jedno naraz), `-ss` PRZED `-i` z HTTP Range, opcje wejścia `-protocol_whitelist https,tls,tcp,crypto -rw_timeout -reconnect`; limit 15 min. Adres Veo odświeżamy przy zamówieniu i jeszcze raz tuż przed cięciem; łańcuch przekierowań pliku sprawdzamy sami (Range 0-0), a ffmpeg dostaje adres końcowy.
+- Błędy `409` z polskim tekstem: `VEO_PRIVATE` („To nagranie w Veo jest prywatne…”), `VEO_GONE` („…zostało usunięte z Veo albo link jest nieprawidłowy”), `VEO_PROCESSING`, `VEO_UNAVAILABLE`. Te same kody są w `GET /clips/{id}/download-plan` jako `reason` (z `hint`, `can_download = false`).
+- Poprawiony komunikat `NO_SOURCE` („wideo-link”): „Ten klip jest zaznaczony na wideo-linku (np. YouTube lub Vimeo), z którego nie zrobimy pliku. Dodaj do meczu nagranie z Veo lub Bastionu albo wgraj własny plik, a potem zsynchronizuj je z linkiem.”
+
+### 12.5 Nie sprawdzono
+Cięcia ffmpeg na prawdziwym pliku Veo (lokalnie brak ffmpeg z https/mov, Dockera nie uruchamiano); sprawdzono parser na prawdziwym nagraniu i `206` na Range. Czy Veo zmienia adres pliku w czasie dłuższym niż 6 h, nie wiadomo.
