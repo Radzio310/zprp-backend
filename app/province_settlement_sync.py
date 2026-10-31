@@ -244,6 +244,12 @@ async def _collect_district(
         )
     )
 
+    return _district_rows(rows, judges, own=own, current=current)
+
+
+def _district_rows(rows, judges: dict[str, dict], *, own=None, current=None) -> list[dict]:
+    """The same projection for a full run and a single verified match write."""
+    current = current or season_of(_now())
     collected: list[dict] = []
     for row in rows:
         state = _state(row["state_json"])
@@ -774,6 +780,7 @@ async def _store(
     *,
     scope: Optional[set[str]] = None,
     current: str = "",
+    started_at: Optional[datetime] = None,
 ) -> int:
     """
     Zapis obsad i gaszenie tych, ktorych przebieg nie widzial.
@@ -818,21 +825,45 @@ async def _store(
 
     # Obsady, ktorych ten przebieg NIE widzial, gasna. Nie kasujemy ich: mecz
     # zdjety i przywrocony ma wrocic z ta sama historia, a nie jako nowy.
+    from app.settlement_live import lock_province
+
+    async with database.transaction():
+        await lock_province(province)
+        return await _store_locked(province, batch, seen, now, scope, current, started_at)
+
+
+async def _store_locked(province, batch, seen, now, scope, current, started_at):
+    def physical_key(key):
+        prefix, _, match_id = str(key).partition(":")
+        return match_id if prefix in {"d", "o"} else str(key)
+
     stale = await database.fetch_all(
         select(
             province_settlement_matches.c.judge_id,
             province_settlement_matches.c.match_key,
             province_settlement_matches.c.match_at,
+            province_settlement_matches.c.updated_at,
+            province_settlement_matches.c.active,
         ).where(
             and_(
                 province_settlement_matches.c.province == province,
-                province_settlement_matches.c.active.is_(True),
             )
         )
     )
+    # A long ZPRP scrape must never undo a newer, already committed exchange.
+    # Protect the WHOLE match, including the old judge's inactive row.
+    protected = {
+        physical_key(row["match_key"]) for row in stale
+        if started_at and row["updated_at"] and row["updated_at"] > started_at
+    }
+    batch = {key: value for key, value in batch.items() if physical_key(key[1]) not in protected}
     to_drop: list[tuple[str, str]] = []
     for row in stale:
         key = (_s(row["judge_id"]), _s(row["match_key"]))
+        if physical_key(key[1]) in protected:
+            continue
+        if not row["active"]:
+            continue
         if key in seen:
             continue
         # Sezon, ktorego ten przebieg nie pobieral - nie jego sprawa.
@@ -842,23 +873,22 @@ async def _store(
 
     # Zapis paczkami w JEDNEJ transakcji: kilka tysiecy wierszy to kilkanascie
     # zapytan zamiast kilku tysiecy, a przerwany przebieg nie zostawia pol-zapisu.
-    async with database.transaction():
-        await _upsert_matches(list(batch.values()))
-        for start in range(0, len(to_drop), STORE_BATCH):
-            chunk = to_drop[start : start + STORE_BATCH]
-            await database.execute(
-                update(province_settlement_matches)
-                .where(
-                    and_(
-                        province_settlement_matches.c.province == province,
-                        tuple_(
-                            province_settlement_matches.c.judge_id,
-                            province_settlement_matches.c.match_key,
-                        ).in_(chunk),
-                    )
+    await _upsert_matches(list(batch.values()))
+    for start in range(0, len(to_drop), STORE_BATCH):
+        chunk = to_drop[start : start + STORE_BATCH]
+        await database.execute(
+            update(province_settlement_matches)
+            .where(
+                and_(
+                    province_settlement_matches.c.province == province,
+                    tuple_(
+                        province_settlement_matches.c.judge_id,
+                        province_settlement_matches.c.match_key,
+                    ).in_(chunk),
                 )
-                .values(active=False, updated_at=now)
             )
+            .values(active=False, updated_at=now)
+        )
     return len(to_drop)
 
 
@@ -1177,6 +1207,7 @@ async def refresh_province(
     if not province:
         return {"province": "", "ok": False, "error": "Nieznane województwo"}
     settings = get_settings()
+    sync_started_at = _now()
 
     # Przebieg na zadanie ma juz swoj wiersz - zalozyl go endpoint, zeby od razu
     # oddac klientowi numer do sledzenia. Petla dobowa zaklada go tutaj.
@@ -1464,7 +1495,7 @@ async def refresh_province(
                 row["distance_source"] = hit[1] if hit else "none"
 
             await stage("save")
-            await _store(province, rows, judges, scope=scope, current=current)
+            await _store(province, rows, judges, scope=scope, current=current, started_at=sync_started_at)
 
             # Nazwiska dla sedziow, ktorych lista okregu nie nazwala (w zestawieniu
             # stal goly numer) - ze WSZYSTKICH sezonow, nie tylko z tego przebiegu.

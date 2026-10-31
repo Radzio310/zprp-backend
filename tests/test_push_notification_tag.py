@@ -1,13 +1,21 @@
 """Znacznik powiadomienia i grupowanie żywego wątku.
 
-Jedna rewizja meczu jest już jednym zdarzeniem, a wszystkie kolejne rewizje
-tego samego meczu dzielą stabilny ``notificationThread``. Android zastępuje
-więc stary kafel nowszym, podczas gdy niezależne zdarzenia bez wątku nadal
-mają różne znaczniki. Ponowienie tej samej dostawy również nie tworzy kopii.
+Jedna rewizja meczu jest jednym zdarzeniem ze stałym identyfikatorem retry.
+Żywe tematy (np. oferta giełdy) mogą jawnie dzielić ``notificationThread``;
+niezależne zdarzenia zachowują osobne znaczniki.
 """
 from __future__ import annotations
 
 from app.push.fcm import fcm_message_payload, notification_tag
+
+
+def test_structured_fcm_data_uses_valid_json():
+    import json
+    payload = fcm_message_payload("token", "title", "body", {
+        "preference_keys": ["protocolStatus", "lineup"], "nested": {"allowed": True},
+    })["message"]["data"]
+    assert json.loads(payload["preference_keys"]) == ["protocolStatus", "lineup"]
+    assert json.loads(payload["nested"]) == {"allowed": True}
 
 
 def event(key: str) -> dict:

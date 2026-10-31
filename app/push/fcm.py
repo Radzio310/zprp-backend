@@ -231,7 +231,8 @@ def fcm_message_payload(
         "message": {
             "token": fcm_token,
             "notification": {"title": title, "body": body},
-            "data": {k: str(v) for k, v in raw_data.items()},
+            "data": {k: json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)
+                     for k, v in raw_data.items()},
             "android": {
                 # Stały collapse_key sprawia, że telefon, który był offline,
                 # dostaje tylko najświeższy stan żywego wątku.
@@ -241,8 +242,8 @@ def fcm_message_payload(
                 "notification": android_notification,
             },
             "apns": {
-                # `thread-id` grupuje temat, a collapse-id scala wiadomości,
-                # które jeszcze czekają na dostarczenie przez APNs.
+                # `thread-id` groups the subject; collapse-id coalesces repeated
+                # notifications for that identifier on Apple platforms.
                 "headers": {"apns-collapse-id": tag,
                     **({"apns-expiration": str(expiry)} if expiry is not None else {})},
                 "payload": {"aps": aps},

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import delete, insert, or_, select, update
+from sqlalchemy import and_, delete, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import (
@@ -107,6 +107,11 @@ async def send_push_to_judges_report(
     if not ids:
         return report()
     try:
+        newest = push_tokens.alias("newest_push_owner")
+        owner = select(newest.c.installation_id).where(
+            newest.c.token == push_tokens.c.token,
+            newest.c.token_type == push_tokens.c.token_type,
+        ).order_by(newest.c.updated_at.desc(), newest.c.installation_id.desc()).limit(1).scalar_subquery()
         query = select(
                 push_tokens.c.installation_id,
                 push_tokens.c.judge_id,
@@ -115,7 +120,7 @@ async def send_push_to_judges_report(
                 push_tokens.c.notification_prefs,
                 push_tokens.c.app_id,
                 push_tokens.c.app_version,
-            ).where(push_tokens.c.judge_id.in_(ids))
+            ).where(push_tokens.c.judge_id.in_(ids)).where(push_tokens.c.installation_id == owner)
         if app_variant:
             query = query.where(or_(
                 push_tokens.c.app_variant == app_variant,
@@ -143,6 +148,7 @@ async def send_push_to_judges_report(
     sent = 0
     failed = 0
     muted = 0
+    sent_tokens: set[str] = set()
     for row in rows:
         if not device_allowed(row, allow_dev):
             continue
@@ -168,7 +174,10 @@ async def send_push_to_judges_report(
         if person_outcomes[judge_id] != "accepted":
             person_outcomes[judge_id] = "failed"
         try:
-            await send_fcm_message(row["token"], title, body, data=data or {})
+            if row["token"] in sent_tokens:
+                continue
+            sent_tokens.add(row["token"])
+            await send_fcm_message(row["token"], title, body, data={**(data or {}), "judgeId": judge_id})
             sent += 1
             delivered[judge_id] = delivered.get(judge_id, 0) + 1
             person_outcomes[judge_id] = "accepted"
@@ -251,6 +260,23 @@ def _parse_utc_iso(s: str) -> datetime:
 async def register(req: PushRegisterRequest):
     if not req.installation_id or not req.token:
         raise HTTPException(status_code=400, detail="Missing installation_id or token")
+
+    # Reinstallation/Keychain restoration can give one iPhone several installation
+    # IDs with the SAME FCM token. APNs collapse IDs do not prevent repeated alerts
+    # that have already been delivered. One physical token must have one owner.
+    key = int.from_bytes(hashlib.sha256(f"push:{req.token}".encode()).digest()[:8], "big", signed=True)
+    async with database.transaction():
+        await database.execute(text("SELECT pg_advisory_xact_lock(:key)").bindparams(key=key))
+        result = await _register(req)
+        await database.execute(update(push_tokens).where(
+            push_tokens.c.token_type == req.token_type,
+            push_tokens.c.token == req.token,
+            push_tokens.c.installation_id != req.installation_id,
+        ).values(token="", judge_id=None, province=None, updated_at=_utc_now()))
+        return result
+
+
+async def _register(req: PushRegisterRequest):
 
     now = _utc_now()
 
@@ -380,13 +406,13 @@ async def list_match_events(installation_id: str, limit: int = 100):
         raise HTTPException(status_code=400, detail="Missing installation_id")
     from .device_policy import dev_pushes_enabled, device_allowed
     registered_device = await database.fetch_one(
-        select(push_tokens.c.app_id).where(
+        select(push_tokens.c.app_id, push_tokens.c.judge_id).where(
             push_tokens.c.installation_id == installation_id
         )
     )
-    if registered_device and not device_allowed(
-        registered_device, await dev_pushes_enabled()
-    ):
+    if not registered_device or not _clean_judge_id(registered_device["judge_id"]):
+        return {"items": []}
+    if not device_allowed(registered_device, await dev_pushes_enabled()):
         return {"items": []}
     limit = max(1, min(200, int(limit)))
     stmt = (
@@ -410,6 +436,7 @@ async def list_match_events(installation_id: str, limit: int = 100):
             )
         )
         .where(province_match_notifications.c.installation_id == installation_id)
+        .where(province_match_notifications.c.judge_id == _clean_judge_id(registered_device["judge_id"]))
         .where(province_match_notifications.c.send_at_utc <= _utc_now())
         .order_by(province_match_notifications.c.created_at.desc())
         .limit(limit)
@@ -503,13 +530,18 @@ async def bulk(req: PushScheduleBulkRequest):
 
     now = _utc_now()
     items = req.items or []
+    device = await database.fetch_one(select(push_tokens.c.judge_id).where(
+        push_tokens.c.installation_id == req.installation_id))
+    intended_judge = _clean_judge_id(device["judge_id"]) if device else None
 
     inserted = 0
 
     for it in items:
         dt = _parse_utc_iso(it.send_at_utc)
         hour = _send_hour_utc(dt)
-        data = it.data or {}
+        data = {**(it.data or {})}
+        if intended_judge:
+            data["judgeId"] = intended_judge
         client_id = str(data.get("client_id") or "").strip()
         match_id = str(
             data.get("matchId")
@@ -553,7 +585,8 @@ async def bulk(req: PushScheduleBulkRequest):
             # Scheduler najpierw atomowo przejmuje rekord jako `processing`.
             # Równoległa synchronizacja tego samego przypomnienia nie może go
             # cofnąć do `pending`, bo drugi worker wysłałby tę samą wiadomość.
-            where=push_schedules.c.status != "processing",
+            where=and_(push_schedules.c.status != "processing",
+                or_(push_schedules.c.status != "sent", push_schedules.c.send_at_utc != dt)),
         )
         await database.execute(ins)
         inserted += 1

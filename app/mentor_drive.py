@@ -11,6 +11,7 @@ Importy bazy na górze jak w reszcie panelu (`app.db` łączy się przy imporcie
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -21,19 +22,20 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 
 from app import mentor_drive_google as G
 from app import mentor_drive_rules as DR
 from app import mentor_panel_core as C
 from app import mentor_panel_rules as R
-from app.db import database, mentor_clips, mentor_drive_connections, mentor_drive_files, mentor_drive_folders, mentor_match_videos
+from app.db import (database, mentor_clips, mentor_drive_connections, mentor_drive_files, mentor_drive_folders, mentor_drive_log,
+                    mentor_match_videos)
 from app.mentor_panel_auth import mentor_actor
 
 logger = logging.getLogger("app.mentor_drive")
 router = APIRouter(prefix="/mentor-panel", tags=["Mentor Teczka pary"])
 Actor = C.MentorActor
-CONN, FILES, FOLDERS = mentor_drive_connections, mentor_drive_files, mentor_drive_folders
+CONN, FILES, FOLDERS, LOG = mentor_drive_connections, mentor_drive_files, mentor_drive_folders, mentor_drive_log
 
 
 def derr(status: int, code: str, message: str, **extra: Any) -> HTTPException:
@@ -217,6 +219,66 @@ async def _touch(ctx: Dict[str, Any], action: str, match_id: Optional[str] = Non
     await C.touch(ctx, ctx["actor"].judge_id, action, "drive", match_id)
 
 
+async def log_event(pair_id: str, kind: str, *, actor_id: Optional[str] = None, acted_by: Optional[str] = None,
+                    details: Optional[Dict[str, Any]] = None, row_id: Optional[str] = None, at: Optional[datetime] = None) -> bool:
+    """Dziennik działań z BAZY (append-only). NIGDY nie rzuca: błąd zapisu to tylko ostrzeżenie w logach."""
+    try:
+        await database.execute(LOG.insert().values(
+            id=row_id or R.new_id(), pair_id=pair_id, kind=kind, actor_id=R.s(actor_id) or None, acted_by=R.s(acted_by) or None,
+            details=C.dumps(DR.log_details(details)), created_at=at or C.now()))
+        return True
+    except Exception:  # noqa: BLE001
+        logger.warning("mentor: zapis dziennika Dysku nieudany (%s)", kind, exc_info=True)
+        return False
+
+
+async def _log(ctx: Dict[str, Any], kind: str, details: Optional[Dict[str, Any]] = None) -> None:
+    """Działanie osoby z kontekstu; przy `act_as` aktorem zostaje administrator (`acted_by`) obok mentora."""
+    actor = ctx["actor"]
+    await log_event(ctx["pair_id"], kind, actor_id=actor.judge_id, acted_by=actor.acted_by, details=details)
+
+
+async def _clip_title(clip_id: Any) -> Optional[str]:
+    try:
+        found = await C.one(select(mentor_clips.c.title).where(mentor_clips.c.id == clip_id))
+        return R.s((found or {}).get("title")) or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def clip_saved_id(row: Dict[str, Any], stamp: Any) -> str:
+    when = R.aware(stamp) or C.now()
+    return f"cs-{row['id']}-{int(when.timestamp())}"
+
+
+async def _log_clip_saved(job: Dict[str, Any], stamp: Any) -> None:
+    await log_event(job["pair_id"], "clip_saved", actor_id=R.s(job.get("author_judge_id")), row_id=clip_saved_id(job, stamp),
+                    at=R.aware(stamp), details={"clip_id": job.get("clip_id"), "clip_title": await _clip_title(job.get("clip_id")),
+                                                "match_label": job.get("match_label"), "file_name": job.get("name")})
+
+
+async def backfill_activity() -> int:
+    """Jednorazowe, idempotentne uzupełnienie `clip_saved` z księgi zapisów (id deterministyczne; aktor = autor wpisu)."""
+    made = 0
+    have = {r["id"] for r in await C.rows(select(LOG.c.id).where(LOG.c.kind == "clip_saved").limit(100000))}
+    rows = await C.rows(select(FILES).where(FILES.c.state == "done").where(FILES.c.drive_file_id.is_not(None)).limit(20000))
+    titles: Dict[str, str] = {}
+    ids = sorted({R.s(r["clip_id"]) for r in rows})
+    for i in range(0, len(ids), 500):
+        for c in await C.rows(select(mentor_clips.c.id, mentor_clips.c.title).where(mentor_clips.c.id.in_(ids[i:i + 500]))):
+            titles[R.s(c["id"])] = R.s(c.get("title"))
+    for row in rows:
+        stamp = row.get("done_at") or row.get("updated_at") or row.get("created_at")
+        rid = clip_saved_id(row, stamp)
+        if rid in have:
+            continue
+        ok = await log_event(row["pair_id"], "clip_saved", actor_id=R.s(row.get("author_judge_id")), row_id=rid, at=R.aware(stamp),
+                             details={"clip_id": row["clip_id"], "clip_title": titles.get(R.s(row["clip_id"])),
+                                      "match_label": row.get("match_label"), "file_name": row.get("name")})
+        made += 1 if ok else 0
+    return made
+
+
 async def _context(pair_id: str, actor: Actor, action: str = "view") -> Dict[str, Any]:
     need_on()
     return await C.pair_context(pair_id, actor, action=action)
@@ -285,7 +347,7 @@ async def connect_drive(pair_id: str, body: Optional[ConnectBody] = None, actor:
         names = await C.people([conn["owner_judge_id"]])
         raise derr(409, "DRIVE_ALREADY_CONNECTED", "Dysk tej pary jest już podłączony przez inną osobę.",
                    connected_by=C.person(names, conn["owner_judge_id"]))
-    state = DR.sign_state({"p": ctx["pair_id"], "j": actor.judge_id, "r": return_url, "n": secrets.token_hex(6)}, _secret(), C.now())
+    state = DR.sign_state({"p": ctx["pair_id"], "j": actor.judge_id, "a": actor.acted_by, "r": return_url, "n": secrets.token_hex(6)}, _secret(), C.now())
     url = G.auth_url(G.client_id(), DR.redirect_uri(), state)
     return {"url": url, "expires_in": DR.STATE_TTL_S}
 
@@ -347,6 +409,7 @@ async def drive_callback(code: Optional[str] = Query(None), state: Optional[str]
         await C.touch(pair_id, judge_id, "drive_connected", "drive")
     except Exception:  # noqa: BLE001
         logger.warning("mentor: rewizja po połączeniu Dysku nieudana", exc_info=True)
+    await log_event(pair_id, "connected", actor_id=judge_id, acted_by=R.s(body.get("a")) or None, details={"email": user.get("emailAddress")})
     wake_worker()
     return _landing("connected", back, pair_id)
 
@@ -411,11 +474,15 @@ async def set_folder(pair_id: str, body: FolderBody, actor: Actor = Depends(ment
         values["layout"] = layout
     if folder:
         values.update(folder_id=folder["id"], folder_name=folder.get("name"), folder_url=folder.get("webViewLink"),
-                      folder_problem=None, share_status="none", share_error=None, shared_at=None)
+                      folder_problem=None, share_status="none", share_error=None, shared_at=None, access_snapshot=None)
     await database.execute(update(CONN).where(CONN.c.pair_id == pid).values(**values))
     if folder and conn.get("partner_email"):
-        await attempt_share(pid, conn["partner_email"])
+        await attempt_share(pid, conn["partner_email"], actor)  # goście NIE przechodzą na nowy folder (mógłby mieć cudze pliki)
     await _touch(ctx, "drive_folder")
+    if folder:
+        await _log(ctx, "folder_changed", {"folder_name": folder.get("name")})
+    if layout and layout != R.s(conn.get("layout")):
+        await _log(ctx, "layout_changed", {"layout": layout})
     wake_worker()
     return await state_view(ctx, actor)
 
@@ -424,7 +491,7 @@ class ShareBody(BaseModel):
     email: str = Field(max_length=254)
 
 
-async def attempt_share(pair_id: str, email: str) -> None:
+async def attempt_share(pair_id: str, email: str, actor: Optional[Actor] = None) -> None:
     """`permissions.create` (writer). Wynik zostaje w połączeniu (`share_status`/`share_error`) - błąd nie blokuje."""
     conn = await get_conn(pair_id)
     if not conn or not conn.get("folder_id"):
@@ -442,6 +509,9 @@ async def attempt_share(pair_id: str, email: str) -> None:
             status, problem, shared = "error", "SHARE_FAILED", None
     await database.execute(update(CONN).where(CONN.c.pair_id == pair_id).values(
         partner_email=email, share_status=status, share_error=problem, shared_at=shared, updated_at=C.now()))
+    if status == "ok":
+        await log_event(pair_id, "invited", actor_id=actor.judge_id if actor else None, acted_by=actor.acted_by if actor else None,
+                        details={"email": email, "role": "writer"})
 
 
 @router.post("/pairs/{pair_id}/drive/share")
@@ -456,7 +526,7 @@ async def share_folder(pair_id: str, body: ShareBody, actor: Actor = Depends(men
     if not conn.get("folder_id"):
         raise derr(409, "NO_FOLDER", "Najpierw wybierz albo załóż folder pary.")
     await database.execute(update(CONN).where(CONN.c.pair_id == ctx["pair_id"]).values(partner_email=email))
-    await attempt_share(ctx["pair_id"], email)
+    await attempt_share(ctx["pair_id"], email, actor)
     await _touch(ctx, "drive_share")
     return await state_view(ctx, actor)
 
@@ -478,7 +548,292 @@ async def disconnect_drive(pair_id: str, actor: Actor = Depends(mentor_actor)):
     await database.execute(update(FILES).where(FILES.c.pair_id == pid).where(FILES.c.state.in_(DR.ACTIVE_STATES))
                            .values(state="cancelled", lease_until=None, worker_id=None, updated_at=C.now()))
     await _touch(ctx, "drive_disconnected")
+    await _log(ctx, "disconnected", {"email": conn.get("google_email")})
     return await state_view(ctx, actor)
+
+
+# ─── Dostęp do folderu: osoby, role, zaproszenia (31.10.2026) ────────────────
+
+KIND_ORDER = {"owner": 0, "partner": 1, "guest": 2, "outside": 3}
+
+
+class AccessBody(BaseModel):
+    email: str = Field(max_length=254)
+    role: str = Field(default="reader", max_length=20)
+
+
+class RoleBody(BaseModel):
+    role: str = Field(max_length=20)
+
+
+class _NotGoogleAccount(Exception):
+    pass
+
+
+def _can_manage(ctx: Dict[str, Any], conn: Dict[str, Any], actor: Actor) -> bool:
+    """Obie osoby z pary, osoba która podłączyła Dysk, administrator. Mentor z samym wglądem tylko czyta."""
+    return bool(actor.judge_id in ctx["judge_ids"] or actor.judge_id == R.s(conn["owner_judge_id"]) or actor.is_admin)
+
+
+def _snapshot_perm(p: Dict[str, Any]) -> Dict[str, Any]:
+    keys = ("id", "emailAddress", "displayName", "role", "photoLink", "type")
+    return {k: p.get(k) for k in keys if p.get(k) is not None}
+
+
+async def _baza_guest_emails(pair_id: str) -> Dict[str, bool]:
+    """Adresy dodane z BAZY (ostatnie zdarzenie `invited`, bez późniejszego `access_removed`); reszta to `outside`."""
+    known: Dict[str, bool] = {}
+    for row in await C.rows(select(LOG).where(LOG.c.pair_id == pair_id).where(LOG.c.kind.in_(("invited", "access_removed")))
+                            .order_by(LOG.c.created_at.asc(), LOG.c.id.asc()).limit(3000)):
+        email = R.s(R.json_value(row.get("details"), {}).get("email")).lower()
+        if email:
+            known[email] = row["kind"] == "invited"
+    return known
+
+
+async def _access_view(ctx: Dict[str, Any], conn: Dict[str, Any], actor: Actor, perms: List[Dict[str, Any]],
+                       checked_at: datetime, stale: bool) -> Dict[str, Any]:
+    owner_id = R.s(conn["owner_judge_id"])
+    others = [j for j in ctx["judge_ids"] if j != owner_id]
+    names = await C.people([owner_id, *others])
+    partner_email = R.s(conn.get("partner_email")).lower()
+    manage = _can_manage(ctx, conn, actor)
+    from_baza = await _baza_guest_emails(ctx["pair_id"])
+    people: List[Dict[str, Any]] = []
+    for p in perms:
+        email = R.s(p.get("emailAddress")).lower() or None
+        role = DR.role_name(p.get("role"))
+        is_user = p.get("type") == "user"
+        judge_id: Optional[str] = None
+        name = R.s(p.get("displayName")) or email or "Link lub grupa"
+        photo = DR.https_url(p.get("photoLink"))
+        if role == "owner":
+            kind, judge_id = "owner", owner_id
+        elif email and email == partner_email:
+            kind = "partner"
+            if len(others) == 1:
+                judge_id = others[0]
+        else:
+            kind = "guest" if email and from_baza.get(email) else "outside"
+        if judge_id:
+            known = names.get(judge_id) or {}
+            name, photo = R.s(known.get("full_name")) or name, known.get("photo_url") or photo
+        people.append({"permission_id": R.s(p.get("id")), "email": email, "name": name, "photo_url": photo, "role": role,
+                       "kind": kind, "judge_id": judge_id, "can_remove": bool(manage and role != "owner"),
+                       "can_change_role": bool(manage and role != "owner" and is_user)})
+    people.sort(key=lambda x: (KIND_ORDER[x["kind"]], R.s(x["name"]).lower()))
+    used = sum(1 for x in people if x["kind"] in ("guest", "outside"))
+    return {"people": people, "checked_at": _iso(checked_at), "stale": stale, "can_manage": manage,
+            "limits": {"max_guests": DR.MAX_GUESTS, "used": used}}
+
+
+async def _live_access(ctx: Dict[str, Any], actor: Actor, *, strict: bool = False) -> Dict[str, Any]:
+    """Odczyt na żywo (`permissions.list`). Gdy Google nie odpowiada (403, sieć, 429, 5xx), oddaje ostatni zapamiętany odczyt
+    z `stale = true`; wygasły token to nadal `409 DRIVE_NEEDS_RECONNECT`. `strict` = bez zapasu (po zapisie)."""
+    pid = ctx["pair_id"]
+    conn = await get_conn(pid)
+    if not conn:
+        raise derr(409, "DRIVE_NOT_CONNECTED", "Teczka pary nie jest jeszcze połączona z Dyskiem Google.")
+    if not conn.get("folder_id"):
+        return await _access_view(ctx, conn, actor, [], C.now(), False)
+    folder_id = conn["folder_id"]
+    try:
+        perms = await _google(pid, lambda token: G.api().list_permissions(token, folder_id))
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        snap = R.json_value(conn.get("access_snapshot"), None)
+        if strict or R.s(detail.get("code")) == "DRIVE_NEEDS_RECONNECT" or not isinstance(snap, dict) or not snap.get("perms"):
+            raise
+        return await _access_view(ctx, conn, actor, snap["perms"], R.aware(snap.get("checked_at")) or C.now(), True)
+    stamp = C.now()
+    slim = [_snapshot_perm(p) for p in perms]
+    try:
+        await database.execute(update(CONN).where(CONN.c.pair_id == pid).values(
+            access_snapshot=C.dumps({"checked_at": stamp.isoformat(), "perms": slim})))
+    except Exception:  # noqa: BLE001 - zapas to tylko wygoda
+        logger.warning("mentor: zapamiętanie listy dostępu nieudane", exc_info=True)
+    return await _access_view(ctx, conn, actor, slim, stamp, False)
+
+
+@router.get("/pairs/{pair_id}/drive/access")
+async def get_access(pair_id: str, response: Response, actor: Actor = Depends(mentor_actor)):
+    """Kto ma dostęp do folderu pary (odczyt na żywo z Google). Czyta każdy z wglądem w Teczkę; zmieniają obie osoby z pary."""
+    response.headers["Cache-Control"] = "no-store"
+    ctx = await _context(pair_id, actor)
+    return await _live_access(ctx, actor)
+
+
+async def _access_ctx(pair_id: str, actor: Actor):
+    ctx = await _context(pair_id, actor, "video")
+    conn = await get_conn(ctx["pair_id"])
+    if not conn:
+        raise derr(409, "DRIVE_NOT_CONNECTED", "Teczka pary nie jest jeszcze połączona z Dyskiem Google.")
+    if not _can_manage(ctx, conn, actor):
+        raise derr(403, "DRIVE_NOT_MANAGER", "Dostępem do folderu zarządzają obie osoby z pary.")
+    if not conn.get("folder_id"):
+        raise derr(409, "NO_FOLDER", "Najpierw wybierz albo załóż folder pary.")
+    return ctx, conn
+
+
+async def _list_now(pair_id: str, folder_id: str) -> List[Dict[str, Any]]:
+    return await _google(pair_id, lambda token: G.api().list_permissions(token, folder_id))
+
+
+def _email_of(perm: Dict[str, Any]) -> str:
+    return R.s(perm.get("emailAddress")).lower()
+
+
+async def _partner_state(pair_id: str, conn: Dict[str, Any], email: Optional[str], *, present: bool) -> None:
+    """Nowe trasy utrzymują `partner.share_status` spójny z tym, co jest na Dysku."""
+    if not email or email != R.s(conn.get("partner_email")).lower():
+        return
+    values = ({"share_status": "ok", "share_error": None, "shared_at": C.now()} if present
+              else {"partner_email": None, "share_status": "none", "share_error": None, "shared_at": None})
+    await database.execute(update(CONN).where(CONN.c.pair_id == pair_id).values(updated_at=C.now(), **values))
+
+
+async def _invites_last_day(pair_id: str) -> int:
+    since = C.now() - DR.INVITE_WINDOW
+    found = await C.rows(select(LOG.c.id).where(LOG.c.pair_id == pair_id).where(LOG.c.kind == "invited").where(LOG.c.created_at >= since).limit(500))
+    return len(found)
+
+
+def _find(perms: List[Dict[str, Any]], permission_id: str) -> Dict[str, Any]:
+    found = next((p for p in perms if R.s(p.get("id")) == permission_id), None)
+    if not found:
+        raise derr(404, "PERMISSION_NOT_FOUND", "Tej osoby nie ma już na liście dostępu do folderu.")
+    if DR.role_name(found.get("role")) == "owner":
+        raise derr(409, "OWNER_PROTECTED", "Właściciela folderu nie można usunąć ani zmienić mu roli.")
+    return found
+
+
+@router.post("/pairs/{pair_id}/drive/access")
+async def invite_access(pair_id: str, body: AccessBody, actor: Actor = Depends(mentor_actor)):
+    """Zaprasza dowolny adres (`reader` domyślnie, `writer`). Adres, który już ma dostęp, dostaje nową rolę zamiast dubla.
+    Google wysyła zaproszenie z konta właściciela połączenia, więc są limity: 20 gości na parę i 30 zaproszeń na dobę."""
+    ctx, conn = await _access_ctx(pair_id, actor)
+    pid = ctx["pair_id"]
+    email = DR.clean_email(body.email)
+    if not email:
+        raise derr(422, "EMAIL", "Podaj poprawny adres e-mail konta Google.")
+    role = DR.clean_role(body.role)
+    if not role:
+        raise derr(422, "ROLE", "Rola to reader (podgląd) albo writer (edycja).")
+    if email == R.s(conn.get("google_email")).lower():
+        raise derr(422, "OWNER_EMAIL", "To konto jest właścicielem folderu - ma już pełny dostęp.")
+    async with _lock(f"acc:{pid}"):
+        perms = await _list_now(pid, conn["folder_id"])
+        existing = next((p for p in perms if _email_of(p) == email), None)
+        changed = False
+        if existing:
+            old = DR.role_name(existing.get("role"))
+            if old == "owner":
+                raise derr(422, "OWNER_EMAIL", "To konto jest właścicielem folderu - ma już pełny dostęp.")
+            if old != role:
+                await _google(pid, lambda token: G.api().update_permission(token, conn["folder_id"], R.s(existing["id"]), role))
+                await _log(ctx, "role_changed", {"email": email, "role": role, "old_role": old})
+                changed = True
+            await _partner_state(pid, conn, email, present=True)
+        else:
+            if email != R.s(conn.get("partner_email")).lower():
+                used = sum(1 for p in perms if DR.role_name(p.get("role")) != "owner" and _email_of(p) != R.s(conn.get("partner_email")).lower())
+                if used >= DR.MAX_GUESTS:
+                    raise derr(409, "GUEST_LIMIT", f"Do folderu może mieć dostęp najwyżej {DR.MAX_GUESTS} gości. Odbierz komuś dostęp.")
+            if await _invites_last_day(pid) >= DR.INVITE_DAY_LIMIT:
+                raise derr(429, "INVITE_LIMIT", f"Wysłano już {DR.INVITE_DAY_LIMIT} zaproszeń w ciągu doby. Spróbuj jutro.")
+
+            async def create(token: str):
+                try:
+                    return await G.api().create_permission(token, conn["folder_id"], email, role)
+                except G.GoogleError as exc:
+                    if exc.status == 400:
+                        raise _NotGoogleAccount() from None
+                    raise
+
+            try:
+                await _google(pid, create)
+            except _NotGoogleAccount:
+                raise derr(422, "NOT_GOOGLE_ACCOUNT", "Ten adres nie jest powiązany z kontem Google, więc nie da się go zaprosić.") from None
+            await _log(ctx, "invited", {"email": email, "role": role})
+            await _partner_state(pid, conn, email, present=True)
+            changed = True
+    if changed:
+        await _touch(ctx, "drive_access")
+    return await _live_access(ctx, actor)
+
+
+@router.patch("/pairs/{pair_id}/drive/access/{permission_id}")
+async def change_access_role(pair_id: str, permission_id: str, body: RoleBody, actor: Actor = Depends(mentor_actor)):
+    ctx, conn = await _access_ctx(pair_id, actor)
+    pid = ctx["pair_id"]
+    if not DR.valid_permission_id(permission_id):
+        raise derr(422, "PERMISSION_ID", "To nie wygląda na identyfikator uprawnienia z Dysku.")
+    role = DR.clean_role(body.role, default="")
+    if not role:
+        raise derr(422, "ROLE", "Rola to reader (podgląd) albo writer (edycja).")
+    async with _lock(f"acc:{pid}"):
+        found = _find(await _list_now(pid, conn["folder_id"]), permission_id)
+        old = DR.role_name(found.get("role"))
+        if old != role:
+            await _google(pid, lambda token: G.api().update_permission(token, conn["folder_id"], permission_id, role))
+            await _log(ctx, "role_changed", {"email": _email_of(found) or None, "role": role, "old_role": old})
+            await _touch(ctx, "drive_access")
+    return await _live_access(ctx, actor)
+
+
+@router.delete("/pairs/{pair_id}/drive/access/{permission_id}")
+async def remove_access(pair_id: str, permission_id: str, actor: Actor = Depends(mentor_actor)):
+    ctx, conn = await _access_ctx(pair_id, actor)
+    pid = ctx["pair_id"]
+    if not DR.valid_permission_id(permission_id):
+        raise derr(422, "PERMISSION_ID", "To nie wygląda na identyfikator uprawnienia z Dysku.")
+
+    async def delete(token: str):
+        try:
+            await G.api().delete_permission(token, conn["folder_id"], permission_id)
+        except G.GoogleError as exc:
+            if exc.status != 404:  # już go nie ma = cel osiągnięty
+                raise
+
+    async with _lock(f"acc:{pid}"):
+        found = _find(await _list_now(pid, conn["folder_id"]), permission_id)
+        await _google(pid, delete)
+        email = _email_of(found) or None
+        await _log(ctx, "access_removed", {"email": email, "role": DR.role_name(found.get("role"))})
+        await _partner_state(pid, conn, email, present=False)
+        await _touch(ctx, "drive_access")
+    return await _live_access(ctx, actor)
+
+
+# ─── Dziennik działań ────────────────────────────────────────────────────────
+
+
+@router.get("/pairs/{pair_id}/drive/activity")
+async def drive_activity(pair_id: str, response: Response, limit: int = Query(30, ge=1, le=100), before: Optional[str] = Query(None),
+                         actor: Actor = Depends(mentor_actor)):
+    """Dziennik działań z BAZY (od najnowszych). `next` to kursor na kolejną stronę (`before=`), `null` na końcu."""
+    response.headers["Cache-Control"] = "no-store"
+    ctx = await _context(pair_id, actor)
+    query = select(LOG).where(LOG.c.pair_id == ctx["pair_id"])
+    if before:
+        cursor = DR.decode_cursor(before)
+        if not cursor:
+            raise derr(422, "BAD_CURSOR", "Parametr before to kursor z poprzedniej odpowiedzi (next).")
+        when, row_id = cursor
+        query = query.where(or_(LOG.c.created_at < when, and_(LOG.c.created_at == when, LOG.c.id < row_id)))
+    rows = await C.rows(query.order_by(LOG.c.created_at.desc(), LOG.c.id.desc()).limit(limit + 1))
+    more = len(rows) > limit
+    rows = rows[:limit]
+    names = await C.people([R.s(r.get("acted_by")) or R.s(r.get("actor_id")) for r in rows])
+    items = []
+    for r in rows:
+        who = R.s(r.get("acted_by")) or R.s(r.get("actor_id"))
+        known = names.get(who) or {}
+        items.append({"id": r["id"], "kind": r["kind"], "at": _iso(r["created_at"]),
+                      "actor": {"judge_id": who, "name": known.get("full_name"), "photo_url": known.get("photo_url")} if who else None,
+                      "details": R.json_value(r.get("details"), {})})
+    nxt = DR.encode_cursor(R.aware(rows[-1]["created_at"]), rows[-1]["id"]) if more and rows else None
+    return {"items": items, "next": nxt}
 
 
 # ─── Drzewo (z naszej księgi) ────────────────────────────────────────────────
@@ -569,7 +924,8 @@ async def _mark_gone(row: Dict[str, Any], stamp: datetime) -> None:
 
 
 async def verify_pair(pair_id: str, judge_id: str, *, clip_ids: Optional[List[str]] = None, match_id: Optional[str] = None,
-                      limit: Optional[int] = None, access: Optional[str] = None) -> Dict[str, Any]:
+                      limit: Optional[int] = None, access: Optional[str] = None, acted_by: Optional[str] = None,
+                      system: bool = False) -> Dict[str, Any]:
     """Sprawdza u Google zapisy (`done`) pary, najdawniej sprawdzane najpierw. Sesji bazy nie trzymamy na czas Google."""
     filtered = bool(clip_ids or match_id)
     cap = limit or (VERIFY_FILTERED_LIMIT if filtered else VERIFY_LIMIT)
@@ -609,6 +965,9 @@ async def verify_pair(pair_id: str, judge_id: str, *, clip_ids: Optional[List[st
         if out["result"] == "gone":
             await _mark_gone(row, stamp)
             changed += 1
+            await log_event(pair_id, "clip_gone", actor_id=None if system else judge_id, acted_by=None if system else acted_by,
+                            details={"clip_id": row["clip_id"], "clip_title": await _clip_title(row["clip_id"]),
+                                     "match_label": row.get("match_label"), "file_name": row.get("name")})
             continue
         values: Dict[str, Any] = {"verified_at": stamp}
         if out["result"] == "saved" and out.get("link") and out["link"] != link:
@@ -643,7 +1002,8 @@ async def verify_drive(pair_id: str, body: Optional[VerifyBody] = None, actor: A
     except G.GoogleError:
         raise derr(502, "GOOGLE_UNAVAILABLE", "Dysk Google chwilowo nie odpowiada. Spróbuj za chwilę.") from None
     body = body or VerifyBody()
-    return await verify_pair(pid, actor.judge_id, clip_ids=body.clip_ids, match_id=body.match_id, access=access)
+    return await verify_pair(pid, actor.judge_id, clip_ids=body.clip_ids, match_id=body.match_id, access=access,
+                              acted_by=actor.acted_by)
 
 
 async def verify_due(now: Optional[datetime] = None) -> int:
@@ -659,7 +1019,7 @@ async def verify_due(now: Optional[datetime] = None) -> int:
         if not conn or conn.get("state") != "connected":
             continue
         try:
-            await verify_pair(pid, R.s(conn["owner_judge_id"]))
+            await verify_pair(pid, R.s(conn["owner_judge_id"]), system=True)
             done += 1
         except NeedsReconnect:
             continue
@@ -857,6 +1217,8 @@ async def _finish(job: Dict[str, Any], *, state: str, error: Optional[str] = Non
         await C.touch(job["pair_id"], R.s(job.get("author_judge_id")), f"drive_{state}", "drive", job.get("match_id"))
     except Exception:  # noqa: BLE001
         logger.warning("mentor: rewizja po zadaniu Dysku nieudana", exc_info=True)
+    if state == "done":
+        await _log_clip_saved(job, extra.get("done_at"))
 
 
 async def claim_next(worker_id: str, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
@@ -1063,6 +1425,13 @@ async def run_drive_worker(number: int = 1) -> None:
     if _wake is None:
         _wake = asyncio.Event()
     worker_id = f"drive-{secrets.token_hex(4)}-{number}"
+    if number == 1:
+        try:
+            made = await backfill_activity()
+            if made:
+                logger.info("mentor: dziennik Dysku uzupełniony o %s zapisów klipów", made)
+        except Exception:  # noqa: BLE001
+            logger.warning("mentor: uzupełnienie dziennika Dysku nieudane", exc_info=True)
     await asyncio.sleep(30)
     while True:
         try:

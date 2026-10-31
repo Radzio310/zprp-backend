@@ -11,8 +11,8 @@ import hmac
 import json
 import os
 import re
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
 SCOPE = "https://www.googleapis.com/auth/drive.file"
@@ -193,3 +193,62 @@ def classify(status: int, reason: str = "") -> str:
     if status in (0, 408, 429, 500, 502, 503, 504) or (status == 403 and any(k in reason for k in ("ratelimit", "quota", "userrate"))):
         return "retry"
     return "fatal"
+
+
+# ─── Dostęp do folderu i dziennik (31.10.2026) ───────────────────────────────
+
+MAX_GUESTS = 20  # osoby z dostępem poza właścicielem i partnerem, na parę
+INVITE_DAY_LIMIT = 30  # nowe zaproszenia na dobę na parę (liczone z dziennika w bazie)
+INVITE_WINDOW = timedelta(hours=24)
+INVITE_ROLES = ("reader", "writer")
+PERMISSION_FIELDS = "permissions(id,emailAddress,displayName,role,photoLink,type),nextPageToken"
+_PERMISSION_ID = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
+LOG_KINDS = ("connected", "disconnected", "folder_changed", "layout_changed", "invited", "role_changed", "access_removed",
+             "clip_saved", "clip_gone")
+#: Biała lista kluczy `details` dziennika (nigdy tokeny ani adresy podpisane).
+LOG_DETAIL_KEYS = ("email", "role", "old_role", "folder_name", "layout", "clip_id", "clip_title", "match_label", "file_name")
+
+
+def clean_role(value: Any, default: str = "reader") -> Optional[str]:
+    text = str(value).strip().lower() if value is not None and str(value).strip() else default
+    return text if text in INVITE_ROLES else None
+
+
+def valid_permission_id(value: Any) -> bool:
+    return bool(_PERMISSION_ID.match(str(value or "")))
+
+
+def role_name(google_role: Any) -> str:
+    role = str(google_role or "").lower()
+    return role if role in ("owner", "writer", "reader") else "other"
+
+
+def https_url(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    return text if text.lower().startswith("https://") and len(text) <= 1000 else None
+
+
+def log_details(details: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key in LOG_DETAIL_KEYS:
+        value = (details or {}).get(key)
+        if value is not None and str(value) != "":
+            out[key] = str(value)[:300]
+    return out
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def encode_cursor(created_at: datetime, row_id: str) -> str:
+    when = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+    delta = when - _EPOCH
+    return f"{(delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds}.{row_id}"
+
+
+def decode_cursor(value: Any) -> Optional[Tuple[datetime, str]]:
+    head, _, row_id = str(value or "").partition(".")
+    try:
+        return _EPOCH + timedelta(microseconds=int(head)), row_id
+    except (ValueError, OverflowError):
+        return None

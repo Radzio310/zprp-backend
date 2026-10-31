@@ -46,6 +46,7 @@ from app.db import (
     push_tokens,
     province_match_assignability,
     province_matches,
+    province_match_judges,
     province_module_config,
     province_settlement_matches,
 )
@@ -895,6 +896,9 @@ async def _sync_slot_holder(
         if not state:
             return {}
         patched = with_slot_holder(state, slot, judge_id, full_name)
+        from app.match_snapshot_guard import verified_state
+
+        patched = verified_state(state, patched)
         # Import lokalny: monitor ciągnie za sobą scraper z bs4 i httpx, a
         # router giełdy nie ma powodu budzić go przy starcie aplikacji.
         from app.province_match_monitor import fingerprint
@@ -917,6 +921,23 @@ async def _sync_slot_holder(
         from app.assignment_board_cache import bump
 
         bump(province)
+        from app.settlement_live import sync_match
+
+        await sync_match(province, match_id, previous_state=state)
+        # The market has already notified its audiences. Keep the monitor's
+        # assignment ledger in step so it neither repeats the new assignment
+        # nor sends later match changes to the judge who handed it over.
+        from app.province_match_monitor import _upsert_assignment
+
+        before, after = set(crew_judge_ids(state)), set(crew_judge_ids(patched))
+        for added_id in after - before:
+            await _upsert_assignment(province, match_id, added_id, _s(patched.get("season")), False, patched)
+        if before - after:
+            await database.execute(update(province_match_judges).where(
+                province_match_judges.c.province == province,
+                province_match_judges.c.match_id == match_id,
+                province_match_judges.c.judge_id.in_(before - after),
+            ).values(active=False, missing_runs=2, updated_at=func.now()))
         return patched
     except Exception:
         logger.exception("giełda: nie udało się odświeżyć migawki meczu %s", match_id)
@@ -983,11 +1004,13 @@ async def _live_crews(
 
     async def one(client: AsyncClient, match_id: str, base: Dict[str, Any]) -> None:
         async with semaphore:
+            requested_at = _now().isoformat()
             payload = await _fetch_public_details(
                 client, match_id, timeout=LIVE_CREW_REQUEST_SECONDS, retries=1
             )
         state = _api_to_state(payload or {}, base)
         if state:
+            state["_observed_at"] = requested_at
             fresh[match_id] = state
 
     async with AsyncClient(follow_redirects=True) as client:

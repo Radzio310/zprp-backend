@@ -1603,9 +1603,17 @@ async def _forecast_assignments(
     # Mecz z nieobecnością z Rejestru serwer ZNA - prognoza nie może go wskrzesić
     # jako płatnego tylko dlatego, że wciąż stoi w terminarzu telefonu.
     bombed = [pair[0] for pair in base.get("bombed", []) if pair[0].judge_id == str(judge_id)]
+    # An old phone schedule must not resurrect a match just handed over on the
+    # market. Inactive official rows are authoritative removal receipts.
+    removed = await database.fetch_all(select(province_settlement_matches.c.match_key).where(
+        province_settlement_matches.c.province == key,
+        province_settlement_matches.c.judge_id == str(judge_id),
+        province_settlement_matches.c.active.is_(False),
+    ))
     picked = F.pick_forecast(
         [item.model_dump() for item in items],
-        known_ids={F.match_id_of(item.match_key) for item in [*mine, *bombed]},
+        known_ids={F.match_id_of(item.match_key) for item in [*mine, *bombed]}
+            | {F.match_id_of(row["match_key"]) for row in removed},
         own_prefixes=await _own_prefixes(key),
         now=_now(),
     )

@@ -249,6 +249,7 @@ async def announce_change(
         _upsert_assignment,
         build_change_events,
         fingerprint,
+        parse_match_at,
     )
 
     result: dict[str, Any] = {
@@ -289,8 +290,15 @@ async def announce_change(
         if new == old:
             return result
 
+        from app.match_snapshot_guard import verified_state
+
+        new = verified_state(old, new)
+
         code = _s(new.get("RozgrywkiCode") or row["match_code"])
         new_fp = fingerprint(new)
+        match_fields = {}
+        if new.get("data_fakt") != old.get("data_fakt"):
+            match_fields["match_at"] = parse_match_at(new.get("data_fakt") or new.get("data_prop"))
         await database.execute(
             update(province_matches)
             .where(
@@ -299,12 +307,16 @@ async def announce_change(
                     province_matches.c.match_id == _s(match_id),
                 )
             )
-            .values(state_json=new, fingerprint=new_fp, updated_at=func.now())
+            .values(state_json=new, fingerprint=new_fp, updated_at=func.now(), **match_fields)
         )
         result["changed"] = True
         from app.assignment_board_cache import bump
 
         bump(province)
+
+        from app.settlement_live import sync_match
+
+        await sync_match(province, _s(match_id), previous_state=old)
 
         before, after = crew_ids(old), crew_ids(new)
         added = sorted(after - before)
@@ -360,6 +372,12 @@ async def announce_change(
                     stayed,
                     new_fp,
                     previous_state=old,
+                    priority=event.get("priority", "important"),
+                    external_push=bool(event.get("external_push", True)),
+                    changed_fields=event.get("changed_fields"),
+                    change_types=event.get("change_types"),
+                    preference_keys=event.get("preference_keys"),
+                    match_at=event.get("match_at"),
                 )
 
         # Historia zmian: tylko wtedy, gdy wiemy, z którego przebiegu pochodzą.

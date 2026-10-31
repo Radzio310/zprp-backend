@@ -2,9 +2,10 @@ import os
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import func, select, update
+from sqlalchemy import cast, func, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 
-from app.db import database, province_match_events, province_match_notifications, push_local_match_receipts, push_tokens, push_schedules
+from app.db import database, province_match_events, province_match_judges, province_match_notifications, push_local_match_receipts, push_tokens, push_schedules
 from app.match_market_rules import state_dict
 from .fcm import send_fcm_message
 from .device_policy import dev_pushes_enabled, device_allowed
@@ -68,8 +69,42 @@ async def _get_token(installation_id: str):
         push_tokens.c.app_variant,
         push_tokens.c.app_id,
         push_tokens.c.judge_id,
+        push_tokens.c.notification_prefs,
     ).where(push_tokens.c.installation_id == installation_id)
     return await database.fetch_one(stmt)
+
+
+async def _match_delivery_reason(row, data, token_row):
+    """Recheck ownership/preferences at SEND time, including queued retries."""
+    if not token_row:
+        return "Missing push token for installation_id"
+    if _stripped(row["judge_id"]) != _stripped(token_row["judge_id"]):
+        return "Push identity changed (inbox retained for original judge)"
+    if not _stripped(token_row["token"]):
+        return "Inactive push token"
+    # Also handles duplicate registrations that predate the registration fix.
+    owner = await database.fetch_val(select(push_tokens.c.installation_id).where(
+        push_tokens.c.token == token_row["token"],
+        push_tokens.c.token_type == token_row["token_type"],
+    ).order_by(push_tokens.c.updated_at.desc(), push_tokens.c.installation_id.desc()).limit(1))
+    if owner and owner != row["installation_id"]:
+        return "Superseded installation for this push token"
+    if data.get("kind") == "province_match_change":
+        from app.push.preferences import province_event_allowed
+        if not province_event_allowed(token_row["notification_prefs"], data.get("event_type", ""),
+                                      preference_keys=data.get("preference_keys")):
+            return "Notification preference changed before delivery"
+        if (data.get("match_id") and data.get("province") and
+                data.get("event_type") not in {"assignment_removed", "match_removed"}):
+            assigned = await database.fetch_val(select(province_match_judges.c.judge_id).where(
+                province_match_judges.c.province == data["province"],
+                province_match_judges.c.match_id == str(data["match_id"]),
+                province_match_judges.c.judge_id == _stripped(row["judge_id"]),
+                province_match_judges.c.active.is_(True),
+            ).limit(1))
+            if not assigned:
+                return "Judge no longer assigned to this match (inbox retained)"
+    return None
 
 
 async def _fetch_pending_match_notifications(limit: int = 50):
@@ -152,6 +187,11 @@ async def _match_notification_stale_reason(row, data):
         .where(province_match_events.c.province == str(data["province"]))
         .where(province_match_events.c.match_id == str(data["match_id"]))
         .where(province_match_events.c.event_type.notin_(["match_added", "match_info_updated"]))
+        # A later lineup edit does not replace an approval or a venue change.
+        # Collapse only repetitions of the same semantic category.
+        .where(province_match_events.c.event_type == str(data.get("event_type") or ""))
+        .where(cast(province_match_events.c.data_json, JSONB)["change_types"] ==
+               list(data.get("change_types") or [data.get("event_type")]))
         .limit(1)
     )
     return "Superseded match revision (inbox retained)" if newer else None
@@ -272,6 +312,11 @@ async def run_push_scheduler():
                     await _mark_failed(sid, attempts, "Missing push token for installation_id", final=True)
                     continue
 
+                intended = _stripped(data_json.get("judgeId") or data_json.get("judge_id"))
+                if intended and intended != _stripped(tok["judge_id"]):
+                    await _mark_failed(sid, attempts, "Push identity changed before scheduled delivery", final=True)
+                    continue
+
                 if not device_allowed(tok, allow_dev):
                     await _mark_failed(
                         sid,
@@ -283,6 +328,9 @@ async def run_push_scheduler():
 
                 token_type = (tok["token_type"] or "").strip()
                 token = (tok["token"] or "").strip()
+                if not token:
+                    await _mark_failed(sid, attempts, "Inactive push token", final=True)
+                    continue
 
                 if token_type != "device_fcm":
                     # Ten backend wysyła przez FCM HTTP v1 – bez FCM tokenu nie wyśle.
@@ -318,6 +366,10 @@ async def run_push_scheduler():
                     await _finish_match_notification(notification_id, attempts, stale_reason, True)
                     continue
                 token_row = await _get_token(row["installation_id"])
+                delivery_reason = await _match_delivery_reason(row, data, token_row)
+                if delivery_reason:
+                    await _finish_match_notification(notification_id, attempts, delivery_reason, True)
+                    continue
                 if token_row and not device_allowed(token_row, allow_dev):
                     await _finish_match_notification(
                         notification_id,
@@ -351,7 +403,7 @@ async def run_push_scheduler():
                         _stripped(token_row["token"]),
                         row["title"],
                         row["body"],
-                        data=data,
+                        data={**data, "judgeId": _stripped(row["judge_id"])},
                     )
                     await _finish_match_notification(notification_id, attempts, None, True)
                     logger.info("Match push notification %s sent", notification_id)

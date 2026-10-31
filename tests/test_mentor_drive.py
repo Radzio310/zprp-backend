@@ -91,6 +91,7 @@ class FakeGoogle:
         self.folders = {}  # (parent, name) -> id
         self.files = {}  # id -> {"parent", "props", "data"}
         self.perms = []
+        self.perm_store = {}  # folder -> uprawnienia (list_permissions)
         self.sessions = {}
         self.n = 0
         self.scope = DR.SCOPE
@@ -162,8 +163,37 @@ class FakeGoogle:
     async def create_permission(self, access, file_id, email, role="writer"):
         self.calls.append(("permission", email, role))
         self._maybe_fail("create_permission")
+        if "nogoogle" in email:
+            raise gerr(400, "invalidSharingRequest")
         self.perms.append((file_id, email, role))
-        return {"id": "p1"}
+        pid = self._id("PERM")
+        self._store(file_id).append({"id": pid, "emailAddress": email, "displayName": email.split("@")[0].title(), "role": role,
+                                     "type": "user", "photoLink": "https://lh3.example/" + pid})
+        return {"id": pid}
+
+    def _store(self, folder):
+        if folder not in self.perm_store:
+            self.perm_store[folder] = [{"id": "OWNER1", "emailAddress": "ala@gmail.com", "displayName": "Ala G", "role": "owner",
+                                        "type": "user", "photoLink": "http://insecure.example/x"}]
+        return self.perm_store[folder]
+
+    async def list_permissions(self, access, file_id):
+        self.calls.append(("list_permissions", file_id))
+        self._maybe_fail("list_permissions")
+        return [dict(p) for p in self._store(file_id)]
+
+    async def update_permission(self, access, file_id, permission_id, role):
+        self.calls.append(("update_permission", permission_id, role))
+        self._maybe_fail("update_permission")
+        for p in self._store(file_id):
+            if p["id"] == permission_id:
+                p["role"] = role
+        return {"id": permission_id, "role": role}
+
+    async def delete_permission(self, access, file_id, permission_id):
+        self.calls.append(("delete_permission", permission_id))
+        self._maybe_fail("delete_permission")
+        self.perm_store[file_id] = [p for p in self._store(file_id) if p["id"] != permission_id]
 
     async def start_upload(self, access, metadata, size, mime="video/mp4"):
         self.calls.append(("start_upload", metadata["name"], size))
@@ -797,5 +827,297 @@ def test_verify_due_background_respects_age(env):
         assert await env.drive.verify_due() == 1
         assert await env.drive.verify_due() == 0  # świeżo sprawdzone
         assert await env.drive.verify_due(NOW + timedelta(days=400)) == 1
+
+    env.run(go)
+
+
+# ─── dostęp do folderu i dziennik (31.10.2026) ───────────────────────────────
+
+
+def kinds_of(activity):
+    return [i["kind"] for i in activity["items"]]
+
+
+async def activity_of(env, actor, **kw):
+    return await env.drive.drive_activity(PAIR, Response(), kw.get("limit", 30), kw.get("before"), actor)
+
+
+def test_invite_guest_reader_default_then_list_and_log(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        view = await env.drive.invite_access(PAIR, env.drive.AccessBody(email=" Mentor@Example.com "), actor)
+        guest = next(p for p in view["people"] if p["email"] == "mentor@example.com")
+        assert guest["role"] == "reader" and guest["kind"] == "guest" and guest["can_remove"] and guest["can_change_role"]
+        assert guest["judge_id"] is None and guest["photo_url"].startswith("https://")
+        owner = view["people"][0]
+        assert owner["kind"] == "owner" and owner["role"] == "owner" and owner["judge_id"] == A and owner["name"] == "Anna Nowak"
+        assert owner["can_remove"] is False and owner["can_change_role"] is False and owner["photo_url"] is None  # http odrzucone
+        assert view["stale"] is False and view["can_manage"] is True and view["limits"] == {"max_guests": 20, "used": 1}
+        assert env.g.perms[-1][1:] == ("mentor@example.com", "reader")
+        writer = await env.drive.invite_access(PAIR, env.drive.AccessBody(email="edytor@example.com", role="writer"), actor)
+        assert next(p for p in writer["people"] if p["email"] == "edytor@example.com")["role"] == "writer"
+        act = await activity_of(env, actor)
+        invited = [i for i in act["items"] if i["kind"] == "invited"]
+        assert [i["details"]["email"] for i in invited] == ["edytor@example.com", "mentor@example.com"]
+        assert invited[0]["details"]["role"] == "writer" and invited[0]["actor"]["judge_id"] == A and invited[0]["actor"]["name"] == "Anna Nowak"
+        assert (await code_of(env.drive.invite_access(PAIR, env.drive.AccessBody(email="zle"), actor))).error_code == "EMAIL"
+        assert (await code_of(env.drive.invite_access(PAIR, env.drive.AccessBody(email="a@b.pl", role="owner"), actor))).error_code == "ROLE"
+        own = await code_of(env.drive.invite_access(PAIR, env.drive.AccessBody(email="ALA@gmail.com"), actor))
+        assert own.status_code == 422 and own.error_code == "OWNER_EMAIL"
+        bad = await code_of(env.drive.invite_access(PAIR, env.drive.AccessBody(email="x@nogoogle.pl"), actor))
+        assert bad.error_code == "NOT_GOOGLE_ACCOUNT" and bad.status_code == 422
+
+    env.run(go)
+
+
+def test_invite_existing_address_changes_role_and_patch_delete_work(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        await env.drive.invite_access(PAIR, env.drive.AccessBody(email="g@example.com"), actor)
+        creates = len([c for c in env.g.calls if c[0] == "permission"])
+        view = await env.drive.invite_access(PAIR, env.drive.AccessBody(email="g@example.com", role="writer"), actor)
+        assert len([c for c in env.g.calls if c[0] == "permission"]) == creates  # bez dubla
+        guest = next(p for p in view["people"] if p["email"] == "g@example.com")
+        assert guest["role"] == "writer" and len([p for p in view["people"] if p["email"] == "g@example.com"]) == 1
+        pid = guest["permission_id"]
+        back = await env.drive.change_access_role(PAIR, pid, env.drive.RoleBody(role="reader"), actor)
+        assert next(p for p in back["people"] if p["permission_id"] == pid)["role"] == "reader"
+        assert (await code_of(env.drive.change_access_role(PAIR, pid, env.drive.RoleBody(role="owner"), actor))).error_code == "ROLE"
+        gone = await env.drive.remove_access(PAIR, pid, actor)
+        assert all(p["permission_id"] != pid for p in gone["people"])
+        assert (await code_of(env.drive.remove_access(PAIR, pid, actor))).status_code == 404
+        assert (await code_of(env.drive.remove_access(PAIR, "a/b", actor))).error_code == "PERMISSION_ID"
+        assert (await code_of(env.drive.change_access_role(PAIR, "ZZZ9", env.drive.RoleBody(role="reader"), actor))).status_code == 404
+        act = await activity_of(env, actor)
+        assert kinds_of(act)[:3] == ["access_removed", "role_changed", "role_changed"]
+        changed = [i for i in act["items"] if i["kind"] == "role_changed"]
+        assert changed[0]["details"] == {"email": "g@example.com", "role": "reader", "old_role": "writer"}
+        assert changed[1]["details"]["old_role"] == "reader"
+
+    env.run(go)
+
+
+def test_owner_cannot_be_removed_or_demoted(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        for coro in (env.drive.remove_access(PAIR, "OWNER1", actor), env.drive.change_access_role(PAIR, "OWNER1", env.drive.RoleBody(role="reader"), actor)):
+            exc = await code_of(coro)
+            assert exc.status_code == 409 and exc.error_code == "OWNER_PROTECTED"
+        assert ("delete_permission", "OWNER1") not in env.g.calls and not [c for c in env.g.calls if c[0] == "update_permission"]
+
+    env.run(go)
+
+
+def test_partner_manages_stranger_denied_mentor_reads_only(env):
+    async def go():
+        owner, _ = await with_folder(env, A)
+        await env.drive.share_folder(PAIR, env.drive.ShareBody(email="piotr@example.com"), owner)
+        partner = await env.actor(B)
+        view = await env.drive.invite_access(PAIR, env.drive.AccessBody(email="trener@example.com", role="writer"), partner)
+        assert view["can_manage"] is True
+        pp = next(p for p in view["people"] if p["email"] == "piotr@example.com")
+        assert pp["kind"] == "partner" and pp["judge_id"] == B and pp["name"] == "Piotr Lis" and pp["role"] == "writer"
+        tid = next(p["permission_id"] for p in view["people"] if p["email"] == "trener@example.com")
+        await env.drive.change_access_role(PAIR, tid, env.drive.RoleBody(role="reader"), partner)
+        await env.drive.remove_access(PAIR, tid, partner)
+        act = await activity_of(env, partner)
+        assert [i["actor"]["judge_id"] for i in act["items"] if i["kind"] in ("access_removed", "role_changed")] == [B, B]
+        mentor = await env.actor(MENTOR)
+        seen = await env.drive.get_access(PAIR, Response(), mentor)
+        assert seen["can_manage"] is False and all(not p["can_remove"] and not p["can_change_role"] for p in seen["people"])
+        deny = await code_of(env.drive.invite_access(PAIR, env.drive.AccessBody(email="x@example.com"), mentor))
+        assert deny.status_code == 403 and deny.error_code == "DRIVE_NOT_MANAGER"
+        stranger = await env.actor(STRANGER)
+        for coro in (env.drive.get_access(PAIR, Response(), stranger), activity_of(env, stranger),
+                     env.drive.invite_access(PAIR, env.drive.AccessBody(email="x@example.com"), stranger),
+                     env.drive.remove_access(PAIR, "OWNER1", stranger)):
+            assert (await code_of(coro)).status_code == 403
+        # osoba z pary, ale nie właściciel połączenia, nadal nie rusza folderu ani Pickera
+        assert (await code_of(env.drive.set_folder(PAIR, env.drive.FolderBody(create=True), partner))).error_code == "DRIVE_NOT_OWNER"
+
+    env.run(go)
+
+
+def test_partner_share_status_stays_consistent_with_new_routes(env):
+    async def go():
+        owner, _ = await with_folder(env, A)
+        await env.drive.share_folder(PAIR, env.drive.ShareBody(email="piotr@example.com"), owner)
+        view = await env.drive.get_access(PAIR, Response(), owner)
+        pid = next(p["permission_id"] for p in view["people"] if p["kind"] == "partner")
+        await env.drive.remove_access(PAIR, pid, owner)
+        state = await env.drive.get_drive(PAIR, Response(), owner)
+        assert state["partner"] is None
+        await env.drive.invite_access(PAIR, env.drive.AccessBody(email="piotr@example.com", role="writer"), owner)
+        conn = await env.drive.get_conn(PAIR)
+        assert conn["partner_email"] is None  # nowa trasa nie ustawia partnera sama
+        await env.drive.share_folder(PAIR, env.drive.ShareBody(email="piotr@example.com"), owner)
+        await env.drive.invite_access(PAIR, env.drive.AccessBody(email="piotr@example.com", role="reader"), owner)
+        state = await env.drive.get_drive(PAIR, Response(), owner)
+        assert state["partner"]["share_status"] == "ok" and state["partner"]["email"] == "piotr@example.com"
+
+    env.run(go)
+
+
+def test_limits_guests_and_invites_per_day_persisted(env, monkeypatch):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        for i in range(20):
+            await env.drive.invite_access(PAIR, env.drive.AccessBody(email=f"g{i}@example.com"), actor)
+        full = await code_of(env.drive.invite_access(PAIR, env.drive.AccessBody(email="g99@example.com"), actor))
+        assert full.status_code == 409 and full.error_code == "GUEST_LIMIT"
+        again = await env.drive.invite_access(PAIR, env.drive.AccessBody(email="g0@example.com", role="writer"), actor)  # zmiana roli nie liczy się
+        assert again["limits"]["used"] == 20
+        # dobowy limit czyta dziennik w bazie, nie pamięć procesu
+        monkeypatch.setattr(DR, "INVITE_DAY_LIMIT", 22)
+        one = await env.drive.get_access(PAIR, Response(), actor)
+        for p in one["people"][1:3]:
+            await env.drive.remove_access(PAIR, p["permission_id"], actor)
+        await env.drive.invite_access(PAIR, env.drive.AccessBody(email="n1@example.com"), actor)
+        await env.drive.invite_access(PAIR, env.drive.AccessBody(email="n2@example.com"), actor)
+        capped = await code_of(env.drive.invite_access(PAIR, env.drive.AccessBody(email="n3@example.com"), actor))
+        assert capped.status_code == 429 and capped.error_code == "INVITE_LIMIT"
+        old = datetime.now(timezone.utc) - timedelta(hours=30)
+        await env.db.execute(env.T["mentor_drive_log"].update().values(created_at=old))
+        await env.drive.invite_access(PAIR, env.drive.AccessBody(email="n3@example.com"), actor)  # stare zaproszenia wygasły z okna
+
+    env.run(go)
+
+
+def test_access_stale_on_google_failure_and_reconnect_on_revoked(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        await env.drive.invite_access(PAIR, env.drive.AccessBody(email="g@example.com"), actor)
+        fresh = await env.drive.get_access(PAIR, Response(), actor)
+        assert fresh["stale"] is False
+        for err in (gerr(403, "forbidden"), gerr(0, "network"), gerr(429, "rateLimitExceeded"), gerr(503, "")):
+            env.g.fail["list_permissions"] = err
+            old = await env.drive.get_access(PAIR, Response(), await env.actor(B))
+            assert old["stale"] is True and old["checked_at"] == fresh["checked_at"]
+            assert [p["email"] for p in old["people"]] == [p["email"] for p in fresh["people"]]
+        env.g.fail["list_permissions"] = gerr(400, "invalid_grant")
+        exc = await code_of(env.drive.get_access(PAIR, Response(), actor))
+        assert exc.status_code == 409 and exc.error_code == "DRIVE_NEEDS_RECONNECT"
+        assert (await env.drive.get_conn(PAIR))["state"] == "needs_reconnect"
+
+    env.run(go)
+
+
+def test_access_without_snapshot_reports_error_not_500(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        env.g.fail["list_permissions"] = gerr(503, "")
+        exc = await code_of(env.drive.get_access(PAIR, Response(), actor))
+        assert exc.status_code == 502 and exc.error_code == "GOOGLE_UNAVAILABLE"
+
+    env.run(go)
+
+
+def test_outside_kind_for_people_added_directly_on_drive(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        conn = await env.drive.get_conn(PAIR)
+        env.g._store(conn["folder_id"]).append({"id": "DIRECT1", "emailAddress": "obcy@example.com", "role": "reader", "type": "user"})
+        view = await env.drive.get_access(PAIR, Response(), actor)
+        out = next(p for p in view["people"] if p["email"] == "obcy@example.com")
+        assert out["kind"] == "outside" and out["can_remove"] is True and out["name"] == "obcy@example.com"
+        after = await env.drive.remove_access(PAIR, "DIRECT1", actor)
+        assert all(p["permission_id"] != "DIRECT1" for p in after["people"])
+
+    env.run(go)
+
+
+def test_activity_pages_connection_folder_layout_and_system_actor(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        await env.drive.set_folder(PAIR, env.drive.FolderBody(layout="flat"), actor)
+        await env.drive.set_folder(PAIR, env.drive.FolderBody(create=True, name="Druga"), actor)
+        await saved_clip(env, "c1", "k1")
+        row = await env.core.one(select(env.T["mentor_drive_files"]))
+        env.g.gone.add(row["drive_file_id"])
+        await env.drive.verify_due(NOW + timedelta(days=400))
+        await env.drive.disconnect_drive(PAIR, actor)
+        act = await activity_of(env, actor)
+        assert kinds_of(act) == ["disconnected", "clip_gone", "clip_saved", "folder_changed", "layout_changed", "folder_changed", "connected"]
+        gone = act["items"][1]
+        assert gone["actor"] is None and gone["details"]["clip_id"] == "c1" and gone["details"]["clip_title"] == "Kara"
+        saved = act["items"][2]
+        assert saved["actor"]["judge_id"] == A and saved["details"]["file_name"] == "c1 Kara.mp4" and saved["details"]["match_label"]
+        assert act["items"][3]["details"] == {"folder_name": "Druga"} and act["items"][4]["details"] == {"layout": "flat"}
+        blob = str(act).lower()
+        assert "ya29" not in blob and "refresh" not in blob and "token" not in blob and "drive/file" not in blob
+        first = await activity_of(env, actor, limit=3)
+        assert len(first["items"]) == 3 and first["next"]
+        second = await activity_of(env, actor, limit=3, before=first["next"])
+        third = await activity_of(env, actor, limit=3, before=second["next"])
+        assert kinds_of(first) + kinds_of(second) + kinds_of(third) == kinds_of(act) and third["next"] is None
+        assert (await code_of(activity_of(env, actor, before="zly"))).error_code == "BAD_CURSOR"
+
+    env.run(go)
+
+
+def test_activity_records_real_actor_when_admin_acts_as_mentor(env):
+    async def go():
+        actor = await env.actor(MENTOR)
+        actor.acted_by = "900"
+        out = await env.drive.connect_drive(PAIR, None, actor)
+        state = parse_qs(urlparse(out["url"]).query)["state"][0]
+        await env.drive.drive_callback(code="CODE", state=state, error=None)
+        act = await activity_of(env, actor)
+        assert act["items"][0]["kind"] == "connected" and act["items"][0]["actor"]["judge_id"] == "900"
+        assert act["items"][0]["actor"]["name"] == "Ada Admin"
+        row = await env.core.one(select(env.T["mentor_drive_log"]))
+        assert row["actor_id"] == MENTOR and row["acted_by"] == "900"
+
+    env.run(go)
+
+
+def test_backfill_clip_saved_is_idempotent_and_matches_live_ids(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        await saved_clip(env, "c1", "k1")  # na żywo już zapisał clip_saved
+        log = env.T["mentor_drive_log"]
+        assert await env.drive.backfill_activity() == 0
+        await env.db.execute(log.delete())  # tak wygląda baza tuż po wdrożeniu: księga jest, dziennika nie ma
+        assert await env.drive.backfill_activity() == 1
+        assert await env.drive.backfill_activity() == 0
+        rows = await env.core.rows(select(log))
+        assert len(rows) == 1 and rows[0]["kind"] == "clip_saved" and rows[0]["actor_id"] == A
+        await add_clip(env, "c2", "k2")
+        await env.drive.save_clips(PAIR, env.drive.SaveBody(clip_ids=["c2"]), actor)
+        await env.drive.work_once("w1")
+        assert await env.drive.backfill_activity() == 0  # wpis z żywego zapisu ma to samo id
+        assert len(await env.core.rows(select(log))) == 2
+
+    env.run(go)
+
+
+def test_log_failure_never_breaks_the_action(env, monkeypatch):
+    class Boom:
+        def insert(self):
+            raise RuntimeError("baza dziennika padła")
+
+    async def go():
+        actor, _ = await with_folder(env, A)
+        monkeypatch.setattr(env.drive, "LOG", Boom())
+        view = await env.drive.invite_access(PAIR, env.drive.AccessBody(email="g@example.com"), actor)
+        assert any(p["email"] == "g@example.com" for p in view["people"])
+        row = await saved_clip(env, "c1", "k1")
+        assert row["state"] == "done"
+        assert (await env.drive.set_folder(PAIR, env.drive.FolderBody(create=True, name="Trzecia"), actor))["folder"]["name"] == "Trzecia"
+
+    env.run(go)
+
+
+def test_new_folder_keeps_guests_on_old_folder_only(env):
+    async def go():
+        actor, _ = await with_folder(env, A)
+        await env.drive.invite_access(PAIR, env.drive.AccessBody(email="g@example.com"), actor)
+        old = (await env.drive.get_conn(PAIR))["folder_id"]
+        view = await env.drive.set_folder(PAIR, env.drive.FolderBody(create=True, name="Nowa"), actor)
+        new = view["folder"]["id"]
+        assert new != old
+        access = await env.drive.get_access(PAIR, Response(), actor)
+        assert [p["email"] for p in access["people"]] == ["ala@gmail.com"]  # gość nie przeszedł
+        assert any(p["email"] == "g@example.com" for p in env.g.perm_store[old])  # a stary folder zachował uprawnienia
 
     env.run(go)

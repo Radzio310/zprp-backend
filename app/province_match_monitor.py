@@ -661,6 +661,27 @@ async def _create_event(
     targets = sorted({_str(j) for j in judge_ids if _str(j)})
     if not targets:
         return 0
+    if event_type in {"protocol_approved", "protocol_reopened"}:
+        # An approval belongs to the protocol lifecycle, not to the score/venue
+        # fingerprint. A real reopening starts a new cycle; unrelated edits do not.
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import JSONB
+
+        lifecycle = await database.fetch_one(select(
+            province_match_events.c.id, province_match_events.c.event_type,
+            province_match_events.c.data_json,
+        ).where(
+            province_match_events.c.province == province,
+            province_match_events.c.match_id == match_id,
+            or_(province_match_events.c.event_type.in_(["protocol_approved", "protocol_reopened"]),
+                cast(province_match_events.c.data_json, JSONB)["change_types"].contains(["protocol_approved"]),
+                cast(province_match_events.c.data_json, JSONB)["change_types"].contains(["protocol_reopened"])),
+        ).order_by(province_match_events.c.id.desc()).limit(1))
+        if lifecycle:
+            types = state_dict(lifecycle["data_json"]).get("change_types") or [lifecycle["event_type"]]
+            if event_type in types:
+                return 0
+        state_fp = f"protocol-cycle:{lifecycle['id'] if lifecycle else 0}"
     event_key_raw = f"{province}|{match_id}|{event_type}|{body}|{state_fp}"
     event_key = hashlib.sha256(event_key_raw.encode("utf-8")).hexdigest()
     data = {
@@ -676,12 +697,11 @@ async def _create_event(
         "change_types": list(change_types or [event_type]),
         "preference_keys": list(preference_keys or []),
         "match_at": match_at or "",
-        # Jeden żywy wątek na mecz: kolejne rewizje nie układają na Androidzie
-        # stosu starych kafelków, a dziennik w aplikacji nadal zachowuje każdą
-        # kanoniczną rewizję.
+        # One identifier per revision: retry coalesces, while a later lineup
+        # change must not replace an independent approval/date notification.
         "notificationThread": (
             f"new-match-{match_id}" if event_type == "match_added"
-            else f"province-match:{province}:{match_id}"
+            else f"province-match-event:{event_key}"
         ),
         "notificationExpiresAt": str(int((_now() + timedelta(
             days=7 if event_type == "match_added" else 1
@@ -744,7 +764,7 @@ async def _create_event(
                 judge_id=_str(device["judge_id"]),
                 title=title,
                 body=body,
-                data_json=data,
+                data_json={**data, "judgeId": _str(device["judge_id"])},
                 status=delivery_status,
                 last_error=(
                     None
@@ -817,9 +837,11 @@ async def _fetch_details_many(client: AsyncClient, items: Dict[str, Dict[str, An
 
     async def one(match_id: str, base: Dict[str, Any]) -> None:
         async with semaphore:
+            requested_at = _now().isoformat()
             payload = await _fetch_public_details(client, match_id)
         state = _api_to_state(payload or {}, base)
         if state:
+            state["_observed_at"] = requested_at
             output[match_id] = state
 
     await asyncio.gather(*(one(match_id, base) for match_id, base in items.items()))
@@ -853,7 +875,9 @@ async def _upsert_match(
         previous = state_dict(old_row["state_json"])
         # Migawka z prywatnej listy bywa częściowa. Zachowujemy pola,
         # których to źródło nie zwróciło (w tym status protokołu).
-        state = {**previous, **state}
+        from app.match_snapshot_guard import merge_observation
+
+        state = merge_observation(previous, state)
     new_fp = fingerprint(state)
     approved = _str(state.get("protocol_status")) == "approved"
     values = {
@@ -876,6 +900,10 @@ async def _upsert_match(
         bump(province)
     if not old_row:
         await database.execute(insert(province_matches).values(province=province, match_id=match_id, **values))
+        if deep:
+            from app.settlement_live import sync_match
+
+            await sync_match(province, match_id)
         assignment_events = (
             await _sync_assignments_from_state(
                 province,
@@ -890,11 +918,18 @@ async def _upsert_match(
         await enqueue_recent_assignments(province, match_id)
         return True, assignment_events
     old = state_dict(old_row["state_json"])
+    from app.match_snapshot_guard import explicit_removals
+
+    removed_ids = explicit_removals(old, state) if deep else set()
     await database.execute(
         update(province_matches)
         .where(and_(province_matches.c.province == province, province_matches.c.match_id == match_id))
         .values(**values)
     )
+    if old_row["fingerprint"] != new_fp or removed_ids:
+        from app.settlement_live import sync_match
+
+        await sync_match(province, match_id, previous_state=old)
     assignment_events = (
         await _sync_assignments_from_state(
             province, match_id, state, notify=True
@@ -902,6 +937,22 @@ async def _upsert_match(
         if deep
         else 0
     )
+    if removed_ids:
+        # A numeric replacement (including ZPRP's explicit zero) is evidence of
+        # removal. Missing/blank fields still use the conservative two-pass rule.
+        removed_rows = await database.fetch_all(update(province_match_judges).where(
+            province_match_judges.c.province == province,
+            province_match_judges.c.match_id == match_id,
+            province_match_judges.c.judge_id.in_(removed_ids),
+            province_match_judges.c.active.is_(True),
+        ).values(active=False, missing_runs=2, updated_at=now).returning(province_match_judges.c.judge_id))
+        if values["match_at"] is None or values["match_at"] > now:
+            for removed_row in removed_rows:
+                removed_id = _str(removed_row["judge_id"])
+                assignment_events += await _create_event(province, match_id,
+                    _str(state.get("RozgrywkiCode")), "assignment_removed",
+                    f"Usunięto Twój mecz {_str(state.get('RozgrywkiCode'))}", [removed_id],
+                    new_fp + f":{removed_id}:{old_row['updated_at']}")
     from app.mentoring_notifications import enqueue_recent_assignments
     await enqueue_recent_assignments(province, match_id)
     if old_row["fingerprint"] == new_fp:
@@ -992,7 +1043,9 @@ async def _upsert_assignment(
             "match_added",
             f"Dodano nowy mecz {code}" + (f" • {details}" if details else "") + (f" • {note}" if note else ""),
             [judge_id],
-            fingerprint(state),
+            # Re-adding the same judge is a new assignment cycle even when the
+            # match returned to exactly the same lineup. Do not revive an old push.
+            fingerprint(state) + f":{judge_id}:{existing['updated_at'] if existing else 'first'}",
         )
     return 0
 
@@ -1103,6 +1156,7 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
         cookies = await _login_zprp_and_get_cookies(private_client, username, password)
         for judge_id in judge_ids:
             path = _build_judge_matches_path(judge_id, None)
+            requested_at = _now().isoformat()
             _, html = await fetch_with_correct_encoding(private_client, path, method="GET", cookies=cookies)
             parsed = await asyncio.to_thread(_parse_match_rows_from_soup, await asyncio.to_thread(BeautifulSoup, html, "html.parser"))
             seen_ids: set[str] = set()
@@ -1112,6 +1166,7 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
                 if not match_id or not match_id.isdigit():
                     continue
                 state = _private_to_state(item)
+                state["_observed_at"] = requested_at
                 old = await database.fetch_one(
                     select(
                         province_matches.c.fingerprint,
@@ -1360,11 +1415,12 @@ async def _scrape_full_schedule(client: AsyncClient, cookies: Dict[str, str]) ->
         competitions = [x for x in _parse_select_options(soup_cat.find("select", attrs={"name": "IdRozgr"})) if x[0] and x[0] != "0"]
         for competition, _, _ in competitions:
             path = "/index.php?" + urlencode({"a": "terminarz", "Filtr_sezon": season, "Filtr_kategoria": cat_value, "IdRozgr": competition, "IdRundy": "ALL"})
+            requested_at = _now().isoformat()
             _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
             parsed = await asyncio.to_thread(_parse_matches_table, html, context_prefix=f"{season}|{cat_value}|{competition}")
             for match_id, item in parsed.items():
                 if _str(item.get("IdZawody")).isdigit():
-                    output[_str(item.get("IdZawody"))] = _schedule_to_state(item)
+                    output[_str(item.get("IdZawody"))] = {**_schedule_to_state(item), "_observed_at": requested_at}
     return output
 
 

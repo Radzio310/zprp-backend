@@ -461,7 +461,8 @@ def test_scheduler_przejmuje_przypomnienie_atomowo():
     push_source = (
         pathlib.Path(__file__).resolve().parents[1] / "app" / "push" / "push.py"
     ).read_text(encoding="utf-8")
-    assert 'where=push_schedules.c.status != "processing"' in push_source
+    assert 'push_schedules.c.status != "processing"' in push_source
+    assert 'push_schedules.c.status != "sent"' in push_source
 
 
 def test_informacyjne_zdarzenie_nie_budzi_tez_mentora():
@@ -651,3 +652,28 @@ def test_explicit_zero_still_reopens_approved_protocol():
     assert new["protocol_status"] == "before_approval"
     events = build_change_events(approved, new, now=datetime(2026, 10, 2, tzinfo=timezone.utc))
     assert events[0]["event_type"] == "protocol_reopened"
+
+
+@pytest.mark.asyncio
+async def test_repeated_approval_ignores_unrelated_match_fingerprint(monkeypatch):
+    from sqlalchemy import Column, Integer, JSON, MetaData, String, Table
+    from unittest.mock import AsyncMock
+
+    events = Table("events", MetaData(), Column("id", Integer), Column("province", String),
+        Column("match_id", String), Column("event_key", String), Column("match_code", String),
+        Column("event_type", String), Column("title", String), Column("body", String),
+        Column("data_json", JSON), Column("target_judge_ids", JSON))
+    db = MagicMock(fetch_one=AsyncMock(return_value={"id": 10, "event_type": "protocol_approved",
+        "data_json": {"change_types": ["protocol_approved"]}}), fetch_val=AsyncMock(return_value=None))
+    monkeypatch.setattr(_monitor, "database", db)
+    monkeypatch.setattr(_monitor, "province_match_events", events)
+    assert await _monitor._create_event("SLASKIE", "42", "OSM/12", "protocol_approved",
+        "approval", ["865"], "new-score-and-address-fingerprint") == 0
+    db.fetch_val.assert_not_called()
+    # A real reopening allows a fresh approval, using the cycle ID in the key.
+    db.fetch_one.return_value = {"id": 11, "event_type": "protocol_reopened", "data_json": {}}
+    await _monitor._create_event("SLASKIE", "42", "OSM/12", "protocol_approved", "approval", ["865"], "fingerprint-a")
+    first = db.fetch_val.call_args_list[0].args[0].compile().params["event_key"]
+    db.fetch_val.reset_mock()
+    await _monitor._create_event("SLASKIE", "42", "OSM/12", "protocol_approved", "approval", ["865"], "fingerprint-b")
+    assert db.fetch_val.call_args_list[0].args[0].compile().params["event_key"] == first

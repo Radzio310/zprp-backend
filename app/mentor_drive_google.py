@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import httpx
@@ -142,6 +142,30 @@ class GoogleApi:
         params = {"sendNotificationEmail": "true", "supportsAllDrives": "true", "fields": "id"}
         body = {"type": "user", "role": role, "emailAddress": email}
         return (await self._send("POST", f"{FILES}/{file_id}/permissions", params=params, json=body, headers=self._bearer(access))).json()
+
+    async def list_permissions(self, access: str, file_id: str) -> List[Dict[str, Any]]:
+        """Osoby z dostępem do folderu (odczyt na żywo, do 3 stron po 100)."""
+        out: List[Dict[str, Any]] = []
+        token: Optional[str] = None
+        for _ in range(3):
+            params = {"fields": R.PERMISSION_FIELDS, "pageSize": "100", "supportsAllDrives": "true"}
+            if token:
+                params["pageToken"] = token
+            body = (await self._send("GET", f"{FILES}/{file_id}/permissions", params=params, headers=self._bearer(access))).json()
+            out += [p for p in (body.get("permissions") or []) if isinstance(p, dict)]
+            token = body.get("nextPageToken")
+            if not token:
+                break
+        return out
+
+    async def update_permission(self, access: str, file_id: str, permission_id: str, role: str) -> Dict[str, Any]:
+        params = {"supportsAllDrives": "true", "fields": "id,role"}
+        return (await self._send("PATCH", f"{FILES}/{file_id}/permissions/{permission_id}", params=params,
+                                 json={"role": role}, headers=self._bearer(access))).json()
+
+    async def delete_permission(self, access: str, file_id: str, permission_id: str) -> None:
+        await self._send("DELETE", f"{FILES}/{file_id}/permissions/{permission_id}", ok=(200, 204),
+                         params={"supportsAllDrives": "true"}, headers=self._bearer(access))
 
     # ─── Wysyłka wznawialna ───
     async def start_upload(self, access: str, metadata: Dict[str, Any], size: int, mime: str = "video/mp4") -> str:

@@ -63,12 +63,12 @@ async def test_unrelated_notifications_keep_their_delivery_policy():
 
 @pytest.mark.asyncio
 async def test_newer_important_revision_supersedes_retry(monkeypatch):
-    from sqlalchemy import Column, Integer, MetaData, String, Table
+    from sqlalchemy import Column, Integer, JSON, MetaData, String, Table
     meta = MetaData()
     notifications = Table("notifications", meta, Column("id", Integer), Column("installation_id", String),
                           Column("event_id", Integer), Column("status", String))
     events = Table("events", meta, Column("id", Integer), Column("province", String),
-                   Column("match_id", String), Column("event_type", String))
+                   Column("match_id", String), Column("event_type", String), Column("data_json", JSON))
     monkeypatch.setattr(scheduler, "province_match_notifications", notifications)
     monkeypatch.setattr(scheduler, "province_match_events", events)
     monkeypatch.setattr(scheduler, "_utc_now", lambda: NOW)
@@ -79,9 +79,34 @@ async def test_newer_important_revision_supersedes_retry(monkeypatch):
         {"kind": "province_match_change", "event_type": "match_updated", "province": "SLASKIE", "match_id": "42"})
     assert "Superseded" in reason
     # Zapytanie musi wykluczać nowy przydział oraz zmiany informacyjne.
-    query = db.fetch_val.call_args.args[0].compile(compile_kwargs={"literal_binds": True})
-    assert "match_added" in str(query) and "match_info_updated" in str(query)
-    assert "event_id > 10" in str(query)
+    from sqlalchemy.dialects import postgresql
+    query = db.fetch_val.call_args.args[0].compile(dialect=postgresql.dialect())
+    assert "match_added" in str(query.params) and "match_info_updated" in str(query.params)
+    assert 10 in query.params.values()
+    assert "events.event_type =" in str(query)
+    assert "change_types" in query.params.values()
+
+
+@pytest.mark.asyncio
+async def test_delivery_rechecks_account_and_preferences(monkeypatch):
+    db = MagicMock(fetch_val=AsyncMock(return_value="iphone"))
+    monkeypatch.setattr(scheduler, "database", db)
+    # Only the table used by the token-owner lookup is needed for these tests.
+    from sqlalchemy import Column, DateTime, MetaData, String, Table
+    tokens = Table("tokens", MetaData(), Column("installation_id", String), Column("token", String),
+                   Column("token_type", String), Column("updated_at", DateTime))
+    monkeypatch.setattr(scheduler, "push_tokens", tokens)
+    row = {"judge_id": "865", "installation_id": "iphone"}
+    token = {"judge_id": "999", "token": "fcm", "token_type": "device_fcm", "notification_prefs": {}}
+    assert "identity changed" in await scheduler._match_delivery_reason(row, {}, token)
+    token["judge_id"] = "865"
+    token["notification_prefs"] = {"notificationTypes": {"protocolStatus": False}}
+    data = {"kind": "province_match_change", "event_type": "protocol_approved"}
+    assert "preference changed" in await scheduler._match_delivery_reason(row, data, token)
+    token["notification_prefs"] = {}
+    assert await scheduler._match_delivery_reason(row, data, token) is None
+    db.fetch_val.return_value = "new-installation-same-iphone"
+    assert "Superseded installation" in await scheduler._match_delivery_reason(row, data, token)
 
 
 @pytest.mark.asyncio
