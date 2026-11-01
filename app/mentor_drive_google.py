@@ -23,7 +23,7 @@ REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 FILES = "https://www.googleapis.com/drive/v3/files"
 UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
 FOLDER_MIME = "application/vnd.google-apps.folder"
-FILE_FIELDS = "id,name,mimeType,webViewLink,trashed,size,parents"
+FILE_FIELDS = "id,name,mimeType,webViewLink,trashed,size,parents,driveId,capabilities(canAddChildren,canShare,canMoveItemWithinDrive)"
 
 
 class GoogleError(Exception):
@@ -156,6 +156,8 @@ class GoogleApi:
             token = body.get("nextPageToken")
             if not token:
                 break
+        if token:
+            raise GoogleError(400, "permissionListTooLarge")
         return out
 
     async def update_permission(self, access: str, file_id: str, permission_id: str, role: str) -> Dict[str, Any]:
@@ -166,6 +168,36 @@ class GoogleApi:
     async def delete_permission(self, access: str, file_id: str, permission_id: str) -> None:
         await self._send("DELETE", f"{FILES}/{file_id}/permissions/{permission_id}", ok=(200, 204),
                          params={"supportsAllDrives": "true"}, headers=self._bearer(access))
+
+    async def create_transfer_folder(self, access: str, name: str, transfer_id: str, parent: Optional[str] = None) -> Dict[str, Any]:
+        body = {"name": name, "mimeType": FOLDER_MIME, "appProperties": {"baza_transfer": transfer_id}}
+        if parent:
+            body["parents"] = [parent]
+        return (await self._send("POST", FILES, params={"fields": FILE_FIELDS, "supportsAllDrives": "true"},
+                                 json=body, headers=self._bearer(access))).json()
+
+    async def move_file(self, access: str, file_id: str, source: str, destination: str) -> Dict[str, Any]:
+        params = {"addParents": destination, "removeParents": source, "fields": FILE_FIELDS, "supportsAllDrives": "true"}
+        return (await self._send("PATCH", f"{FILES}/{file_id}", params=params, json={}, headers=self._bearer(access))).json()
+
+    async def transfer_permission(self, access: str, file_id: str, permission: Dict[str, Any],
+                                  existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Odtworzenie osoby/grupy bez obniżania istniejącego dostępu i bez przenoszenia własności."""
+        if permission.get("expirationTime") or (existing and existing.get("expirationTime")):
+            raise GoogleError(400, "temporaryPermissionUnsupported")
+        rank = {"reader": 1, "commenter": 2, "writer": 3, "owner": 4}
+        role = permission["role"]
+        if existing and rank.get(existing.get("role"), 0) > rank[role]:
+            role = existing["role"]
+        body: Dict[str, Any] = {"role": role}
+        params = {"supportsAllDrives": "true", "fields": "id"}
+        if existing:
+            method, url = "PATCH", f"{FILES}/{file_id}/permissions/{existing['id']}"
+        else:
+            params["sendNotificationEmail"] = "true"
+            body.update(type=permission["type"], emailAddress=permission["emailAddress"])
+            method, url = "POST", f"{FILES}/{file_id}/permissions"
+        return (await self._send(method, url, params=params, json=body, headers=self._bearer(access))).json()
 
     # ─── Wysyłka wznawialna ───
     async def start_upload(self, access: str, metadata: Dict[str, Any], size: int, mime: str = "video/mp4") -> str:

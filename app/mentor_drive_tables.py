@@ -37,6 +37,10 @@ def define_tables(metadata):
         Column("shared_at", DateTime(timezone=True), nullable=True),
         #: Ostatni udany odczyt listy osób z dostępem (JSON `{checked_at, perms[]}`); podawany jako `stale`, gdy Google nie odpowiada.
         Column("access_snapshot", Text, nullable=True),
+        Column("folder_transfer_state", String, nullable=True),
+        Column("folder_transfer_data", Text, nullable=True),
+        Column("folder_transfer_worker", String, nullable=True),
+        Column("folder_transfer_lease_until", DateTime(timezone=True), nullable=True),
         Column("connected_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
@@ -104,6 +108,10 @@ def define_tables(metadata):
 MIGRATIONS = (
     "ALTER TABLE mentor_drive_files ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ",
     "ALTER TABLE mentor_drive_connections ADD COLUMN IF NOT EXISTS access_snapshot TEXT",
+    "ALTER TABLE mentor_drive_connections ADD COLUMN IF NOT EXISTS folder_transfer_state TEXT",
+    "ALTER TABLE mentor_drive_connections ADD COLUMN IF NOT EXISTS folder_transfer_data TEXT",
+    "ALTER TABLE mentor_drive_connections ADD COLUMN IF NOT EXISTS folder_transfer_worker TEXT",
+    "ALTER TABLE mentor_drive_connections ADD COLUMN IF NOT EXISTS folder_transfer_lease_until TIMESTAMPTZ",
     # Tabela `mentor_drive_log` powstaje z `metadata.create_all`; poniższe domykają ją, gdyby powstała bez indeksu.
     "CREATE INDEX IF NOT EXISTS ix_mentor_drive_log_pair_created ON mentor_drive_log (pair_id, created_at)",
 )

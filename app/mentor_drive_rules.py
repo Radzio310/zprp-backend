@@ -201,7 +201,7 @@ MAX_GUESTS = 20  # osoby z dostępem poza właścicielem i partnerem, na parę
 INVITE_DAY_LIMIT = 30  # nowe zaproszenia na dobę na parę (liczone z dziennika w bazie)
 INVITE_WINDOW = timedelta(hours=24)
 INVITE_ROLES = ("reader", "writer")
-PERMISSION_FIELDS = "permissions(id,emailAddress,displayName,role,photoLink,type),nextPageToken"
+PERMISSION_FIELDS = "permissions(id,emailAddress,displayName,role,photoLink,type,expirationTime,deleted,domain),nextPageToken"
 _PERMISSION_ID = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
 LOG_KINDS = ("connected", "disconnected", "folder_changed", "layout_changed", "invited", "role_changed", "access_removed",
              "clip_saved", "clip_gone")
