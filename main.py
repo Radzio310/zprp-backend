@@ -395,6 +395,11 @@ app.include_router(mentor_auto_found_router)
 # Teczka pary (Dysk Google): trasy /drive, za flagą MENTOR_DRIVE_ENABLED - `docs/mentor-panel.md`, § "Teczka pary".
 from app.mentor_drive import router as mentor_drive_router
 app.include_router(mentor_drive_router)
+# Mecze ręczne wspólne (31.10.2026) i ręczne podpięcie ProEla w panelu pary - kontrakt `docs/mecze-wspolne-api.md`.
+from app.shared_matches import router as shared_matches_router
+from app.mentor_proel_link import router as mentor_proel_link_router
+app.include_router(shared_matches_router)
+app.include_router(mentor_proel_link_router)
 app.include_router(short_result_records_router)
 # Dodatkowy raport sędziów/delegata: treść, PDF i adresaci.
 app.include_router(extra_report_router)

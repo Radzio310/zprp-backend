@@ -701,10 +701,18 @@ async def match_timeline(match_id: str, actor: Actor = Depends(market_actor)):
     return await timeline_for_match(match_id, str(ctx["match"]["state"].get("RozgrywkiCode") or ""))
 
 
-async def timeline_for_match(match_id: str, code: str) -> Dict[str, Any]:
+async def timeline_for_match(
+    match_id: str, code: str, *, trusted: bool = False, owner_ids: Any = None, _depth: int = 0
+) -> Dict[str, Any]:
     """Oś meczu z protokołu ProEla z godzinami zdarzeń - bez sprawdzania dostępu.
 
     Wspólna dla `/mentor-evaluations/match/{id}/timeline` i pokoju meczu panelu „Mentor".
+
+    `code` to klucz wiersza ProEla: numer meczu albo klucz szkoleniowy `T-XXXXXXXX/NUMER`.
+    `trusted=True` = klucz wybrał człowiek (ręczne podpięcie, klucz meczu wspólnego), więc zgodność ID ZPRP
+    nie jest sprawdzana - świadomy wybór po pełnym kluczu wygrywa z automatem.
+    `owner_ids` (lista sędziów pary) ogranicza klucze szkoleniowe do zapisów napisanych przez te osoby.
+    Klucz szkoleniowy z `promoted_to` rozwiązuje się do oficjalnego (gdy ten istnieje).
     """
     code = str(code or "").strip()
     empty = {"available": False, "half_minutes": 30, "break_minutes": 10, "teams": {}, "events": []}
@@ -713,14 +721,32 @@ async def timeline_for_match(match_id: str, code: str) -> Dict[str, Any]:
     from app.db import saved_matches
 
     stored = await database.fetch_one(
-        select(saved_matches.c.data_json, saved_matches.c.zprp_match_id).where(saved_matches.c.match_number == code)
+        select(
+            saved_matches.c.data_json,
+            saved_matches.c.zprp_match_id,
+            saved_matches.c.promoted_to,
+            saved_matches.c.doc_writer_judge,
+        ).where(saved_matches.c.match_number == code)
     )
     if not stored:
         return empty
+    from app.proel_training_key import is_training_key
+
+    if owner_ids is not None and is_training_key(code):
+        from app.proel_fields import same_judge_number
+
+        writer = str(stored["doc_writer_judge"] or "").strip()
+        if not writer or not any(same_judge_number(writer, j) for j in owner_ids):
+            return empty
+    promoted = str(stored["promoted_to"] or "").strip()
+    if promoted and promoted != code and _depth < 3:
+        official = await timeline_for_match(match_id, promoted, trusted=trusted, owner_ids=None, _depth=_depth + 1)
+        if official["available"]:
+            return official
     # Numer meczu nie jest kluczem między sezonami - zapis innego meczu
     # o tym samym numerze nie może podsunąć cudzych zdarzeń.
     stored_id = str(stored["zprp_match_id"] or "").strip()
-    if stored_id and stored_id != str(match_id):
+    if not trusted and stored_id and stored_id != str(match_id):
         return empty
     blob = stored["data_json"]
     if isinstance(blob, str):

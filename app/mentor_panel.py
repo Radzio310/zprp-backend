@@ -304,12 +304,12 @@ async def mentor_sheet_shapes(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return out
 
 
-async def _timeline(match_id: str, code: str) -> Dict[str, Any]:
+async def _timeline(match_id: str, code: str, *, trusted: bool = False, owner_ids: Any = None) -> Dict[str, Any]:
     empty = {"available": False, "half_minutes": 30, "break_minutes": 10, "teams": {}, "events": []}
     try:
         from app.mentor_evaluations import timeline_for_match
 
-        found = await timeline_for_match(match_id, code)
+        found = await timeline_for_match(match_id, code, trusted=trusted, owner_ids=owner_ids)
     except Exception:  # noqa: BLE001 - brak osi nie psuje pokoju meczu
         C.logger.warning("mentor: oś meczu nieczytelna", exc_info=True)
         return empty
@@ -364,10 +364,14 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
                              .where(mentor_threads.c.match_id == mid).order_by(mentor_threads.c.created_at.asc()))
         return await C.threads_payload(ctx, found)
 
+    # Skąd brać protokół: ręczne podpięcie > klucz meczu wspólnego/Trybuny > automat (`mentor_proel_link.timeline_target`).
+    from app.mentor_proel_link import timeline_target
+
+    target = await timeline_target(ctx, card)
     # Niezależne odczyty pokoju (w tym oś ProEla) równolegle zamiast kolejno.
     (videos, raw_videos, streams), clips, (delegate, sealed), mentor_shapes, threads, timeline = await asyncio.gather(
         load_videos(), load_clips(), load_delegate(), load_mentor(), load_threads(),
-        _timeline(R.s(card.get("zprp_match_id")) if watched else mid, R.s(card.get("proel_key") or card.get("match_code"))))
+        _timeline(target["match_id"], target["code"], trusted=target["trusted"], owner_ids=target["owner_ids"]))
     markers: List[Dict[str, Any]] = []
     for video in raw_videos:
         markers += R.markers_as_clips(video, clean_markers(R.json_value(video.get("markers_json"), [])))

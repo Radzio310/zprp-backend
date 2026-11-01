@@ -472,8 +472,15 @@ async def _archive_cards(a: str, b: str) -> List[Dict[str, Any]]:
     return [R.card_from_archive(r) for r in found]
 
 
+async def _shared_cards(a: str, b: str) -> List[Dict[str, Any]]:
+    """Mecze wspólne (ręczne, na serwerze), w których oboje sędziowie pary są w obsadzie (karta `my:<uuid>`)."""
+    from app.shared_match_pair import pair_cards
+
+    return await pair_cards(a, b)
+
+
 async def pair_match_cards(judge_ids: Iterable[str]) -> List[Dict[str, Any]]:
-    """Wszystkie mecze pary (cała historia): hurtownia + monitor okręgu + archiwum."""
+    """Wszystkie mecze pary (cała historia): hurtownia + monitor okręgu + archiwum + mecze wspólne (`my:`)."""
     ids = sorted({R.s(j) for j in judge_ids if R.s(j)})
     if len(ids) != 2:
         return []
@@ -489,9 +496,15 @@ async def pair_match_cards(judge_ids: Iterable[str]) -> List[Dict[str, Any]]:
             logger.warning("mentor: źródło meczów %s nieudane", loader.__name__, exc_info=True)
             return []
 
-    # Trzy niezależne źródła (hurtownia, monitor okręgu, archiwum) naraz.
-    sources = list(await asyncio.gather(*(load(l) for l in (_public_cards, _province_cards, _archive_cards))))
+    # Cztery niezależne źródła (hurtownia, monitor okręgu, archiwum, mecze wspólne) naraz.
+    sources = list(await asyncio.gather(*(load(l) for l in (_public_cards, _province_cards, _archive_cards, _shared_cards))))
     cards = R.merge_matches(*sources)
+    try:
+        from app.shared_match_pair import collapse_linked
+
+        cards = await collapse_linked(cards)
+    except Exception:  # noqa: BLE001 - scalenie kart nie zabiera listy meczów
+        logger.warning("mentor: scalenie kart meczu wspólnego nieudane", exc_info=True)
     _match_cache[key] = (time.monotonic(), cards)
     if len(_match_cache) > 500:
         _match_cache.clear()
@@ -650,6 +663,11 @@ async def enrich_cards(ctx: Dict[str, Any], cards: List[Dict[str, Any]]) -> List
             logger.warning("mentor: odczyt protokołów ProEla nieudany", exc_info=True)
         return proel_ids, proel_codes
 
+    async def load_proel_links() -> Dict[str, Dict[str, Any]]:
+        from app.mentor_proel_link import links_for  # ręczne podpięcie ProEla (31.10.2026)
+
+        return await links_for(pair_id, ids)
+
     async def load_sheet_unseen() -> set:
         return set((await unseen_sheets(key, me)).values()) if me in ctx["judge_ids"] else set()
 
@@ -660,9 +678,9 @@ async def enrich_cards(ctx: Dict[str, Any], cards: List[Dict[str, Any]]) -> List
 
     # Niezależne odczyty równolegle (każdy na własnym połączeniu z puli).
     (flags, videos, clips, threads, delegate_points, mentor_points, (proel_ids, proel_codes),
-     unread, sheet_unseen, auto_found) = await asyncio.gather(
+     unread, sheet_unseen, auto_found, proel_links) = await asyncio.gather(
         load_flags(), load_videos(), load_clips(), load_threads(), load_delegate(), load_mentor(), load_proel(),
-        unread_threads(pair_id, me), load_sheet_unseen(), load_auto_found())
+        unread_threads(pair_id, me), load_sheet_unseen(), load_auto_found(), load_proel_links())
     unseen_by_match: Dict[str, int] = {}
     for mid in unread.values():
         unseen_by_match[R.s(mid)] = unseen_by_match.get(R.s(mid), 0) + 1
@@ -675,7 +693,10 @@ async def enrich_cards(ctx: Dict[str, Any], cards: List[Dict[str, Any]]) -> List
             "submitted": bool(flag.get("submitted")),
             "review_status": flag.get("review_status"),
             "due_at": flag.get("due_at"),
-            "has_proel": match_id in proel_ids or R.s(card.get("match_code")) in proel_codes,
+            # Ręczne podpięcie (i klucz meczu wspólnego) liczą się wprost; automat dopasowuje po ID ZPRP / numerze meczu.
+            "has_proel": bool(proel_links.get(match_id)) or bool(R.s(card.get("proel_key")) and card.get("shared"))
+            or match_id in proel_ids or R.s(card.get("match_code")) in proel_codes,
+            "proel_link": _link_brief(proel_links.get(match_id)),
             "videos": videos.get(match_id, {"count": 0, "uploads": 0}),
             "clips": {"count": clips.get(match_id, 0)},
             "threads": threads.get(match_id, {"open": 0, "total": 0}),
@@ -685,6 +706,12 @@ async def enrich_cards(ctx: Dict[str, Any], cards: List[Dict[str, Any]]) -> List
         })
         card.pop("source", None)
     return cards
+
+
+def _link_brief(link: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    from app.mentor_proel_link import link_brief
+
+    return link_brief(link)
 
 
 _enrich_inflight: Dict[Tuple[str, str, int], "asyncio.Task[List[Dict[str, Any]]]"] = {}
@@ -716,7 +743,10 @@ async def match_card(ctx: Dict[str, Any], match_id: str, *, required: bool = Tru
         from app.mentor_trybuna import watched_card
 
         return await watched_card(ctx, match_id, required=required)
-    cards = [c for c in await pair_match_cards(ctx["judge_ids"]) if c["match_id"] == R.s(match_id)]
+    all_cards = await pair_match_cards(ctx["judge_ids"])
+    cards = [c for c in all_cards if c["match_id"] == R.s(match_id)]
+    if not cards and R.s(match_id).startswith("my:"):  # karta `my:` scalona z kartą ZPRP (stary link / deep-link nadal działa)
+        cards = [c for c in all_cards if R.s(c.get("shared_id")) == R.s(match_id)[3:]]
     if not cards:
         if required:
             raise err(404, "MATCH_NOT_FOUND", "To nie jest mecz tej pary.")

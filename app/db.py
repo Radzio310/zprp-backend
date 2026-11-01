@@ -4627,6 +4627,16 @@ mentor_auto_found, mentor_auto_found_seen = _define_mentor_auto_found_tables(met
 from app.mentor_drive_tables import define_tables as _define_mentor_drive_tables
 mentor_drive_connections, mentor_drive_files, mentor_drive_folders, mentor_drive_log = _define_mentor_drive_tables(metadata)
 
+# Mecze ręczne wspólne (31.10.2026) i ręczne podpięcie ProEla w panelu pary (`app/shared_match_tables.py`, kontrakt `docs/mecze-wspolne-api.md`).
+from app.shared_match_tables import define_tables as _define_shared_match_tables
+(
+    shared_matches,
+    shared_match_members,
+    shared_match_blocks,
+    shared_match_log,
+    mentor_proel_links,
+) = _define_shared_match_tables(metadata)
+
 # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.
 from app.province_alert_tables import define_tables as _define_alert_tables
 province_alert_settings, province_alert_state = _define_alert_tables(metadata)

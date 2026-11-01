@@ -90,3 +90,13 @@ def notification_type_allowed(preferences: Any, key: str) -> bool:
 def market_broadcast_allowed(preferences: Any) -> bool:
     """Czy urządzenie chce rozsyłkę o nowej ofercie na Giełdzie."""
     return _type_enabled(preferences, "matchMarket")
+
+
+#: Klucz przełącznika powiadomień o meczach wspólnych (dodanie do meczu, usunięcie z obsady, usunięcie meczu).
+#: Brak pola w `notificationTypes` = zgoda (starsze aplikacje go nie znają).
+SHARED_MATCH_PREFERENCE_KEY = "sharedMatch"
+
+
+def shared_match_allowed(preferences: Any) -> bool:
+    """Czy urządzenie chce powiadomień o meczach wspólnych."""
+    return _type_enabled(preferences, SHARED_MATCH_PREFERENCE_KEY)

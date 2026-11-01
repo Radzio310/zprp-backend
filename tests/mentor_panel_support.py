@@ -22,6 +22,7 @@ from app.mentor_evaluation_tables import define_tables as define_evaluations
 from app.mentor_panel_tables import define_tables as define_panel
 from app.mentor_trybuna_tables import define_tables as define_trybuna
 from app.mentoring_tables import define_tables as define_mentoring
+from app.shared_match_tables import define_tables as define_shared
 from app.stream_tables import define_tables as define_streams
 from app.zprp_public_tables import define_tables as define_public
 
@@ -32,7 +33,8 @@ MODULES = (
     "app.mentoring", "app.proel_auth", "app.streams.store", "app.streams.worker", "app.mentor_panel_streams", "app.mentor_video_trash",
     "app.mentor_bastion_search", "app.mentor_trybuna", "app.mentor_trybuna_rules", "app.mentor_trybuna_feed", "app.mentor_trybuna_thumbs", "app.mentor_trybuna_rank", "app.mentor_trybuna_suggest",
     "app.delegate_sharing", "app.mentor_auto_found", "app.mentor_auto_found_rules",
-    "app.mentor_drive", "app.mentor_drive_google", "app.mentor_veo",
+    "app.mentor_drive", "app.mentor_drive_google",
+    "app.shared_matches", "app.shared_match_pair", "app.shared_match_notify", "app.shared_match_rules", "app.mentor_proel_link", "app.mentor_veo",
 )
 
 PAIR = "pair-1"
@@ -64,11 +66,16 @@ def _extra_tables(metadata):
     sharing = Table("delegate_evaluation_sharing", metadata, Column("judge_id", String, primary_key=True),
                     Column("sharing_enabled", Boolean), Column("updated_at", DateTime(timezone=True)))
     saved = Table("proel_matches", metadata, Column("match_number", String, primary_key=True), Column("zprp_match_id", String),
-                  Column("data_json", JSON), Column("status", String), Column("updated_at", DateTime(timezone=True)))
+                  Column("data_json", JSON), Column("status", String), Column("updated_at", DateTime(timezone=True)),
+                  Column("promoted_to", String), Column("doc_writer_judge", String))
+    logins = Table("login_records", metadata, Column("judge_id", String, primary_key=True), Column("full_name", String),
+                   Column("photo_url", String), Column("province", String), Column("last_login_at", DateTime(timezone=True)))
+    offtimes = Table("partner_offtimes", metadata, Column("judge_id", String, primary_key=True), Column("full_name", String),
+                     Column("partner_id", String), Column("data_json", JSON))
     admins = Table("admin_settings", metadata, Column("id", Integer, primary_key=True), Column("allowed_admins", JSON))
     return {"province_judges": judges, "province_matches": matches, "province_match_judges": match_judges,
             "zprp_archive_matches": archive, "delegate_evaluations": delegate, "saved_matches": saved,
-            "delegate_evaluation_sharing": sharing,
+            "delegate_evaluation_sharing": sharing, "login_records": logins, "partner_offtimes": offtimes,
             "admin_settings": admins}
 
 
@@ -89,6 +96,8 @@ class Env:
         for table in define_auto_found(metadata):
             tables[table.name] = table
         for table in define_drive(metadata):
+            tables[table.name] = table
+        for table in define_shared(metadata):
             tables[table.name] = table
         for table in define_public(metadata):
             tables[table.name] = table
@@ -139,6 +148,11 @@ class Env:
         self.auto_rules = importlib.import_module("app.mentor_auto_found_rules")
         self.drive = importlib.import_module("app.mentor_drive")
         self.drive_google = importlib.import_module("app.mentor_drive_google")
+        self.shared = importlib.import_module("app.shared_matches")
+        self.shared_pair = importlib.import_module("app.shared_match_pair")
+        self.shared_rules = importlib.import_module("app.shared_match_rules")
+        self.shared_notify = importlib.import_module("app.shared_match_notify")
+        self.proel_link = importlib.import_module("app.mentor_proel_link")
         self.veo = importlib.import_module("app.mentor_veo")
         self.sent = []
 
@@ -147,6 +161,13 @@ class Env:
             return {"push": None, "queued": 0}
 
         monkeypatch.setattr(self.notify, "notify", fake_notify)
+
+        async def fake_push(recipients, actor_id, title, body, match_id, event):
+            self.pushes.append({"to": sorted(str(r) for r in recipients if r and str(r) != str(actor_id)), "title": title, "body": body,
+                                "match_id": match_id, "event": event})
+
+        self.pushes = []
+        monkeypatch.setattr(self.shared_notify, "send", fake_push)
         monkeypatch.setattr(self.auth, "_secret", lambda: "test-secret")
         self.core._match_cache.clear()
         self.core._rev_cache.clear()
@@ -174,6 +195,7 @@ class Env:
         for judge_id, name in people:
             badges = ["Komisja sędziowska"] if judge_id == COMMITTEE else []
             await self.ins("province_judges", judge_id=judge_id, full_name=name, province=PROVINCE, photo_url=None, badges=badges)
+            await self.ins("login_records", judge_id=judge_id, full_name=name, province=PROVINCE, photo_url=None, last_login_at=now)
         await self.ins("admin_settings", id=1, allowed_admins=[ADMIN])
         await self.ins("mentoring_pairs", id=PAIR, province=PROVINCE, judge_ids=list(JUDGES), created_by=COMMITTEE,
                        program="province", created_at=now - timedelta(days=200))
