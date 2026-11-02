@@ -158,6 +158,11 @@ pamięć `wczytaj-sklady-decyzje`. Klauzula RODO v5 (OpenAI, dane osób trzecich
 w logach są same liczby, bez nazwisk i treści). Sam odczyt NICZEGO nie zapisuje, nie łączy z ZPRP i nie dopisuje sędziów: aplikacja
 pokazuje ekran zatwierdzenia, a dopiero potem woła `PUT /shared-matches/{id}/lineup`. Nieczytelne pole = `null`, nigdy zgadywanie.
 
+**Uwaga o „wyłącznie w pamięci" (rozbieżność z klauzulą, do decyzji właściciela):** aplikacja nie zapisuje pliku, ale framework (Starlette)
+parsuje multipart przez `SpooledTemporaryFile` z progiem 1 MB, więc plik większy niż 1 MB jest na czas żądania chwilowo w pliku tymczasowym
+na dysku serwera i znika po zamknięciu żądania. Próg nie jest ustawiany z poziomu trasy FastAPI. Obrona: `Content-Length` powyżej
+4 x 16 MB + 1 MB odpada z 413 `REQUEST_TOO_LARGE` zanim framework cokolwiek przeczyta, a każdy plik jest dodatkowo ograniczony do 16 MB.
+
 ### `POST /matches/lineup/read` (multipart, pole `files`, 1-4 plików)
 - Typ po pierwszych bajtach (nagłówek klienta i rozszerzenie są ignorowane): PDF, JPEG, PNG. HEIC jest rozpoznawany i odrzucany
   jasnym kodem `HEIC_UNSUPPORTED` (Pillow w backendzie nie czyta HEIC: aplikacja ma wysłać JPEG, skaner dokumentów daje JPEG).

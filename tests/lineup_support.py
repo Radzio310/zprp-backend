@@ -88,7 +88,7 @@ def build_protocol(*, swap=False, home_players=HOME_PLAYERS, away_players=AWAY_P
             text(x, y0 + 20, label)
         y = y0 + 32
         for index, (number, person) in enumerate(players):
-            text(37 if number < 10 else 33, y, f"{number} {person}")
+            text(37 if (number or 0) < 10 else 33, y, f"{number} {person}" if number is not None else person)
             mark = None
             if tick_mode == "image":
                 mark = "green"

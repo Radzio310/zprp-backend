@@ -120,15 +120,21 @@ def clean_extra(value: Any) -> Dict[str, Any]:
         return {}
     if not isinstance(value, Mapping):
         raise ValueError("Pole extra musi być obiektem.")
+    out = dict(value)
     if value.get("lineup") is not None:
         # Skład z „Wczytaj składy": ten sam kontroler co `PUT /shared-matches/{id}/lineup` (kształt, znaki, rozmiar).
+        # Zapisujemy WYNIK kontrolera, nie surową wartość: nic spoza schematu nie przechodzi dalej.
         from app.lineup_read_rules import clean_lineup
 
-        clean_lineup(value["lineup"])
-    raw = json.dumps(value, ensure_ascii=False, default=str)
+        cleaned = clean_lineup(value["lineup"])
+        if cleaned is None:
+            out.pop("lineup", None)
+        else:
+            out["lineup"] = cleaned
+    raw = json.dumps(out, ensure_ascii=False, default=str)
     if len(raw.encode("utf-8")) > MAX_EXTRA_BYTES:
         raise ValueError("Pole extra jest za duże (limit 20 kB).")
-    return dict(value)
+    return out
 
 
 def parse_match_at(value: Any) -> Optional[datetime]:

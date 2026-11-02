@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.lineup_read_rules import MIN_TEXT_CHARS, STAFF_SLOTS, LineupError, build_result, find_license
+from app.lineup_read_rules import MIN_TEXT_CHARS, STAFF_SLOTS, LineupError, build_result, find_license, split_name
 
 #: Szerokość kolumny osoby A-E w protokole ZPRP (punkty PDF); słowa dalej od jej początku to już inna tabela.
 COLUMN_WIDTH = 75.0
@@ -126,25 +126,37 @@ def _green_ratio(pix: Any) -> Optional[Tuple[float, float]]:
     return (green / ink, red / ink) if ink >= 8 else None
 
 
+#: Spreparowany PDF (do 16 MB) nie może wyczerpać pamięci ani czasu przy szukaniu ptaszków: obraz większy niż mały
+#: znacznik jest pomijany bez dekodowania, a liczba obrazów i rysunków jest ograniczona.
+MAX_BADGE_IMAGE_PIXELS = 250_000
+MAX_BADGE_XREFS = 60
+MAX_BADGE_IMAGE_INFOS = 400
+MAX_BADGE_DRAWINGS = 4000
+
+
 def _badge_marks(page: Any) -> List[Tuple[Tuple[float, float, float, float], Optional[bool]]]:
     """Małe kwadratowe znaczniki (obrazki i wypełnione rysunki) jako (bbox, True=zielony / False=czerwony / None=inny)."""
     import fitz
 
     marks: List[Tuple[Tuple[float, float, float, float], Optional[bool]]] = []
     cache: Dict[int, Optional[bool]] = {}
-    for info in page.get_image_info(xrefs=True):
+    for info in page.get_image_info(xrefs=True)[:MAX_BADGE_IMAGE_INFOS]:
         x0, y0, x1, y1 = info["bbox"]
         if not (3 <= x1 - x0 <= 24 and 3 <= y1 - y0 <= 24):
             continue
         xref = info.get("xref") or 0
         if xref not in cache:
+            if len(cache) >= MAX_BADGE_XREFS or int(info.get("width") or 0) * int(info.get("height") or 0) > MAX_BADGE_IMAGE_PIXELS:
+                cache[xref] = None  # za duży jak na znaczek albo za dużo różnych obrazów: „nie wiemy", bez dekodowania
+                marks.append(((x0, y0, x1, y1), None))
+                continue
             try:
                 ratio = _green_ratio(fitz.Pixmap(page.parent, xref)) if xref else None
             except Exception:  # noqa: BLE001 - nieczytelny obraz to po prostu „nie wiemy"
                 ratio = None
             cache[xref] = None if ratio is None else (True if ratio[0] >= 0.5 else (False if ratio[1] >= 0.5 else None))
         marks.append(((x0, y0, x1, y1), cache[xref]))
-    for drawing in page.get_drawings():
+    for drawing in page.get_drawings()[:MAX_BADGE_DRAWINGS]:
         fill = drawing.get("fill")
         rect = drawing["rect"]
         if fill and 3 <= rect.width <= 24 and 3 <= rect.height <= 24 and drawing.get("type") in ("f", "fs"):
@@ -303,8 +315,18 @@ def _team(letter: str, head: _Line, y_from: float, y_to: float, lines: List[_Lin
             continue
         left = ln.words
         text = " ".join(w[4] for w in left)
+        if re.search(r"nazwisko|zawodnik|licencj|funkcj|dru[żz]yn", text, re.I) or re.fullmatch(r"nr\.?", text.strip(), re.I):
+            continue
         m = _PLAYER_ROW.match(text)
-        if not m or re.search(r"nazwisko|zawodnika", text, re.I):
+        if not m:
+            # Wiersz bez numeru w kolumnie nazwiska albo sam numer bez nazwiska: nigdy cicho nie znika (numer/nazwisko
+            # zostaje puste i trafia do „nieczytelnych", więc ekran zatwierdzenia pokaże wiersz do uzupełnienia).
+            alone = re.fullmatch(r"(\d{1,3})", text.strip())
+            if alone:
+                players.append({"number": int(alone.group(1)) if int(alone.group(1)) <= 99 else None, "name": None,
+                                "confidence": 0.4, "checked": None})
+            elif split_name(text) is not None:
+                players.append({"number": None, "name": text.strip(), "confidence": 0.4, "checked": None})
             continue
         number, rest = int(m.group(1)), m.group(2)
         ticked: Optional[bool] = None
@@ -397,8 +419,20 @@ def parse_pdf(pdf_bytes: bytes, *, max_pages: int = 4) -> Dict[str, Any]:
     first = pages[0]
     for extra in pages[1:]:
         for team in ("home", "away"):
-            first[team]["players"] += extra[team]["players"]
-            first[team]["staff"] += [p for p in extra[team]["staff"]]
-        first["officials"] += extra["officials"]
+            # Ten sam protokół powtórzony w jednym PDF-ie (np. kopia strony) nie dubluje wierszy.
+            have = {(p.get("number"), re.sub(r"\s+", " ", str(p.get("name") or "")).strip().lower()) for p in first[team]["players"]}
+            for p in extra[team]["players"]:
+                key = (p.get("number"), re.sub(r"\s+", " ", str(p.get("name") or "")).strip().lower())
+                if key not in have:
+                    have.add(key)
+                    first[team]["players"].append(p)
+            have_s = {re.sub(r"\s+", " ", str(p.get("name") or "")).strip().lower() for p in first[team]["staff"]}
+            for p in extra[team]["staff"]:
+                key = re.sub(r"\s+", " ", str(p.get("name") or "")).strip().lower()
+                if key not in have_s:
+                    have_s.add(key)
+                    first[team]["staff"].append(p)
+        known = {o["role"] for o in first["officials"]}
+        first["officials"] += [o for o in extra["officials"] if o["role"] not in known]
     return build_result(source="pdf_text", pages=len(pages), header=first["header"], home=first["home"], away=first["away"],
                         officials=first["officials"], checks_detectable=first["checks_detectable"])

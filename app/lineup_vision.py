@@ -21,7 +21,9 @@ logger = logging.getLogger("app.lineup_read")
 
 MAX_SIDE = 2000
 JPEG_QUALITY = 85
-MAX_PIXELS = 60_000_000
+#: Dekodowanie 60 MP to ok. 180 MB RGB na jedno zdjęcie; 25 MP wystarcza z zapasem (telefon 12-16 MP), a JPEG i tak
+#: dekodujemy od razu w zmniejszeniu (`draft`).
+MAX_PIXELS = 25_000_000
 #: 2 x 16 zawodników + 10 osób + nagłówek to ok. 2500 tokenów odpowiedzi; zapas na dłuższe nazwy.
 MAX_TOKENS = 4000
 
@@ -78,6 +80,19 @@ def model_name() -> str:
     return os.getenv("OPENAI_LINEUP_MODEL", "gpt-4o")
 
 
+def is_reasoning_model(name: str) -> bool:
+    """Seria o* i gpt-5*: wymaga `max_completion_tokens`, nie przyjmuje `temperature` ani `max_tokens`."""
+    low = (name or "").strip().lower().rsplit("/", 1)[-1]
+    return low.startswith("gpt-5") or (len(low) > 1 and low[0] == "o" and low[1].isdigit())
+
+
+def completion_params(name: str) -> Dict[str, Any]:
+    if is_reasoning_model(name):
+        # Tokeny „myślenia" liczą się do limitu, więc zapas jest wielokrotnie większy niż dla gpt-4o.
+        return {"max_completion_tokens": MAX_TOKENS * 4}
+    return {"temperature": 0, "max_tokens": MAX_TOKENS}
+
+
 # ─── Obrazy ─────────────────────────────────────────────────────────────────
 
 
@@ -89,6 +104,8 @@ def shrink_image(data: bytes) -> bytes:
         with Image.open(io.BytesIO(data)) as probe:
             if probe.width * probe.height > MAX_PIXELS:
                 raise LineupError(422, "IMAGE_TOO_LARGE", "Zdjęcie ma za dużo pikseli. Zrób je w niższej rozdzielczości.")
+            if probe.format == "JPEG":
+                probe.draft("RGB", (MAX_SIDE, MAX_SIDE))  # dekoder JPEG zmniejsza o 1/2, 1/4, 1/8 zanim zajmie pamięć
             image = ImageOps.exif_transpose(probe)
             image.load()
     except LineupError:
@@ -139,8 +156,7 @@ async def call_model(images: List[bytes], *, client: Optional[Any] = None) -> Di
     try:
         response = await client.chat.completions.create(
             model=model_name(),
-            temperature=0,
-            max_tokens=MAX_TOKENS,
+            **completion_params(model_name()),
             timeout=90,
             response_format={"type": "json_schema", "json_schema": {"name": "lineup", "strict": True, "schema": SCHEMA}},
             messages=[{"role": "system", "content": PROMPT}, {"role": "user", "content": content}],

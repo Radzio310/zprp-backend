@@ -342,6 +342,19 @@ def dedupe_numbers(team: str, players: List[Dict[str, Any]], warnings: List[Dict
             names[key] = index
 
 
+def unreadable_fields(team: str, rows: List[Dict[str, Any]], people: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Puste pola wierszy (indeksy względem podanych list) - liczone od nowa po scaleniu plików, bo indeksy się przesuwają."""
+    out: List[Dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        for field in ("number", "name"):
+            if row.get(field) is None and not (field == "number" and row.get("clashed_number")):
+                out.append({"team": team, "kind": "player", "index": index, "field": field})
+    for index, person in enumerate(people):
+        if not person["function"]:
+            out.append({"team": team, "kind": "staff", "index": index, "field": "function"})
+    return out
+
+
 def normalize_team(team: str, name: Any, players: Iterable[Any], staff: Iterable[Any], *, source: str,
                    warnings: List[Dict[str, Any]], unreadable: List[Dict[str, Any]]) -> Dict[str, Any]:
     rows = [p for p in (normalize_player(raw, source=source) for raw in (players or ())) if p]
@@ -350,13 +363,7 @@ def normalize_team(team: str, name: Any, players: Iterable[Any], staff: Iterable
         rows = rows[:MAX_PLAYERS]
     people = [p for p in (normalize_staff(raw, source=source) for raw in (staff or ())) if p][: len(STAFF_SLOTS)]
     dedupe_numbers(team, rows, warnings)
-    for index, row in enumerate(rows):
-        for field in ("number", "name"):
-            if row.get(field) is None and not (field == "number" and row.get("clashed_number")):
-                unreadable.append({"team": team, "kind": "player", "index": index, "field": field})
-    for index, person in enumerate(people):
-        if not person["function"]:
-            unreadable.append({"team": team, "kind": "staff", "index": index, "field": "function"})
+    unreadable.extend(unreadable_fields(team, rows, people))
     return {"name": clean_text(name, 80), "players": rows, "staff": people}
 
 
@@ -460,6 +467,9 @@ def merge_results(parts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     for team in ("home", "away"):
         dedupe_numbers(team, base[team]["players"], warnings)
     base["warnings"] = warnings
+    base["unreadable"] = [u for team in ("home", "away") for u in unreadable_fields(team, base[team]["players"], base[team]["staff"])]
+    base["low_confidence_count"] = sum(1 for team in ("home", "away") for r in (*base[team]["players"], *base[team]["staff"])
+                                       if r["confidence"] < LOW_CONFIDENCE)
     return base
 
 
@@ -560,6 +570,9 @@ def clean_lineup(value: Any) -> Optional[Dict[str, Any]]:
             if number is None and person is None:
                 continue
             row: Dict[str, Any] = {"number": number, "name": person["name"] if person else None}
+            clashed = clean_number(raw.get("clashed_number"))
+            if clashed is not None and number is None:
+                row["clashed_number"] = clashed  # powód pustego numeru (ten sam numer ma inny zawodnik) idzie dalej do stolika
             if raw.get("checked") is not None:
                 row["checked"] = bool(clean_bool(raw.get("checked")))
             if raw.get("confidence") is not None:

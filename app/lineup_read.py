@@ -13,12 +13,15 @@ Zapis do meczu wspólnego: `PUT /shared-matches/{id}/lineup` (`app/shared_matche
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
 from app import lineup_pdf_parse as P
 from app import lineup_read_quota as Q
@@ -27,7 +30,25 @@ from app import lineup_vision as V
 from app.mentor_panel_auth import base_actor
 
 logger = logging.getLogger("app.lineup_read")
-router = APIRouter(prefix="/matches/lineup", tags=["Wczytaj składy"])
+
+
+class _SizeGuardedRoute(APIRoute):
+    """Content-Length sprawdzany PRZED parsowaniem multipart (FastAPI czyta ciało, zanim policzy zależności)."""
+
+    def get_route_handler(self):
+        inner = super().get_route_handler()
+
+        async def handler(request: Request):
+            try:
+                check_declared_size(request.headers.get("content-length"))
+            except HTTPException as exc:
+                return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+            return await inner(request)
+
+        return handler
+
+
+router = APIRouter(prefix="/matches/lineup", tags=["Wczytaj składy"], route_class=_SizeGuardedRoute)
 WARSAW = ZoneInfo("Europe/Warsaw")
 
 
@@ -63,6 +84,17 @@ def _pdf_info(data: bytes) -> tuple[int, bool]:
             raise R.LineupError(422, "PDF_UNREADABLE", "PDF nie ma żadnej strony.")
         chars = sum(len((doc[i].get_text() or "").strip()) for i in range(min(doc.page_count, R.MAX_PAGES)))
         return doc.page_count, chars / min(doc.page_count, R.MAX_PAGES) >= R.MIN_TEXT_CHARS
+
+
+#: Cztery pliki po najwyżej 16 MB + narzut multipart.
+MAX_REQUEST_BYTES = R.MAX_FILES * R.MAX_PDF_BYTES + 1024 * 1024
+
+
+def check_declared_size(declared: Optional[str]) -> None:
+    """Wstępna kontrola nagłówka Content-Length (wzór `mentor_shots._read_limited`): zbyt duże żądanie odpada, zanim
+    framework zacznie je czytać. Nagłówek można pominąć (chunked), więc sam rozmiar plików sprawdza też `load_items`."""
+    if declared and declared.isdigit() and int(declared) > MAX_REQUEST_BYTES:
+        raise HTTPException(413, detail={"code": "REQUEST_TOO_LARGE", "message": "Pliki są za duże (najwyżej 4 pliki po 16 MB)."})
 
 
 async def load_items(files: List[Any]) -> List[_Item]:
@@ -128,11 +160,17 @@ async def run_read(items: List[_Item], judge_id: str, *, take=None, release=None
                                 f"Wykorzystano dzienny limit {R.AI_DAILY_LIMIT} odczytów ze zdjęć. Wczytaj PDF z tekstem albo spróbuj jutro.")
         try:
             payload = await (model or V.call_model)(images)
+            vision_part = V.vision_to_result(payload, len(images))
         except R.LineupError as exc:
+            # Awaria po stronie dostawcy nie zjada limitu; „to nie protokół" (422) zjada, bo model faktycznie zadziałał.
             if exc.status >= 500:
-                await release("ai")  # awaria po stronie dostawcy nie zjada użytkownikowi limitu
+                await release("ai")
             raise
-        parts.append(V.vision_to_result(payload, len(images)))
+        except BaseException:
+            # Każda inna awaria modelu (IndexError w odpowiedzi, wyjątek w parsowaniu, anulowanie żądania) też oddaje limit.
+            await asyncio.shield(release("ai"))
+            raise
+        parts.append(vision_part)
         failure = None
     if not parts and failure is not None:
         raise failure

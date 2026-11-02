@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -1033,13 +1034,17 @@ async def put_lineup(match_id: str, body: LineupBody, actor: Actor = Depends(bas
     push nie jest wysyłany. Wynik odczytu NIE trafia tu sam: aplikacja pokazuje ekran zatwierdzenia i dopiero potem woła tę trasę."""
     row, members, _ = await _load(match_id, actor)
     lineup = _guard(LR.clean_lineup, body.lineup)
+    if lineup is not None and re.fullmatch(r"\d+", s(row.get("zprp_match_id"))):
+        # Ta sama reguła co `canImportLineup` w aplikacji: mecz z IdZawody ma skład z ZPRP, nie z protokołu.
+        raise _bad("Ten mecz jest połączony z ZPRP (ma numeryczny IdZawody) i ma skład z ZPRP. Skład z protokołu zapisuje się tylko w meczach ręcznych.",
+                   "LINEUP_NOT_ALLOWED")
     extra = dict(_extra(row))
     before = extra.get("lineup")
     if lineup is None:
         extra.pop("lineup", None)
     else:
         extra["lineup"] = lineup
-    _guard(SR.clean_extra, extra)
+    extra = _guard(SR.clean_extra, extra)
     if extra == _extra(row):
         if body.base_rev is None:
             raise _bad("Brak base_rev - podaj wersję meczu, którą widzisz.", "BASE_REV_REQUIRED")
