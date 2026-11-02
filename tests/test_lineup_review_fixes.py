@@ -26,7 +26,7 @@ def test_duzy_obraz_w_malym_prostokacie_nie_jest_dekodowany(monkeypatch):
     from PIL import Image
 
     big = io.BytesIO()
-    Image.new("RGB", (900, 900), (30, 150, 40)).save(big, format="PNG")  # 810 000 px > limit znacznika
+    Image.new("RGB", (1500, 1500), (30, 150, 40)).save(big, format="PNG")  # 2,25 mln px > limit znacznika
     page.insert_image(fitz.Rect(10, 10, 20, 20), stream=big.getvalue())
     page.insert_image(fitz.Rect(30, 10, 40, 20), stream=S.green_png())
     decoded = []
@@ -40,6 +40,20 @@ def test_duzy_obraz_w_malym_prostokacie_nie_jest_dekodowany(monkeypatch):
     marks = P._badge_marks(page)
     assert len(decoded) == 1  # tylko mały obraz
     assert [m[1] for m in marks if m[1] is not None] == [True] and len(marks) == 2
+
+
+def test_ptaszek_zprp_800x800_jest_rozpoznany():
+    """Prawdziwy protokół ZPRP: zielony JPEG 800x800 z białym tłem w polu 11x11 pt."""
+    from PIL import Image, ImageDraw
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=300)
+    tick = Image.new("RGB", (800, 800), (255, 255, 255))
+    ImageDraw.Draw(tick).ellipse((120, 120, 680, 680), fill=(98, 176, 30))
+    out = io.BytesIO()
+    tick.save(out, format="JPEG", quality=95)
+    page.insert_image(fitz.Rect(17, 10, 28, 21), stream=out.getvalue())
+    assert [m[1] for m in P._badge_marks(page)] == [True]
 
 
 def test_liczba_obrazow_i_rysunkow_jest_ograniczona(monkeypatch):

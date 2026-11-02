@@ -128,7 +128,8 @@ def _green_ratio(pix: Any) -> Optional[Tuple[float, float]]:
 
 #: Spreparowany PDF (do 16 MB) nie może wyczerpać pamięci ani czasu przy szukaniu ptaszków: obraz większy niż mały
 #: znacznik jest pomijany bez dekodowania, a liczba obrazów i rysunków jest ograniczona.
-MAX_BADGE_IMAGE_PIXELS = 250_000
+#: Ptaszek w protokole ZPRP to JPEG 800x800 (640 tys. pikseli) rysowany w polu 11x11 pt, więc próg musi go przepuszczać.
+MAX_BADGE_IMAGE_PIXELS = 2_000_000
 MAX_BADGE_XREFS = 60
 MAX_BADGE_IMAGE_INFOS = 400
 MAX_BADGE_DRAWINGS = 4000
