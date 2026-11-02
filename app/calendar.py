@@ -1,5 +1,8 @@
+import asyncio
 import base64
 import hashlib
+import hmac
+import logging
 import re
 import secrets
 import time
@@ -30,14 +33,15 @@ from app.calendar_storage import (
 from app.calendar_utils import create_flow  # Twój helper do Flow
 from app.calendar_secondary_engine import (
     account_uses_secondary,
-    after_connect,
     cleanup_previous,
+    finish_connection,
     plan_write,
     previous_placement,
     primary_body_extras,
     remove_event,
     require_primary_read,
     run_job,
+    save_connection,
     write_event,
 )
 from app.calendar_secondary_engine import disconnect as secondary_disconnect
@@ -55,43 +59,60 @@ from app.calendar_secondary_rules import (
 )
 
 router = APIRouter(prefix="/calendar", tags=["Calendar"])
+logger = logging.getLogger(__name__)
 
 # ── PKCE (RFC 7636) ──────────────────────────────────────────────────────
-# Google zaczął wymagać code_verifier przy wymianie kodu na token
-# ("invalid_grant: Missing code verifier"), a /auth-url i /oauth2callback
-# tworzą DWIE OSOBNE instancje Flow (osobne requesty) — verifier
-# wygenerowany przy pierwszej ginął, zanim doszło do wymiany kodu przy
-# drugiej. Generujemy parę sami i trzymamy verifier w pamięci pod state
-# (tak samo krótkotrwałe jak sam state — cały roundtrip trwa sekundy).
-# UWAGA: działa tylko dla pojedynczej instancji procesu; przy skalowaniu
-# do wielu replik trzeba by przenieść to do bazy/Redis, tak jak oauth_states.
-_pkce_verifiers: dict[str, tuple[str, float]] = {}
-_PKCE_TTL_SECONDS = 600
+# Google wymaga code_verifier przy wymianie kodu na token, a /auth-url
+# i /oauth2callback to osobne żądania. Verifier wyprowadzamy z state i sekretu
+# klienta zamiast trzymać go w pamięci: trzymany ginął przy każdym wdrożeniu
+# w trakcie zgody i dawał sędziemu „Missing code verifier".
+def _pkce_verifier(settings, state: str) -> str:
+    secret = str(getattr(settings, "GOOGLE_CLIENT_SECRET", "")).encode("utf-8")
+    digest = hmac.new(secret, f"calendar-pkce:{state}".encode("utf-8"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def _make_pkce_pair() -> tuple[str, str]:
-    verifier = secrets.token_urlsafe(64)[:128]
+def _pkce_challenge(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-    return verifier, challenge
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def _store_pkce_verifier(state: str, verifier: str) -> None:
+# Kod zgody jest jednorazowy, a przeglądarka potrafi wysłać go drugi raz
+# (odświeżenie strony). Powtórka tego samego state nie idzie już do Google.
+_exchanged_states: dict[str, float] = {}
+_EXCHANGED_TTL_SECONDS = 600
+_TOKEN_TIMEOUT_SECONDS = 20
+_connect_tasks: set[asyncio.Task] = set()
+
+
+def _claim_state(state: str) -> bool:
     now = time.time()
-    # przy okazji zamiatamy dawno wygasłe wpisy, żeby słownik nie rósł
-    for k in [k for k, (_, ts) in _pkce_verifiers.items() if now - ts > _PKCE_TTL_SECONDS]:
-        _pkce_verifiers.pop(k, None)
-    _pkce_verifiers[state] = (verifier, now)
+    for key in [k for k, ts in _exchanged_states.items() if now - ts > _EXCHANGED_TTL_SECONDS]:
+        _exchanged_states.pop(key, None)
+    if state in _exchanged_states:
+        return False
+    _exchanged_states[state] = now
+    return True
 
 
-def _pop_pkce_verifier(state: str) -> str | None:
-    entry = _pkce_verifiers.pop(state, None)
-    if not entry:
-        return None
-    verifier, ts = entry
-    if time.time() - ts > _PKCE_TTL_SECONDS:
-        return None
-    return verifier
+async def _exchange_code(flow, code: str, state: str, settings) -> bool:
+    """Wymiana kodu w wątku, żeby wolne Google nie stawało całego serwera."""
+    try:
+        await asyncio.to_thread(
+            flow.fetch_token,
+            code=code,
+            code_verifier=_pkce_verifier(settings, state),
+            timeout=_TOKEN_TIMEOUT_SECONDS,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - sędzia dostaje ekran aplikacji, nie surowy JSON
+        logger.warning("Wymiana kodu Google nieudana: %s", exc)
+        _exchanged_states.pop(state, None)
+        return False
+
+
+def _back_to_app(settings, query: str) -> RedirectResponse:
+    return RedirectResponse(f"{settings.FRONTEND_DEEP_LINK}?{query}")
 
 
 class EventCreate(BaseModel):
@@ -202,33 +223,32 @@ async def get_auth_url(
         except SecondaryError as exc:
             raise _secondary_http(exc) from exc
         flow = create_flow(settings, level)
-        verifier, challenge = _make_pkce_pair()
         # Poziom jedzie w state (state sprawdzamy w bazie, więc przedrostek jest
         # wiarygodny). matches: tylko kalendarze BAZY; district prosi o komplet wprost,
         # bo dawne zgody tego klienta dołożyłyby do tokenu kalendarza np. Dysk Mentora.
+        new_state = make_state(level, secrets.token_urlsafe(32))
         auth_url, state = flow.authorization_url(
             access_type="offline",
             include_granted_scopes="false",
             prompt="consent",
-            state=make_state(level, secrets.token_urlsafe(32)),
-            code_challenge=challenge,
+            state=new_state,
+            code_challenge=_pkce_challenge(_pkce_verifier(settings, new_state)),
             code_challenge_method="S256",
         )
         await save_oauth_state(user_login, state)
-        _store_pkce_verifier(state, verifier)
         return JSONResponse({"url": auth_url})
 
     flow = create_flow(settings)
-    verifier, challenge = _make_pkce_pair()
+    new_state = secrets.token_urlsafe(32)
     auth_url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="false",
         prompt="consent",
-        code_challenge=challenge,
+        state=new_state,
+        code_challenge=_pkce_challenge(_pkce_verifier(settings, new_state)),
         code_challenge_method="S256",
     )
     await save_oauth_state(user_login, state)
-    _store_pkce_verifier(state, verifier)
     return JSONResponse({"url": auth_url})
 
 
@@ -245,22 +265,16 @@ async def oauth2callback(
     if not user_login:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
-    verifier = _pop_pkce_verifier(state)
+    if not _claim_state(state):
+        return _back_to_app(settings, "connected=true")
     flow = create_flow(settings)
-    try:
-        if verifier:
-            flow.fetch_token(code=code, code_verifier=verifier)
-        else:
-            flow.fetch_token(code=code)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Token exchange failed: {e}")
+    if not await _exchange_code(flow, code, state, settings):
+        return _back_to_app(settings, "connected=false&calendar_error=exchange_failed")
 
     token = getattr(getattr(flow, "oauth2session", None), "token", None) or {}
     if lacks_events_scope(token.get("scope")):
         # Zgoda bez kalendarza nie nadpisuje działającego tokenu.
-        return RedirectResponse(
-            f"{settings.FRONTEND_DEEP_LINK}?connected=false&calendar_error=scope_missing"
-        )
+        return _back_to_app(settings, "connected=false&calendar_error=scope_missing")
 
     creds = flow.credentials
     refresh_token = creds.refresh_token or (await get_calendar_tokens(user_login))["refresh_token"]
@@ -281,32 +295,21 @@ async def _secondary_callback(code: str, state: str, settings):
     if not user_login:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
+    if not _claim_state(state):
+        return _back_to_app(settings, "connected=true")
     tier = tier_from_state(state) or "matches"
-    verifier = _pop_pkce_verifier(state)
     flow = create_flow(settings, tier)
-    try:
-        if verifier:
-            flow.fetch_token(code=code, code_verifier=verifier)
-        else:
-            flow.fetch_token(code=code)
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "token_exchange_failed",
-                "message": f"Nie udało się wymienić kodu Google na dostęp: {e}",
-            },
-        )
+    if not await _exchange_code(flow, code, state, settings):
+        return _back_to_app(settings, "connected=false&calendar_error=exchange_failed")
 
     creds = flow.credentials
     token = getattr(getattr(flow, "oauth2session", None), "token", None) or {}
     granted = scope_to_string(token.get("scope") or getattr(creds, "scopes", None))
     if missing_scopes(tier, granted):
         # Zgoda częściowa: nie nadpisujemy tokenu ani stanu, aplikacja dostaje powód.
-        return RedirectResponse(
-            f"{settings.FRONTEND_DEEP_LINK}?connected=false&calendar_error=scope_missing"
-        )
-    email = email_from_id_token(token.get("id_token") or getattr(creds, "id_token", None))
+        _exchanged_states.pop(state, None)
+        return _back_to_app(settings, "connected=false&calendar_error=scope_missing")
+    email =email_from_id_token(token.get("id_token") or getattr(creds, "id_token", None))
     existing = await get_calendar_tokens(user_login)
     previous = dict(getattr(existing, "_mapping", existing)) if existing else None
     refresh_token = creds.refresh_token or (previous or {}).get("refresh_token")
@@ -320,7 +323,7 @@ async def _secondary_callback(code: str, state: str, settings):
         )
     deps = build_secondary_deps(settings)
     try:
-        start, warnings = await after_connect(
+        await save_connection(
             deps,
             user_login,
             previous=previous,
@@ -334,16 +337,23 @@ async def _secondary_callback(code: str, state: str, settings):
         )
     except SecondaryError as exc:
         raise _secondary_http(exc) from exc
-    url = f"{settings.FRONTEND_DEEP_LINK}?connected=true"
-    if warnings:
-        url += "&calendar_warning=1"
-    response = RedirectResponse(url)
-    if start:
-        # Przenoszenie startuje po odpowiedzi (zadanie w tle, wznawialne).
-        from starlette.background import BackgroundTask  # noqa: PLC0415
+    # Sędzia wraca od razu. Kalendarze i przenoszenie idą w tle, a ekran pokazuje
+    # ich stan z /calendar/setup: czekanie na Google wisiało tu całą stronę.
+    task = asyncio.create_task(_finish_connection_in_background(deps, user_login))
+    _connect_tasks.add(task)
+    task.add_done_callback(_connect_tasks.discard)
+    return _back_to_app(settings, "connected=true")
 
-        response.background = BackgroundTask(run_job, deps, user_login)
-    return response
+
+async def _finish_connection_in_background(deps, user_login: str) -> None:
+    try:
+        start, warnings = await finish_connection(deps, user_login)
+        for warning in warnings:
+            logger.warning("Kalendarze BAZY po połączeniu: %s", warning)
+        if start:
+            await run_job(deps, user_login)
+    except Exception:  # noqa: BLE001 - zadanie w tle, kalendarze powstaną przy pierwszym zapisie
+        logger.exception("Kalendarze BAZY po połączeniu nie zostały dokończone")
 
 
 @router.get("/status", summary="Sprawdź, czy kalendarz Google jest połączony")

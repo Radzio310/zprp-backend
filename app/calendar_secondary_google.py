@@ -15,6 +15,8 @@ from app.calendar_secondary_rules import GoogleError
 
 logger = logging.getLogger(__name__)
 
+GOOGLE_TIMEOUT_SECONDS = 25
+
 
 def _wrap(call: Callable[[], Any]) -> Callable[[], Any]:
     def run():
@@ -117,6 +119,8 @@ async def _api_from_tokens(
     from google.auth.transport.requests import Request  # noqa: PLC0415
     from google.oauth2.credentials import Credentials  # noqa: PLC0415
     from googleapiclient.discovery import build  # noqa: PLC0415
+    import google_auth_httplib2  # noqa: PLC0415
+    import httplib2  # noqa: PLC0415
 
     creds = Credentials(
         token=access,
@@ -134,7 +138,9 @@ async def _api_from_tokens(
             transient = bool(getattr(exc, "retryable", False)) or type(exc).__name__ == "TransportError"
             raise GoogleError(503 if transient else 401, "Nie udało się odświeżyć dostępu do Google.") from exc
         await persist(creds.token, creds.refresh_token, creds.expiry.isoformat())
-    return GoogleCalendarApi(build("calendar", "v3", credentials=creds, cache_discovery=False))
+    # Bez limitu czasu jedno zawieszone połączenie trzymałoby zadanie w nieskończoność.
+    http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=GOOGLE_TIMEOUT_SECONDS))
+    return GoogleCalendarApi(build("calendar", "v3", http=http, cache_discovery=False))
 
 
 def build_deps(settings: Any):

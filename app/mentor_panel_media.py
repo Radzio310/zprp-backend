@@ -428,7 +428,7 @@ async def start_upload(pair_id: str, match_id: str, body: UploadBody, actor: Act
         raise C.rule_error(exc) from exc
     config = _storage_or_503()
     upload_id = R.new_id()
-    key = object_key(ctx["pair_id"], card["match_id"], upload_id, f"original{_ext(filename)}")
+    key = object_key(ctx["pair_id"], R.s(card["match_id"]).replace(":", "_"), upload_id, f"original{_ext(filename)}")
     try:
         created = await asyncio.to_thread(
             s3_client(config).create_multipart_upload, Bucket=config["bucket"], Key=key, ContentType=content_type)

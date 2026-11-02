@@ -111,8 +111,49 @@ class MatchVideoPatch(BaseModel):
 # ─── Dane z bazy ────────────────────────────────────────────────────────────
 
 
+_SHARED_ROLE_FIELDS = {"sedzia1": "NrSedzia_pierwszy", "sedzia2": "NrSedzia_drugi", "czas": "NrSedzia_czas",
+                       "sekretarz": "NrSedzia_sekretarz", "delegat": "NrSedzia_delegat"}
+
+
+async def shared_match_state(shared_id: str) -> Optional[Dict[str, Any]]:
+    """Stan w kształcie `province_matches.state_json` dla meczu wspólnego (karta `my:<id>`): obsada po numerach kont,
+    drużyny, termin. Okręg bierzemy z pierwszego sędziego z kontem (mecz ręczny nie ma okręgu)."""
+    from app.db import shared_match_members, shared_matches
+
+    row = await database.fetch_one(select(shared_matches).where(shared_matches.c.id == shared_id).where(shared_matches.c.deleted_at.is_(None)))
+    if not row:
+        return None
+    row = dict(row)
+    members = [dict(m) for m in await database.fetch_all(select(shared_match_members).where(shared_match_members.c.match_id == shared_id))]
+    when = row.get("match_at")
+    state: Dict[str, Any] = {
+        "RozgrywkiCode": str(row.get("proel_key") or row.get("code") or "").strip(),
+        "ID_zespoly_gosp_ZespolNazwa": row.get("home_name") or "", "ID_zespoly_gosc_ZespolNazwa": row.get("away_name") or "",
+        "data_fakt": when.isoformat() if hasattr(when, "isoformat") else str(when or ""),
+        "Hala_miasto": row.get("city") or "", "Hala_nazwa": row.get("hall") or "",
+    }
+    for m in members:
+        field = _SHARED_ROLE_FIELDS.get(str(m.get("role") or ""))
+        if field and str(m.get("judge_id") or "").strip() and field not in state:
+            state[field] = str(m["judge_id"]).strip()
+            state[f"{field}_nazwisko"] = m.get("name") or ""
+    province = ""
+    for key in ("NrSedzia_pierwszy", "NrSedzia_drugi"):
+        if state.get(key):
+            found = await database.fetch_one(select(province_judges.c.province).where(province_judges.c.judge_id == state[key]))
+            if found and found["province"]:
+                province = found["province"]
+                break
+    return {"province": province, "season": None, "match_at": when, "state": state}
+
+
 async def match_state(match_id: str) -> Dict[str, Any]:
-    """Najświeższy stan meczu z list okręgów (mecz może leżeć w kilku)."""
+    """Najświeższy stan meczu z list okręgów (mecz może leżeć w kilku). Karta `my:<id>` = mecz wspólny."""
+    if str(match_id).startswith("my:"):
+        shared = await shared_match_state(str(match_id)[3:])
+        if shared:
+            return shared
+        raise HTTPException(404, "Nie znam tego meczu - odśwież listę meczów i spróbuj ponownie.")
     row = await database.fetch_one(
         select(province_matches.c.province, province_matches.c.season, province_matches.c.match_at, province_matches.c.state_json)
         .where(province_matches.c.match_id == str(match_id))

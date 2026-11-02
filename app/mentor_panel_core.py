@@ -747,6 +747,8 @@ async def match_card(ctx: Dict[str, Any], match_id: str, *, required: bool = Tru
     cards = [c for c in all_cards if c["match_id"] == R.s(match_id)]
     if not cards and R.s(match_id).startswith("my:"):  # karta `my:` scalona z kartą ZPRP (stary link / deep-link nadal działa)
         cards = [c for c in all_cards if R.s(c.get("shared_id")) == R.s(match_id)[3:]]
+    if not cards:  # aplikacja zna numer ZPRP meczu wspólnego, a dane pary wiszą pod `my:` (collapse_linked)
+        cards = [c for c in all_cards if R.s(c.get("zprp_match_id")) == R.s(match_id) and R.s(c.get("match_id")).startswith("my:")]
     if not cards:
         if required:
             raise err(404, "MATCH_NOT_FOUND", "To nie jest mecz tej pary.")

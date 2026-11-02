@@ -648,7 +648,20 @@ async def after_connect(
     new_tokens: dict,
     email: str | None,
 ) -> tuple[bool, list[str]]:
-    """Po callbacku OAuth. Zwraca (czy_uruchomić_przenoszenie, ostrzeżenia).
+    """Pełne połączenie: zapis zgody i kalendarze. Zwraca (czy_przenosić, ostrzeżenia)."""
+    await save_connection(deps, user, previous=previous, new_tokens=new_tokens, email=email)
+    return await finish_connection(deps, user)
+
+
+async def save_connection(
+    deps: Deps,
+    user: str,
+    *,
+    previous: dict | None,
+    new_tokens: dict,
+    email: str | None,
+) -> None:
+    """Część callbacku OAuth bez rozmowy z Google: sama baza, więc trwa chwilę.
 
     Stary token (legacy albo district) idzie do osobnego miejsca na czas zadania,
     zanim nowy go nadpisze. Pierwsze połączenie nie ma czego przenosić.
@@ -687,6 +700,10 @@ async def after_connect(
     )
     if fields:
         await deps.store.upsert_setup(user, **fields)
+
+
+async def finish_connection(deps: Deps, user: str) -> tuple[bool, list[str]]:
+    """Reszta po zgodzie, już w tle: kalendarze u Google i decyzja o przenoszeniu."""
     warnings: list[str] = []
     try:
         api = await deps.api_current(user)

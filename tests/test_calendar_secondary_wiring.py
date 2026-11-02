@@ -7,6 +7,7 @@ plik od nowa. Po teście wszystko wraca do stanu sprzed (także `sys.modules`).
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import importlib
 import sys
@@ -193,7 +194,8 @@ async def test_auth_url_flag_off_is_the_old_flow(cal):
         "https://www.googleapis.com/auth/calendar.events",
         "https://www.googleapis.com/auth/calendar.readonly",
     ]
-    assert flow.auth_kwargs["include_granted_scopes"] == "false" and "state" not in flow.auth_kwargs
+    assert flow.auth_kwargs["include_granted_scopes"] == "false"
+    assert not flow.auth_kwargs["state"].startswith(("m~", "d~"))
     assert out.status_code == 200
 
 
@@ -230,34 +232,71 @@ async def test_callback_flag_on_first_connection_saves_scopes_and_creates_calend
     res = await cal.m.oauth2callback("code", state, settings())
     tok = cal.env.store.tokens[U]
     assert "calendar.app.created" in tok["scope"] and "calendar.events" not in tok["scope"]
-    assert len(cal.env.world.calendar_ids()) == 2
     assert res.headers["location"] == "baza://kalendarz?connected=true"
-    assert res.background is None  # nic do przenoszenia
+    # Powrót nie czeka na Google: kalendarze powstają dopiero w tle.
+    assert len(cal.env.world.calendar_ids()) == 0
+    await asyncio.gather(*cal.m._connect_tasks)
+    assert len(cal.env.world.calendar_ids()) == 2
     assert cal.env.store.setups[U]["migrated"] is True
 
 
-async def test_callback_flag_on_legacy_reconnect_parks_token_and_schedules_job(cal):
+async def test_callback_flag_on_legacy_reconnect_parks_token_and_runs_job_in_background(cal):
     cal.env.store.tokens[U] = {"access_token": "old", "refresh_token": "oldr", "expires_at": "x", "scope": None}
     cal.storage.states["m~z"] = U
     res = await cal.m.oauth2callback("code", "m~z", settings())
+    assert res.headers["location"] == "baza://kalendarz?connected=true"
     assert cal.env.store.setups[U]["park_access"] == "old"
-    assert res.background is not None
-    await res.background()  # zadanie w tle: nic do przeniesienia, kończy się sukcesem
+    await asyncio.gather(*cal.m._connect_tasks)  # nic do przeniesienia, kończy się sukcesem
     assert cal.env.store.setups[U]["job_state"] == "done" and cal.env.store.setups[U]["migrated"] is True
 
 
-async def test_callback_flag_on_bad_state_and_exchange_failure_are_coded(cal):
+async def test_callback_flag_on_bad_state_is_rejected_and_failed_exchange_returns_to_app(cal, monkeypatch):
     with pytest.raises(HTTPException) as err:
         await cal.m.oauth2callback("code", "nieznany", settings())
     assert err.value.status_code == 400
     cal.storage.states["m~q"] = U
-    FakeFlow.fetch_token = MagicMock(side_effect=ValueError("boom"))
-    try:
-        with pytest.raises(HTTPException) as err:
-            await cal.m.oauth2callback("code", "m~q", settings())
-        assert err.value.detail["code"] == "token_exchange_failed" and "Nie udało się" in err.value.detail["message"]
-    finally:
-        del FakeFlow.fetch_token
+    monkeypatch.setattr(FakeFlow, "fetch_token", MagicMock(side_effect=ValueError("boom")))
+    res = await cal.m.oauth2callback("code", "m~q", settings())
+    assert res.headers["location"] == "baza://kalendarz?connected=false&calendar_error=exchange_failed"
+    assert U not in cal.env.store.tokens
+
+
+@pytest.mark.parametrize("flag", [True, False])
+async def test_refreshing_callback_does_not_use_the_code_twice(cal, flag):
+    state = "m~refresh" if flag else "plain-refresh"
+    cal.storage.states[state] = U
+    await cal.m.oauth2callback("code", state, settings(flag))
+    made = len(FakeFlow.made)
+    res = await cal.m.oauth2callback("code", state, settings(flag))
+    assert res.headers["location"] == "baza://kalendarz?connected=true"
+    assert len(FakeFlow.made) == made  # druga wymiana w ogóle nie idzie do Google
+    await asyncio.gather(*cal.m._connect_tasks)
+
+
+async def test_failed_exchange_can_be_repeated_with_the_same_state(cal, monkeypatch):
+    cal.storage.states["m~again"] = U
+    monkeypatch.setattr(FakeFlow, "fetch_token", MagicMock(side_effect=ValueError("boom")))
+    await cal.m.oauth2callback("code", "m~again", settings())
+    monkeypatch.undo()
+    res = await cal.m.oauth2callback("code", "m~again", settings())
+    assert res.headers["location"] == "baza://kalendarz?connected=true"
+    await asyncio.gather(*cal.m._connect_tasks)
+
+
+async def test_pkce_verifier_survives_a_server_restart(cal):
+    # Żadnej pamięci procesu: ten sam state i sekret dają ten sam verifier.
+    out = await cal.m.get_auth_url("matches", settings(), U)
+    assert out.status_code == 200
+    flow = FakeFlow.made[-1]
+    state = flow.auth_kwargs["state"]
+    verifier = cal.m._pkce_verifier(settings(), state)
+    assert 43 <= len(verifier) <= 128
+    assert flow.auth_kwargs["code_challenge"] == cal.m._pkce_challenge(verifier)
+    cal.storage.states[state] = U
+    await cal.m.oauth2callback("code", state, settings())
+    assert FakeFlow.made[-1].fetch["code_verifier"] == verifier
+    assert FakeFlow.made[-1].fetch["timeout"] > 0
+    await asyncio.gather(*cal.m._connect_tasks)
 
 
 # ── zapis wydarzeń ─────────────────────────────────────────────────────────
