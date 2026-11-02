@@ -204,9 +204,10 @@ INVITE_ROLES = ("reader", "writer")
 PERMISSION_FIELDS = "permissions(id,emailAddress,displayName,role,photoLink,type,expirationTime,deleted,domain),nextPageToken"
 _PERMISSION_ID = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
 LOG_KINDS = ("connected", "disconnected", "folder_changed", "layout_changed", "invited", "role_changed", "access_removed",
-             "clip_saved", "clip_gone")
+             "clip_saved", "clip_gone", "shot_saved", "shot_gone")
 #: Biała lista kluczy `details` dziennika (nigdy tokeny ani adresy podpisane).
-LOG_DETAIL_KEYS = ("email", "role", "old_role", "folder_name", "layout", "clip_id", "clip_title", "match_label", "file_name")
+LOG_DETAIL_KEYS = ("email", "role", "old_role", "folder_name", "layout", "clip_id", "clip_title", "match_label", "file_name",
+                    "shot_id", "shot_title")
 
 
 def clean_role(value: Any, default: str = "reader") -> Optional[str]:

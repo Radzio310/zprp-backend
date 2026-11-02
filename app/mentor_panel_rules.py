@@ -592,7 +592,7 @@ def playlist_items(items: Sequence[Mapping[str, Any]], mode: str) -> List[Dict[s
 
 # ─── Wątki ──────────────────────────────────────────────────────────────────
 
-THREAD_TARGETS = ("match", "clip", "compilation", "pair")
+THREAD_TARGETS = ("match", "clip", "shot", "compilation", "pair")
 THREAD_KINDS = ("question", "note", "task")
 THREAD_STATUSES = ("open", "resolved")
 MAX_BODY = 4000

@@ -855,10 +855,19 @@ async def clips_payload(ctx: Dict[str, Any], clip_rows: List[Dict[str, Any]]) ->
     except Exception:  # noqa: BLE001 - stan MP4 nigdy nie psuje listy klipów
         logger.warning("mentor: stan MP4 klipów nieodczytany", exc_info=True)
         media = {}
+    try:
+        from app.mentor_shots import shot_counts
+
+        shots = await shot_counts([r["id"] for r in clip_rows])
+    except Exception:  # noqa: BLE001 - licznik zrzutów nigdy nie psuje listy klipów
+        logger.warning("mentor: liczniki zrzutów klipów nieodczytane", exc_info=True)
+        shots = {}
     out = []
     for r in clip_rows:
         legacy, summary = threads.get(r["id"], (None, None))
-        out.append(clip_shape(ctx, r, names, legacy, summary, media.get(r["id"])))
+        shaped = clip_shape(ctx, r, names, legacy, summary, media.get(r["id"]))
+        shaped["shots_count"] = shots.get(r["id"], 0)
+        out.append(shaped)
     # "Sporne" (Trybuna): zdania pary podzielone - flaga w liście klipów, osi pokoju i Bibliotece.
     disputed: set = set()
     if any(R.s(r.get("match_id")).startswith("tr_") for r in clip_rows):
@@ -922,6 +931,13 @@ async def threads_payload(ctx: Dict[str, Any], thread_rows: List[Dict[str, Any]]
                                                                .where(mentor_thread_prefs.c.thread_id.in_(ids)))} if ids else {}
     unread_ids = set(await unread_threads(ctx["pair_id"], me)) if ids else set()
     clips = await thread_clips(thread_rows)
+    try:
+        from app.mentor_shots import shot_slims
+
+        shots = await shot_slims([R.s(t.get("target_id")) for t in thread_rows if t.get("target_kind") == "shot"])
+    except Exception:  # noqa: BLE001 - skrót zrzutu nigdy nie psuje wątków
+        logger.warning("mentor: skróty zrzutów wątków nieodczytane", exc_info=True)
+        shots = {}
     names = await people({t.get("created_by") for t in thread_rows} | {t.get("acted_by") for t in thread_rows}
                          | {c.get("author_id") for cs in comments.values() for c in cs}
                          | {c.get("acted_by") for cs in comments.values() for c in cs})
@@ -937,6 +953,8 @@ async def threads_payload(ctx: Dict[str, Any], thread_rows: List[Dict[str, Any]]
             "my_follow": my_prefs.get(t["id"]) or "auto", "unread": t["id"] in unread_ids,
             "can_edit": may(ctx, "edit", owner=R.s(t.get("created_by")) == ctx["actor"].judge_id),
         }
+        if t.get("target_kind") == "shot":
+            shaped["shot"] = shots.get(R.s(t.get("target_id")))
         if t.get("target_kind") == "clip":
             anchor = R.first_anchor(items)
             shaped["clip"] = clip_slim(clip)
