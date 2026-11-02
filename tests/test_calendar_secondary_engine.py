@@ -266,7 +266,7 @@ async def test_setup_view_contract_shape_for_flag_on_and_off():
     }
     assert view["feature_enabled"] and view["connected"] and view["mode"] == "two" and view["busy"]
     assert [c["kind"] for c in view["calendars"]] == ["whistle", "stopwatch"]
-    assert set(view["calendars"][0]) == {"kind", "name", "color", "missing"}
+    assert set(view["calendars"][0]) == {"kind", "name", "color", "missing", "color_pending"}
     assert view["district_access"] is False and view["job"] is None
     off = make_deps(flag=False)
     connect(off, U, scope=None)
@@ -293,7 +293,7 @@ async def test_put_setup_saves_choices_before_connection_and_validates():
     )
     assert view["mode"] == "one" and view["busy"] is False and not start
     assert view["calendars"] == [
-        {"kind": "shared", "name": "BAZA - Mecze", "color": "#abcdef", "missing": False}
+        {"kind": "shared", "name": "BAZA - Mecze", "color": "#abcdef", "missing": False, "color_pending": False}
     ]
     assert not env.world.calendar_ids()  # bez tokenu nic nie zakładamy
     for bad in ({"mode": "trzy"}, {"colors": {"shared": "zielony"}}, {"colors": {"x": "#000000"}}):

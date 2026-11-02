@@ -120,6 +120,11 @@ def clean_extra(value: Any) -> Dict[str, Any]:
         return {}
     if not isinstance(value, Mapping):
         raise ValueError("Pole extra musi być obiektem.")
+    if value.get("lineup") is not None:
+        # Skład z „Wczytaj składy": ten sam kontroler co `PUT /shared-matches/{id}/lineup` (kształt, znaki, rozmiar).
+        from app.lineup_read_rules import clean_lineup
+
+        clean_lineup(value["lineup"])
     raw = json.dumps(value, ensure_ascii=False, default=str)
     if len(raw.encode("utf-8")) > MAX_EXTRA_BYTES:
         raise ValueError("Pole extra jest za duże (limit 20 kB).")

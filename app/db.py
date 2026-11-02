@@ -4697,6 +4697,10 @@ from app.shared_match_tables import define_tables as _define_shared_match_tables
     mentor_proel_links,
 ) = _define_shared_match_tables(metadata)
 
+# Dobowy licznik odczytów składów z protokołu - „Wczytaj składy" (02.11.2026, `app/lineup_read_tables.py`, `docs/mecze-wspolne-api.md`).
+from app.lineup_read_tables import define_tables as _define_lineup_read_tables
+(lineup_read_usage,) = _define_lineup_read_tables(metadata)
+
 # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.
 from app.province_alert_tables import define_tables as _define_alert_tables
 province_alert_settings, province_alert_state = _define_alert_tables(metadata)

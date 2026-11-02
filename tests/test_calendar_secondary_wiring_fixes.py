@@ -44,8 +44,9 @@ async def test_delete_of_primary_entry_without_access_is_403_and_keeps_mapping(c
     assert (U, "u1") in cal.env.store.maps
 
 
-async def test_post_returns_color_warning(cal):
+async def test_post_keeps_quiet_about_color_and_marks_it_for_settings(cal):
     connect(cal.env, U)
     cal.env.world.fail.append(("patch_calendar_list", 403, None))
     out = await cal.m.create_event(payload(cal), settings(), U)
-    assert out["eventId"] and "koloru" in out["warning"]
+    assert out["eventId"] and "warning" not in out
+    assert cal.env.store.setups[U]["color_pending"] == "whistle"

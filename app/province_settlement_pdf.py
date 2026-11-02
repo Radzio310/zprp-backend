@@ -164,14 +164,13 @@ def _render(template_name: str, context: dict) -> str:
     return _jinja_env().get_template(template_name).render(**context)
 
 
-def _offline_fetcher(url: str, *args, **kwargs):
+def _offline_fetcher():
     """WeasyPrint nie wychodzi do sieci: obrazki są osadzone jako data URI, a fonty systemowe.
-    Zablokowany zasób to szybki błąd (WeasyPrint go pomija), nie wiszące połączenie."""
-    if url.startswith("data:"):
-        from weasyprint import default_url_fetcher
+    Zablokowany zasób to szybki błąd (WeasyPrint go pomija), nie wiszące połączenie.
+    WeasyPrint 70 przyjmuje tylko instancję URLFetcher, zwykła funkcja już nie działa."""
+    from weasyprint.urls import URLFetcher
 
-        return default_url_fetcher(url, *args, **kwargs)
-    raise ValueError(f"zasób zewnętrzny zablokowany w PDF-ie: {url[:80]}")
+    return URLFetcher(allowed_protocols=("data",))
 
 
 def _to_pdf(html: str, base_name: str, filename: str) -> dict:
@@ -180,7 +179,7 @@ def _to_pdf(html: str, base_name: str, filename: str) -> dict:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     token = str(uuid.uuid4())
     # Prosto do katalogu pobrań (bez tymczasowego HTML-a i kopii pliku).
-    weasyprint.HTML(string=html, url_fetcher=_offline_fetcher).write_pdf(
+    weasyprint.HTML(string=html, url_fetcher=_offline_fetcher()).write_pdf(
         os.path.join(DOWNLOAD_DIR, f"{token}.pdf")
     )
     return {

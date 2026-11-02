@@ -25,6 +25,7 @@ from sqlalchemy import and_, delete, func, insert, or_, select, update
 
 from app import mentor_panel_core as C
 from app import shared_match_link as LK
+from app import lineup_read_rules as LR
 from app import shared_match_notify as N
 from app import shared_match_rules as SR
 from app.db import (
@@ -367,6 +368,12 @@ class ZprpBody(BaseModel):
     base_rev: Optional[int] = None
     #: Liczbowe IdZawody; null/"" zdejmuje powiązanie.
     zprp_match_id: Optional[str] = Field(default=None, max_length=20)
+
+
+class LineupBody(BaseModel):
+    base_rev: Optional[int] = None
+    #: Skład z „Wczytaj składy" po zatwierdzeniu przez użytkownika (kształt: `lineup_read_rules.clean_lineup`); null kasuje skład.
+    lineup: Optional[Dict[str, Any]] = None
 
 
 class ProelBody(BaseModel):
@@ -1008,6 +1015,41 @@ async def put_stats(match_id: str, body: StatsBody, actor: Actor = Depends(base_
 
 
 # ─── Powiązania: ZPRP i ProEl ───────────────────────────────────────────────
+
+
+# ─── Skład z protokołu („Wczytaj składy", 02.11.2026) ───────────────────────
+
+
+def _lineup_label(lineup: Any) -> Optional[str]:
+    """Do dziennika i pusha tylko LICZBY - nazwiska zawodników i osób nigdy nie opuszczają `extra`."""
+    home, away, staff = LR.lineup_counts(lineup)
+    return f"{home}+{away} zawodników, {staff} os." if (home or away or staff) else None
+
+
+@router.put("/{match_id}/lineup")
+async def put_lineup(match_id: str, body: LineupBody, actor: Actor = Depends(base_actor)):
+    """Zapis (albo skasowanie) składu w `extra.lineup`. Każdy członek, `base_rev` wymagany (409 `REV_CONFLICT`), reszta `extra`
+    zostaje nietknięta. Skład widzą wyłącznie członkowie meczu (lista i szczegóły). Dziennik: akcja `lineup` z samymi liczbami;
+    push nie jest wysyłany. Wynik odczytu NIE trafia tu sam: aplikacja pokazuje ekran zatwierdzenia i dopiero potem woła tę trasę."""
+    row, members, _ = await _load(match_id, actor)
+    lineup = _guard(LR.clean_lineup, body.lineup)
+    extra = dict(_extra(row))
+    before = extra.get("lineup")
+    if lineup is None:
+        extra.pop("lineup", None)
+    else:
+        extra["lineup"] = lineup
+    _guard(SR.clean_extra, extra)
+    if extra == _extra(row):
+        if body.base_rev is None:
+            raise _bad("Brak base_rev - podaj wersję meczu, którą widzisz.", "BASE_REV_REQUIRED")
+        return {"ok": True, "unchanged": True, **await detail_payload(row, members, actor)}
+    async with database.transaction():
+        rev = await _bump(row["id"], actor, body.base_rev, {"extra_json": C.dumps(extra)})
+        await _write_log(row["id"], rev, actor.judge_id, "lineup", [{"field": "lineup", "from": _lineup_label(before), "to": _lineup_label(lineup)}])
+    fresh = await _row(row["id"])
+    await _after(fresh, actor)
+    return {"ok": True, "unchanged": False, **await detail_payload(fresh, await _members(row["id"]), actor)}
 
 
 @router.put("/{match_id}/zprp")

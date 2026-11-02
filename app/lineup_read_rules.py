@@ -258,8 +258,8 @@ _MATCH_NO = re.compile(r"^[\w/.\- ]{1,30}$", re.UNICODE)
 
 def clean_match_number(value: Any) -> Optional[str]:
     """Numer meczu tak, jak wydrukowano (wielkość liter ma znaczenie: JmK != JMK). Nie jest kluczem."""
-    text = clean_text(value, 30)
-    return text if text and _MATCH_NO.match(text) else None
+    text = clean_text(value, 200)
+    return text if text and len(text) <= 30 and _MATCH_NO.match(text) else None
 
 
 # ─── Wiersze ────────────────────────────────────────────────────────────────

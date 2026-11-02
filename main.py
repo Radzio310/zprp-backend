@@ -360,6 +360,9 @@ app.include_router(match_bombs_panel_router)
 app.include_router(reports_router)
 app.include_router(login_records_router)
 app.include_router(privacy_consents_router)
+# „Wczytaj składy" (02.11.2026): `/matches/lineup/...` - przed `matches_router` i przed catch-allami ProEla.
+from app.lineup_read import router as lineup_read_router
+app.include_router(lineup_read_router)
 # UWAGA na kolejność: app/proel.py ma catch-all `GET /proel/{match_number:path}`,
 # więc każdy router ze ścieżkami pod /proel/... MUSI stanąć PRZED proel_router —
 # inaczej `/proel/zprp/auth` wpada w `match_number="zprp/auth"`.

@@ -88,6 +88,30 @@ async def test_disconnect_after_revoked_consent_still_clears_everything_with_war
     assert env.store.setups[U]["legacy_left"] is True
 
 
+async def test_reconnect_of_moved_account_does_not_go_back_to_moving():
+    # Zgłoszenie 02.11: po rozłączeniu i połączeniu wracało „Przenieś mecze", a kreator
+    # od razu mówił „Gotowe", bo niedyspozycje liczyły się jak nieprzeniesione mecze.
+    env = make_deps()
+    legacy_account(env)
+    await reconnect_matches(env)
+    await run_job(env.deps, U)
+    assert env.store.setups[U]["migrated"] is True
+    assert any(not r.get("calendar_id") for r in await env.store.list_mappings(U))  # niedyspozycje
+    await disconnect(env.deps, U, remove_calendars=True)
+    start, _ = await after_connect(env.deps, U, previous=None, new_tokens=NEW, email=None)
+    view = await setup_view(env.deps, U)
+    assert start is False and view["needs_migration"] is False and view["job"] is None
+
+
+async def test_account_stuck_with_finished_job_heals_on_setup_view():
+    env = make_deps()
+    legacy_account(env)
+    await reconnect_matches(env)
+    env.store.setups[U].update(migrated=False, job_kind="migrate", job_state="done")
+    view = await setup_view(env.deps, U)
+    assert view["needs_migration"] is False and env.store.setups[U]["migrated"] is True
+
+
 async def test_reconnect_after_disconnect_does_not_mask_primary_mappings():
     env = make_deps()
     legacy_account(env)
@@ -131,8 +155,12 @@ async def test_color_failure_warns_in_post_and_is_retried_later():
     env = connect(make_deps(), U)
     env.world.fail.append(("patch_calendar_list", 403, None))
     out = await post(env, "1")
-    assert "koloru" in out["warning"] and "ponownie" in out["warning"]
+    # Mecz zapisany: o kolorze mówią Ustawienia, a nie każdy zapis z osobna.
+    assert "warning" not in out
     assert env.store.setups[U]["color_pending"] == "whistle"
+    env.world.fail.append(("patch_calendar_list", 403, None))  # też przy ponowieniu w widoku
+    view = await setup_view(env.deps, U)
+    assert next(c for c in view["calendars"] if c["kind"] == "whistle")["color_pending"] is True
     out2 = await post(env, "1")  # kolejny zapis ponawia kolor
     assert "warning" not in out2 and not env.store.setups[U]["color_pending"]
     cal = env.store.setups[U]["whistle_id"]

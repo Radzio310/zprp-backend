@@ -207,9 +207,9 @@ async def apply_color(
         if kind not in pending:
             await deps.store.upsert_setup(user, color_pending=",".join(sorted(pending | {kind})))
         return (
-            f"Google nie zapisał koloru kalendarza {CALENDAR_NAMES[kind]} (błąd {exc.status}). "
-            "Kolor jest zapamiętany w BAZIE, ale w Google może wyglądać inaczej. "
-            "BAZA spróbuje go ustawić ponownie przy następnym zapisie meczu albo otwarciu ustawień kalendarza."
+            f"Google nie przyjął koloru kalendarza {CALENDAR_NAMES[kind]}. "
+            "Kolor jest zapamiętany w BAZIE, a BAZA ponowi zapis przy następnym meczu "
+            "albo otwarciu ustawień kalendarza."
         )
     if kind in pending:
         rest = ",".join(sorted(pending - {kind})) or None
@@ -458,9 +458,11 @@ async def write_event(
     api = await deps.api_current(user)
     kind = plan.kind
     warnings: list[str] = []
-    cal_id = await ensure_calendar(deps, user, api, kind, warnings)
+    # Kolor mówi o sobie w Ustawieniach (`color_pending`), nie przy każdym meczu:
+    # nadrabianie zapisuje całą serię i powtarzałoby ten sam komunikat na ekranie głównym.
+    cal_id = await ensure_calendar(deps, user, api, kind)
     if kind in (setup.get("color_pending") or "").split(","):
-        warnings += await retry_pending_colors(deps, user, api, (kind,))
+        await retry_pending_colors(deps, user, api, (kind,))
     body = match_event_body(
         summary=summary,
         start=start.isoformat(),
@@ -536,6 +538,17 @@ async def remove_event(deps: Deps, user: str, match_id: str) -> None:
 async def setup_view(deps: Deps, user: str) -> dict:
     tokens = await deps.store.get_tokens(user)
     setup = await _setup(deps, user)
+    # Skończone przenoszenie zawsze znaczy „przeszło". Naprawia konta, które utknęły
+    # między starym zadaniem a ponownym połączeniem i wracały do kreatora.
+    if (
+        deps.flag
+        and tokens
+        and not setup["migrated"]
+        and setup.get("job_kind") == "migrate"
+        and setup.get("job_state") == "done"
+    ):
+        await deps.store.upsert_setup(user, migrated=True)
+        setup = await _setup(deps, user)
     if (
         setup.get("color_pending")
         and tokens
@@ -548,6 +561,7 @@ async def setup_view(deps: Deps, user: str) -> dict:
         setup = await _setup(deps, user)
     connected = bool(tokens)
     calendars: list[dict] = []
+    pending_colors = (setup.get("color_pending") or "").split(",")
     if deps.flag and not is_beach_key(user):
         for kind in kinds_for_mode(setup["mode"]):
             calendars.append(
@@ -556,6 +570,7 @@ async def setup_view(deps: Deps, user: str) -> dict:
                     "name": CALENDAR_NAMES[kind],
                     "color": _color_of(setup, kind),
                     "missing": bool(setup.get(f"{kind}_refill")),
+                    "color_pending": kind in pending_colors,
                 }
             )
     return {
@@ -670,12 +685,21 @@ async def save_connection(
     new_level = access_level(new_tokens.get("scope"))
     fields: dict[str, Any] = {}
     if previous is None:
-        # migrated=True nie może maskować mapowań z kalendarza głównego: gdy
-        # takie zostały, zadanie przejdzie po nich (albo powie, że nie może).
-        has_primary_rows = any(
-            not r.get("calendar_id") for r in await deps.store.list_mappings(user)
-        )
-        fields["migrated"] = not has_primary_rows
+        # Zadanie sprzed rozłączenia nie dotyczy nowego połączenia: stare „gotowe"
+        # obok konta do przeniesienia dawało kreator, który od razu kończy.
+        if setup.get("job_state") != "running":
+            await deps.store.update_job(
+                user, job_kind=None, job_state=None, job_error=None, job_note=None
+            )
+        # Konto, które już przeszło, nie wraca do przenoszenia: w kalendarzu głównym
+        # zostają u niego same niedyspozycje. Dla pozostałych migrated=True nie może
+        # maskować mapowań z kalendarza głównego: zadanie przejdzie po nich (albo
+        # powie, że nie może).
+        if not setup["migrated"]:
+            has_primary_rows = any(
+                not r.get("calendar_id") for r in await deps.store.list_mappings(user)
+            )
+            fields["migrated"] = not has_primary_rows
     elif not setup["migrated"] and new_level == "matches" and has_primary_access(
         previous.get("scope")
     ):
@@ -745,7 +769,12 @@ async def _forget_primary_match_entries(
     delete=True kasuje je w Google; w każdym razie zapominamy ich mapowania, żeby
     ponowne połączenie nie zrobiło duplikatu. Gdy nie da się ich sprawdzić albo
     zostają w Google, zapisujemy `legacy_left`, by po ponownym połączeniu powiedzieć
-    to prosto (job.note). Stary token NIE jest zatrzymywany."""
+    to prosto (job.note). Stary token NIE jest zatrzymywany.
+
+    Konto po przejściu ma mecze w kalendarzach BAZY, a w głównym same niedyspozycje,
+    więc nie ma tu czego szukać ani o czym ostrzegać."""
+    if setup.get("migrated"):
+        return []
     rows = [r for r in await deps.store.list_mappings(user) if not r.get("calendar_id")]
     if not rows:
         return []

@@ -5,6 +5,8 @@ ją ponownie - ale ktoś, kto czytał poprzednią, ma zobaczyć „zmieniliśmy 
 a nie ten sam komunikat, co zupełnie nowy użytkownik.
 """
 
+import re
+
 import pytest
 
 from app.privacy_consent_rules import (
@@ -108,3 +110,35 @@ class TestZgodnoscZAplikacja:
         found = re.search(r"PRIVACY_CLAUSE_VERSION\s*=\s*(\d+)", text)
         assert found, "Aplikacja nie deklaruje PRIVACY_CLAUSE_VERSION."
         assert int(found.group(1)) == CURRENT_CLAUSE_VERSION
+
+
+class TestKlauzulaV5:
+    """Wersja 5 (02.11.2026): OpenAI jako odbiorca i wczytywanie składów (dane osób trzecich, plik niezapisywany)."""
+
+    @staticmethod
+    def _ts() -> str:
+        from pathlib import Path
+
+        leaf = Path(__file__).resolve().parent.parent.parent / "BAZA" / "utils" / "privacyConsent.ts"
+        if not leaf.exists():
+            pytest.skip("Repozytorium aplikacji nie stoi obok backendu.")
+        return leaf.read_text(encoding="utf-8")
+
+    def test_wersja_pieta_po_obu_stronach(self):
+        assert CURRENT_CLAUSE_VERSION == 5
+        assert re.search(r"PRIVACY_CLAUSE_VERSION\s*=\s*5\b", self._ts())
+
+    def test_opis_zmiany_dla_wracajacych_istnieje(self):
+        text = self._ts()
+        change = re.search(r"^\s*5:\s*(.+?);\s*$", text[text.index("CLAUSE_CHANGES"):], re.S | re.M)
+        assert change and "OpenAI" in change.group(1) and "osób trzecich" in change.group(1)
+
+    def test_openai_jest_odbiorca_i_poza_eog_a_plik_nie_jest_zapisywany(self):
+        text = self._ts()
+        assert "dostawca modeli AI (OpenAI)" in text
+        assert "Groq, OpenAI, Vercel" in text
+        assert "nie zapisujemy go ani na serwerze BAZA, ani w telefonie" in text
+        assert "dane osób trzecich" in text
+
+    def test_zadnych_dlugich_myslnikow(self):
+        assert "\u2014" not in self._ts() and "\u2013" not in self._ts()

@@ -26,6 +26,8 @@ def _wrap(call: Callable[[], Any]) -> Callable[[], Any]:
             return call()
         except HttpError as exc:
             status = getattr(getattr(exc, "resp", None), "status", 500)
+            # Sam numer nie mówi, czego Google odmówił. Treść błędu nie zawiera tokenu.
+            logger.warning("Google odpowiedział %s: %s", status, getattr(exc, "reason", ""))
             raise GoogleError(int(status)) from exc
 
     return run
