@@ -43,6 +43,7 @@ from app.calendar_secondary_rules import (
     district_access_error,
     foreground_for,
     google_error_message,
+    has_color_access,
     has_primary_access,
     is_beach_key,
     is_movable_match_event,
@@ -197,6 +198,13 @@ async def apply_color(
     setup = await _setup(deps, user)
     hex_color = color or _color_of(setup, kind)
     pending = {k for k in (setup.get("color_pending") or "").split(",") if k}
+    tokens = await deps.store.get_tokens(user)
+    if not has_color_access((tokens or {}).get("scope")):
+        # Google i tak odmówi, a każda próba to kilka żądań przy zapisie meczu.
+        # O zgodę prosi karta w Ustawieniach, po niej kolor idzie z `color_pending`.
+        if kind not in pending:
+            await deps.store.upsert_setup(user, color_pending=",".join(sorted(pending | {kind})))
+        return None
     try:
         await api.patch_calendar_list(
             calendar_id,
@@ -553,6 +561,7 @@ async def setup_view(deps: Deps, user: str) -> dict:
         setup.get("color_pending")
         and tokens
         and uses_secondary(deps.flag, user, tokens.get("scope"))
+        and has_color_access(tokens.get("scope"))
     ):
         try:
             await retry_pending_colors(deps, user, await deps.api_current(user))
@@ -584,6 +593,7 @@ async def setup_view(deps: Deps, user: str) -> dict:
         "busy": bool(setup["busy"]),
         # Dostęp do kalendarza głównego: legacy albo district.
         "district_access": bool(connected and has_primary_access(tokens.get("scope"))),
+        "color_access": bool(connected and has_color_access(tokens.get("scope"))),
         "calendars": calendars,
         "job": job_public(setup),
     }

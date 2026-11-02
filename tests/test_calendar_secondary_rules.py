@@ -11,6 +11,8 @@ from app.calendar_secondary_rules import (
     DISTRICT_SCOPES,
     MATCHES_SCOPES,
     SCOPE_APP_CREATED,
+    SCOPE_CALENDARLIST,
+    SCOPE_CALENDARS_RO,
     SCOPE_EVENTS,
     SecondaryError,
     access_level,
@@ -19,8 +21,10 @@ from app.calendar_secondary_rules import (
     flag_from_env,
     foreground_for,
     granted_scopes,
+    has_color_access,
     is_beach_key,
     make_state,
+    missing_scopes,
     normalize_hex,
     parse_tier,
     resolve_target,
@@ -42,6 +46,16 @@ def test_access_levels_from_granted_scopes():
 def test_scopes_per_tier_are_incremental():
     assert set(MATCHES_SCOPES) < set(DISTRICT_SCOPES)
     assert scopes_for_tier("matches") == MATCHES_SCOPES
+    # Kolor wymaga listy kalendarzy, a jej brak nie blokuje zgody na mecze.
+    assert SCOPE_CALENDARLIST in MATCHES_SCOPES
+    assert not missing_scopes("matches", SCOPE_APP_CREATED)
+    # Zapis listy wystarcza tam, gdzie moduł okręgowy czyta listę.
+    assert not missing_scopes(
+        "district",
+        f"{SCOPE_APP_CREATED} {SCOPE_CALENDARLIST} {SCOPE_EVENTS} {SCOPE_CALENDARS_RO}",
+    )
+    assert has_color_access(SCOPE_CALENDARLIST) and not has_color_access(SCOPE_APP_CREATED)
+    assert not has_color_access(None)
     assert SCOPE_EVENTS in scopes_for_tier("district")
     assert SCOPE_EVENTS not in scopes_for_tier("matches")
     assert granted_scopes("email openid")  # krótkie nazwy są normalizowane

@@ -6,7 +6,10 @@ więc cała decyzja daje się sprawdzić testem jednostkowym. Wołający podaje 
 Model (kontrakt 02.11.2026):
 
 * poziom "matches" (każdy sędzia): zakres `calendar.app.created`, BAZA widzi
-  tylko kalendarze, które sama założyła (BAZA - Boiskowy / Stolikowy / Mecze),
+  tylko wpisy kalendarzy, które sama założyła (BAZA - Boiskowy / Stolikowy / Mecze),
+  plus `calendar.calendarlist` na kolor tych kalendarzy: Google odrzuca
+  `calendarList.patch` samym `calendar.app.created` (401 Invalid Credentials, 02.11.2026),
+  choć dokumentacja go wymienia. Lista to nazwy i ustawienia, nie treść wydarzeń,
 * poziom "district" (moduł okręgowy): dokłada `calendar.events` i odczyt list,
   czyli kalendarz główny z niedyspozycjami,
 * token bez zapisanych zakresów (scope NULL) = "legacy": działa jak dotąd.
@@ -27,9 +30,10 @@ SCOPE_EVENTS = _G + "calendar.events"
 SCOPE_READONLY = _G + "calendar.readonly"
 SCOPE_CALENDARS_RO = _G + "calendar.calendars.readonly"
 SCOPE_CALENDARLIST_RO = _G + "calendar.calendarlist.readonly"
+SCOPE_CALENDARLIST = _G + "calendar.calendarlist"
 SCOPE_EMAIL = _G + "userinfo.email"
 
-MATCHES_SCOPES = [SCOPE_APP_CREATED, "openid", "email"]
+MATCHES_SCOPES = [SCOPE_APP_CREATED, SCOPE_CALENDARLIST, "openid", "email"]
 DISTRICT_SCOPES = MATCHES_SCOPES + [
     SCOPE_EVENTS,
     SCOPE_CALENDARS_RO,
@@ -165,6 +169,11 @@ def has_primary_access(raw_scope: str | None) -> bool:
     return access_level(raw_scope) in ("legacy", "district")
 
 
+def has_color_access(raw_scope: str | None) -> bool:
+    """Czy token może zapisać kolor kalendarza. Tokeny sprzed tego zakresu nie mogą."""
+    return SCOPE_CALENDARLIST in granted_scopes(raw_scope)
+
+
 def needs_migration(
     flag: bool, token_exists: bool, user_login: str, migrated: bool
 ) -> bool:
@@ -172,7 +181,10 @@ def needs_migration(
 
 
 def required_scopes(tier: str) -> frozenset[str]:
-    """Zakresy, bez których zgoda danego poziomu jest niepełna (openid/email są dodatkiem)."""
+    """Zakresy, bez których zgoda danego poziomu jest niepełna (openid/email są dodatkiem).
+
+    `calendar.calendarlist` tu nie ma: bez niego mecze działają, a o kolor pyta
+    karta w Ustawieniach."""
     needed = {SCOPE_APP_CREATED}
     if tier == "district":
         needed |= {SCOPE_EVENTS, SCOPE_CALENDARS_RO, SCOPE_CALENDARLIST_RO}
@@ -180,7 +192,11 @@ def required_scopes(tier: str) -> frozenset[str]:
 
 
 def missing_scopes(tier: str, raw_granted: str | Iterable[str] | None) -> frozenset[str]:
-    return required_scopes(tier) - granted_scopes(raw_granted)
+    granted = granted_scopes(raw_granted)
+    # Zapis listy obejmuje jej odczyt: Google może nie wymienić węższego zakresu osobno.
+    if SCOPE_CALENDARLIST in granted:
+        granted |= {SCOPE_CALENDARLIST_RO}
+    return required_scopes(tier) - granted
 
 
 LEFTOVER_NOTE = (

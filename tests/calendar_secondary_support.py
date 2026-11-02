@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from app.calendar_secondary_engine import SETUP_DEFAULTS, Deps
 from app.calendar_secondary_rules import (
     SCOPE_APP_CREATED,
+    SCOPE_CALENDARLIST,
     SCOPE_EVENTS,
     GoogleError,
 )
@@ -21,8 +22,8 @@ FUTURE = "2026-12-01T18:00:00+01:00"
 FUTURE_END = "2026-12-01T20:00:00+01:00"
 PAST = "2026-09-01T18:00:00+02:00"
 
-MATCHES_SCOPE = f"{SCOPE_APP_CREATED} openid"
-DISTRICT_SCOPE = f"{SCOPE_APP_CREATED} {SCOPE_EVENTS} openid"
+MATCHES_SCOPE = f"{SCOPE_APP_CREATED} {SCOPE_CALENDARLIST} openid"
+DISTRICT_SCOPE = f"{SCOPE_APP_CREATED} {SCOPE_CALENDARLIST} {SCOPE_EVENTS} openid"
 
 
 class World:

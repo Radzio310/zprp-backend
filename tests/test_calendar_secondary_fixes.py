@@ -13,8 +13,8 @@ from app.calendar_secondary_engine import (
     setup_view,
     start_migration,
 )
-from app.calendar_secondary_rules import SecondaryError
-from tests.calendar_secondary_support import DISTRICT_SCOPE, connect, make_deps
+from app.calendar_secondary_rules import SCOPE_APP_CREATED, SecondaryError
+from tests.calendar_secondary_support import DISTRICT_SCOPE, MATCHES_SCOPE, connect, make_deps
 from tests.test_calendar_secondary_engine import (
     NEW,
     STOPWATCH,
@@ -149,6 +149,26 @@ async def test_district_reconsent_replaces_parked_token():
     district = {**NEW, "scope": DISTRICT_SCOPE}
     await after_connect(env.deps, U, previous=env.store.tokens[U], new_tokens=district, email=None)
     assert not env.store.setups[U].get("park_access")
+
+
+async def test_token_without_list_scope_does_not_call_google_for_color_and_recovers_after_consent():
+    # Zgłoszenie 02.11.2026: Google odrzuca kolor samym calendar.app.created (401).
+    old_token = f"{SCOPE_APP_CREATED} openid"
+    env = connect(make_deps(), U, scope=old_token)
+    out = await post(env, "1")
+    assert out["eventId"] and "warning" not in out
+    assert env.store.setups[U]["color_pending"] == "whistle"
+    view = await setup_view(env.deps, U)
+    assert view["color_access"] is False
+    _, warnings, _ = await put_setup(env.deps, U, {"colors": {"whistle": "#0b8043"}})
+    assert warnings == []
+    assert not [e for e in env.world.log if e[0] == "patch_calendar_list"]
+
+    env.store.tokens[U]["scope"] = MATCHES_SCOPE  # nowa zgoda
+    view = await setup_view(env.deps, U)
+    assert view["color_access"] is True and not env.store.setups[U]["color_pending"]
+    cal = env.store.setups[U]["whistle_id"]
+    assert env.world.calendars[cal]["backgroundColor"] == "#0b8043"
 
 
 async def test_color_failure_warns_in_post_and_is_retried_later():

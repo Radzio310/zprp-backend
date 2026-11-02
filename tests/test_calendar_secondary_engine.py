@@ -262,7 +262,7 @@ async def test_setup_view_contract_shape_for_flag_on_and_off():
     view = await setup_view(env.deps, U)
     assert set(view) == {
         "feature_enabled", "connected", "email", "needs_migration",
-        "mode", "busy", "district_access", "calendars", "job",
+        "mode", "busy", "district_access", "color_access", "calendars", "job",
     }
     assert view["feature_enabled"] and view["connected"] and view["mode"] == "two" and view["busy"]
     assert [c["kind"] for c in view["calendars"]] == ["whistle", "stopwatch"]
