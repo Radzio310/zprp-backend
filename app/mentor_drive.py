@@ -29,7 +29,7 @@ from app import mentor_drive_rules as DR
 from app import mentor_panel_core as C
 from app import mentor_panel_rules as R
 from app.db import (database, mentor_clips, mentor_drive_connections, mentor_drive_files, mentor_drive_folders, mentor_drive_log,
-                    mentor_match_videos)
+                    mentor_match_videos, mentor_shots)
 from app.mentor_panel_auth import mentor_actor
 
 logger = logging.getLogger("app.mentor_drive")
@@ -251,6 +251,23 @@ def clip_saved_id(row: Dict[str, Any], stamp: Any) -> str:
     return f"cs-{row['id']}-{int(when.timestamp())}"
 
 
+async def _shot_title(shot_id: Any) -> Optional[str]:
+    try:
+        found = await C.one(select(mentor_shots.c.title).where(mentor_shots.c.id == shot_id))
+        return R.s((found or {}).get("title")) or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _log_shot_event(kind: str, job: Dict[str, Any], stamp: Any, *, actor_id: Optional[str] = None, system: bool = False) -> None:
+    """Dziennik Teczki dla zrzutów klatek (`shot_saved`, `shot_gone`); id deterministyczne, jak `clip_saved`."""
+    when = R.aware(stamp) or C.now()
+    await log_event(job["pair_id"], kind, actor_id=None if system else (actor_id or R.s(job.get("author_judge_id"))),
+                    row_id=f"{'ss' if kind == 'shot_saved' else 'sg'}-{job['id']}-{int(when.timestamp())}", at=when,
+                    details={"shot_id": job.get("clip_id"), "shot_title": await _shot_title(job.get("clip_id")),
+                             "match_label": job.get("match_label"), "file_name": job.get("name")})
+
+
 async def _log_clip_saved(job: Dict[str, Any], stamp: Any) -> None:
     await log_event(job["pair_id"], "clip_saved", actor_id=R.s(job.get("author_judge_id")), row_id=clip_saved_id(job, stamp),
                     at=R.aware(stamp), details={"clip_id": job.get("clip_id"), "clip_title": await _clip_title(job.get("clip_id")),
@@ -261,7 +278,8 @@ async def backfill_activity() -> int:
     """Jednorazowe, idempotentne uzupełnienie `clip_saved` z księgi zapisów (id deterministyczne; aktor = autor wpisu)."""
     made = 0
     have = {r["id"] for r in await C.rows(select(LOG.c.id).where(LOG.c.kind == "clip_saved").limit(100000))}
-    rows = await C.rows(select(FILES).where(FILES.c.state == "done").where(FILES.c.drive_file_id.is_not(None)).limit(20000))
+    rows = await C.rows(select(FILES).where(FILES.c.state == "done").where(FILES.c.variant != "shot")
+                        .where(FILES.c.drive_file_id.is_not(None)).limit(20000))
     titles: Dict[str, str] = {}
     ids = sorted({R.s(r["clip_id"]) for r in rows})
     for i in range(0, len(ids), 500):
@@ -875,6 +893,7 @@ STATUS_NAMES = {"waiting_mp4": "waiting", "queued": "queued", "working": "upload
 def file_view(row: Dict[str, Any], names: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     return {"id": row["id"], "clip_id": row["clip_id"], "match_id": row["match_id"], "match": row.get("match_label"),
             "category": row.get("category"), "name": row["name"], "title_card": row.get("variant") == "card",
+            "kind": "shot" if row.get("variant") == "shot" else "clip", "shot_id": row["clip_id"] if row.get("variant") == "shot" else None,
             "author": C.person(names, row.get("author_judge_id")), "thumb": row.get("thumb"),
             "web_view_link": row.get("web_view_link"), "status": STATUS_NAMES.get(R.s(row["state"]), R.s(row["state"])),
             "error": row.get("error"), "size": row.get("size"), "created_at": _iso(row.get("created_at")),
@@ -995,6 +1014,9 @@ async def verify_pair(pair_id: str, judge_id: str, *, clip_ids: Optional[List[st
         if out["result"] == "gone":
             await _mark_gone(row, stamp)
             changed += 1
+            if row.get("variant") == "shot":
+                await _log_shot_event("shot_gone", row, stamp, actor_id=judge_id, system=system)
+                continue
             await log_event(pair_id, "clip_gone", actor_id=None if system else judge_id, acted_by=None if system else acted_by,
                             details={"clip_id": row["clip_id"], "clip_title": await _clip_title(row["clip_id"]),
                                      "match_label": row.get("match_label"), "file_name": row.get("name")})
@@ -1184,6 +1206,84 @@ async def _enqueue_clip(ctx: Dict[str, Any], conn: Dict[str, Any], clip: Dict[st
     return {"clip_id": clip_id, "status": "waiting" if state == "waiting_mp4" else "queued", "file_id": file_id}
 
 
+class SaveShotsBody(BaseModel):
+    shot_ids: List[str] = Field(min_length=1, max_length=DR.BATCH_LIMIT)
+
+
+@router.post("/pairs/{pair_id}/drive/save-shots")
+async def save_shots(pair_id: str, body: SaveShotsBody, actor: Actor = Depends(mentor_actor)):
+    """Zapisuje zrzuty klatek w Teczce pary (PNG z zaznaczeniami i paskiem). Odpowiedź jak `save`: `{items: [{shot_id, status,
+    file_id?, web_view_link?, reason?, hint?}], accepted}`. Zrzut bez gotowego obrazu jest odrzucany (`SHOT_NO_IMAGE` itd.)."""
+    from app import mentor_clip_download as D
+    from app import mentor_shots as S
+
+    ctx = await _context(pair_id, actor, "video")
+    pid = ctx["pair_id"]
+    conn = await get_conn(pid)
+    if not conn:
+        raise derr(409, "DRIVE_NOT_CONNECTED", "Teczka pary nie jest jeszcze połączona z Dyskiem Google.")
+    if not conn.get("folder_id"):
+        raise derr(409, "NO_FOLDER", "Najpierw wybierz albo załóż folder pary.")
+    ids = list(dict.fromkeys(R.s(i) for i in body.shot_ids if R.s(i)))
+    by_id = {r["id"]: r for r in await C.rows(select(mentor_shots).where(mentor_shots.c.id.in_(ids)))}
+    shared = D.Context(ctx)
+    items: List[Dict[str, Any]] = []
+    accepted = 0
+    for shot_id in ids:
+        shot = by_id.get(shot_id)
+        if not shot or shot.get("deleted_at") is not None or R.s(shot.get("pair_id")) != pid:
+            items.append({"shot_id": shot_id, "status": "rejected", "reason": "NOT_FOUND"})
+            continue
+        outcome = await _enqueue_shot(ctx, shot, actor, shared, S)
+        accepted += 1 if outcome["status"] in ("queued", "requeued") else 0
+        items.append(outcome)
+    if accepted:
+        await _touch(ctx, "drive_save", None)
+        wake_worker()
+    return {"items": items, "accepted": accepted}
+
+
+async def _enqueue_shot(ctx: Dict[str, Any], shot: Dict[str, Any], actor: Actor, shared, S) -> Dict[str, Any]:
+    from app.mentor_clip_download_rules import folder_names
+
+    pid, shot_id = ctx["pair_id"], shot["id"]
+    try:
+        S._ready_or_error(shot)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        return {"shot_id": shot_id, "status": "rejected", "reason": R.s(detail.get("code")) or "SHOT_NO_IMAGE", "hint": detail.get("message")}
+    existing = await C.one(select(FILES).where(FILES.c.pair_id == pid).where(FILES.c.clip_id == shot_id).where(FILES.c.variant == "shot"))
+    if existing and existing["state"] == "done" and existing.get("drive_file_id"):
+        verified = R.aware(existing.get("verified_at")) if existing.get("verified_at") else None
+        if not verified or verified + VERIFY_FRESH < C.now():
+            try:  # plik mógł zniknąć z Dysku: sprawdzamy, zanim powiemy "już zapisane"
+                checked = await verify_pair(pid, actor.judge_id, clip_ids=[shot_id])
+                if any(i["status"] == "gone" for i in checked["items"]):
+                    existing = await C.one(select(FILES).where(FILES.c.id == existing["id"]))
+            except Exception:  # noqa: BLE001
+                pass
+    if existing and existing["state"] == "done":
+        return {"shot_id": shot_id, "status": "already_saved", "file_id": existing["id"], "web_view_link": existing.get("web_view_link")}
+    if existing and existing["state"] in DR.ACTIVE_STATES:
+        return {"shot_id": shot_id, "status": "already_queued", "file_id": existing["id"]}
+    info = await S.match_info(ctx, shot)
+    folder = folder_names(info["card"], info["category"])
+    values = {"match_id": shot["match_id"], "match_label": folder["match"], "category": folder["category"],
+              "name": DR.drive_name(S.SR.png_filename(shot.get("title"), info["code"], float(shot["at_s"]))), "thumb": None,
+              "author_judge_id": actor.judge_id, "state": "queued", "attempts": 0, "next_at": None, "lease_until": None,
+              "worker_id": None, "error": None, "updated_at": C.now()}
+    if existing:
+        await database.execute(update(FILES).where(FILES.c.id == existing["id"]).values(**values))
+        return {"shot_id": shot_id, "status": "requeued", "file_id": existing["id"]}
+    file_id = R.new_id()
+    try:
+        await database.execute(FILES.insert().values(id=file_id, pair_id=pid, clip_id=shot_id, variant="shot", created_at=C.now(), **values))
+    except Exception:  # noqa: BLE001 - wyścig dwóch kliknięć: unikalny (para, zrzut, wariant) trzyma jeden wiersz
+        again = await C.one(select(FILES).where(FILES.c.pair_id == pid).where(FILES.c.clip_id == shot_id).where(FILES.c.variant == "shot"))
+        return {"shot_id": shot_id, "status": "already_queued", "file_id": (again or {}).get("id")}
+    return {"shot_id": shot_id, "status": "queued", "file_id": file_id}
+
+
 async def _thumb_of(clip: Dict[str, Any]) -> Optional[str]:
     video = await C.one(select(mentor_match_videos.c.thumbnail_url).where(mentor_match_videos.c.id == clip.get("video_id")))
     return (video or {}).get("thumbnail_url") or None
@@ -1248,7 +1348,10 @@ async def _finish(job: Dict[str, Any], *, state: str, error: Optional[str] = Non
     except Exception:  # noqa: BLE001
         logger.warning("mentor: rewizja po zadaniu Dysku nieudana", exc_info=True)
     if state == "done":
-        await _log_clip_saved(job, extra.get("done_at"))
+        if job.get("variant") == "shot":
+            await _log_shot_event("shot_saved", job, extra.get("done_at"))
+        else:
+            await _log_clip_saved(job, extra.get("done_at"))
 
 
 async def claim_next(worker_id: str, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
@@ -1320,12 +1423,20 @@ async def ensure_path(access: str, conn: Dict[str, Any], job: Dict[str, Any]) ->
 async def upload(access: str, job: Dict[str, Any], worker_id: str, parent: str, key: str) -> Dict[str, Any]:
     """Strumień R2 -> Dysk (resumable, części po 8 MiB; cały plik nigdy nie leży w pamięci)."""
     stream, size = await asyncio.to_thread(open_mp4, key)
+    if size <= 0:
+        close = getattr(stream, "close", None)
+        if close:
+            close()
+        raise MissingMp4(key)
+    return await upload_stream(access, job, worker_id, parent, stream, size, key, "video/mp4")
+
+
+async def upload_stream(access: str, job: Dict[str, Any], worker_id: str, parent: str, stream, size: int, key: str, mime: str) -> Dict[str, Any]:
+    """Wspólny resumable upload ze strumienia (MP4 klipu z R2 albo PNG zrzutu z pamięci); zamyka strumień."""
     try:
-        if size <= 0:
-            raise MissingMp4(key)
-        meta = {"name": job["name"], "parents": [parent], "mimeType": "video/mp4",
+        meta = {"name": job["name"], "parents": [parent], "mimeType": mime,
                 "appProperties": {"baza_file": job["id"], "baza_clip": job["clip_id"]}}
-        session = await G.api().start_upload(access, meta, size, "video/mp4")
+        session = await G.api().start_upload(access, meta, size, mime)
         offset, buf = 0, b""
         while True:
             want = min(DR.CHUNK, size - offset)
@@ -1356,6 +1467,8 @@ async def upload(access: str, job: Dict[str, Any], worker_id: str, parent: str, 
 async def process(job: Dict[str, Any], worker_id: str) -> str:
     """Jedno zadanie. Zwraca `done` | `retry` | `failed` | `waiting` | `cancelled`."""
     pid = job["pair_id"]
+    if job.get("variant") == "shot":
+        return await process_shot(job, worker_id)
     try:
         clip = await C.one(select(mentor_clips).where(mentor_clips.c.id == job["clip_id"]))
         if not clip or clip.get("deleted_at") is not None:
@@ -1390,6 +1503,54 @@ async def process(job: Dict[str, Any], worker_id: str) -> str:
         return await _handle_google_error(job, exc)
     except Exception:  # noqa: BLE001 - nieznany błąd traktujemy jak chwilowy, z limitem prób
         logger.exception("mentor: wysyłka na Dysk nieudana (%s)", job["id"])
+        return await _retry_or_fail(job, "INTERNAL")
+
+
+async def process_shot(job: Dict[str, Any], worker_id: str) -> str:
+    """Zrzut klatki na Dysk: PNG z wypalonymi zaznaczeniami i paskiem (mecz, minuta, kategoria), renderowany tuż przed wysyłką
+    z obrazu w magazynie. Ten sam podfolder i ten sam dziennik co klipy (rodzaj wpisu `shot_saved`)."""
+    import io
+
+    from app import mentor_shots as S
+
+    pid = job["pair_id"]
+    try:
+        shot = await C.one(select(mentor_shots).where(mentor_shots.c.id == job["clip_id"]))
+        if not shot or shot.get("deleted_at") is not None:
+            await _finish(job, state="cancelled", error="SHOT_DELETED")
+            return "cancelled"
+        if shot.get("image_status") != "ready" or not shot.get("image_key"):
+            await _finish(job, state="failed", error="SHOT_NO_IMAGE")
+            return "failed"
+        access = await access_for(pid)
+        conn = await get_conn(pid)
+        if not conn or not conn.get("folder_id") or transfer.busy(conn):
+            await _release(job)
+            return "waiting"
+        parent = await ensure_path(access, conn, job)
+        found = await G.api().find_by_prop(access, parent, "baza_file", job["id"])
+        if not found:
+            lines = S.SR.banner_lines(job.get("match_label"), float(shot["at_s"]), job.get("category"))
+            try:
+                data = await S.render_from_row(shot, lines=lines)
+            except Exception:  # noqa: BLE001 - brak obrazu w magazynie albo błąd Pillow: ponawianie nie ma sensu
+                logger.warning("mentor: PNG zrzutu %s nie powstał", shot["id"])
+                await _finish(job, state="failed", error="SHOT_IMAGE_MISSING")
+                return "failed"
+            found = await upload_stream(access, job, worker_id, parent, io.BytesIO(data), len(data), shot["id"], "image/png")
+        await _finish(job, state="done", error=None, drive_file_id=found.get("id"), web_view_link=found.get("webViewLink"),
+                      size=int(found.get("size") or 0) or None, done_at=C.now())
+        return "done"
+    except NeedsReconnect:
+        await _release(job)
+        return "waiting"
+    except MissingMp4:
+        await _finish(job, state="failed", error="SHOT_IMAGE_MISSING")
+        return "failed"
+    except G.GoogleError as exc:
+        return await _handle_google_error(job, exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("mentor: wysyłka zrzutu na Dysk nieudana (%s)", job["id"])
         return await _retry_or_fail(job, "INTERNAL")
 
 

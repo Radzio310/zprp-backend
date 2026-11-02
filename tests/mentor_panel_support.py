@@ -20,6 +20,7 @@ from app.mentor_bastion_tables import define_tables as define_bastion
 from app.mentor_drive_tables import define_tables as define_drive
 from app.mentor_evaluation_tables import define_tables as define_evaluations
 from app.mentor_panel_tables import define_tables as define_panel
+from app.mentor_shot_tables import define_tables as define_shots
 from app.mentor_trybuna_tables import define_tables as define_trybuna
 from app.mentoring_tables import define_tables as define_mentoring
 from app.shared_match_tables import define_tables as define_shared
@@ -33,7 +34,7 @@ MODULES = (
     "app.mentoring", "app.proel_auth", "app.streams.store", "app.streams.worker", "app.mentor_panel_streams", "app.mentor_video_trash",
     "app.mentor_bastion_search", "app.mentor_trybuna", "app.mentor_trybuna_rules", "app.mentor_trybuna_feed", "app.mentor_trybuna_thumbs", "app.mentor_trybuna_rank", "app.mentor_trybuna_suggest",
     "app.delegate_sharing", "app.mentor_auto_found", "app.mentor_auto_found_rules",
-    "app.mentor_drive", "app.mentor_drive_google", "app.mentor_drive_transfer",
+    "app.mentor_drive", "app.mentor_drive_google", "app.mentor_drive_transfer", "app.mentor_shots",
     "app.shared_matches", "app.shared_match_pair", "app.shared_match_link", "app.shared_match_notify", "app.shared_match_rules", "app.mentor_proel_link", "app.mentor_veo",
 )
 
@@ -88,6 +89,8 @@ class Env:
         tables.update(zip(("mentor_evaluations", "mentor_evaluation_versions", "mentor_evaluation_requests", "mentor_match_videos"),
                           define_evaluations(metadata)))
         for table in define_panel(metadata):
+            tables[table.name] = table
+        for table in define_shots(metadata):
             tables[table.name] = table
         for table in define_bastion(metadata):
             tables[table.name] = table
@@ -155,6 +158,7 @@ class Env:
         self.shared_notify = importlib.import_module("app.shared_match_notify")
         self.proel_link = importlib.import_module("app.mentor_proel_link")
         self.veo = importlib.import_module("app.mentor_veo")
+        self.shots = importlib.import_module("app.mentor_shots")
         self.sent = []
 
         async def fake_notify(ctx, actor_id, title, body, **kwargs):

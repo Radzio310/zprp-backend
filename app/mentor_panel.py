@@ -324,6 +324,7 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
     watched = bool(card.get("watched"))
     from app.mentor_panel_media import video_list
     from app.mentor_panel_streams import room_streams
+    from app.mentor_shots import room_shots
     from app.mentor_video_trash import trash_payload
     from app.mentor_video_rules import clean_markers
 
@@ -395,7 +396,7 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
     for m in mentor_shapes:
         situations += R.situations_from_sheet(m["sheet"], "mentor", " + ".join(a["name"] for a in m["authors"]))
     return {
-        "match": card, "videos": videos, "clips": clips, "markers_from_app": markers,
+        "match": card, "videos": videos, "clips": clips, "shots": await room_shots(ctx, mid), "markers_from_app": markers,
         "timeline": timeline,
         "sheet_situations": situations,
         "delegate_sheets": [delegate_sheet_shape(r) for r in delegate], "mentor_sheets": mentor_shapes,
@@ -542,7 +543,7 @@ async def sheets(pair_id: str, season: str = Query("", max_length=20), actor: Ac
 
 # ─── Zmiany na żywo i obecność ──────────────────────────────────────────────
 
-ALL_SCOPES = ["matches", "clips", "threads", "compilations", "sheets", "videos", "categories", "reports", "panel", "drive"]
+ALL_SCOPES = ["matches", "clips", "shots", "threads", "compilations", "sheets", "videos", "categories", "reports", "panel", "drive"]
 
 
 @router.get("/pairs/{pair_id}/changes")

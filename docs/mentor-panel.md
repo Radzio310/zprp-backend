@@ -618,3 +618,99 @@ Te same pola co reszta, plus: `play_url` (najlepszy MP4 1080p `standard`; czasow
 
 ### 12.5 Nie sprawdzono
 Cięcia ffmpeg na prawdziwym pliku Veo (lokalnie brak ffmpeg z https/mov, Dockera nie uruchamiano); sprawdzono parser na prawdziwym nagraniu i `206` na Range. Czy Veo zmienia adres pliku w czasie dłuższym niż 6 h, nie wiadomo.
+
+## 13. Zrzuty klatek (02.11.2026)
+
+Zrzut klatki to nowy byt w meczu pary: moment nagrania (`at_s` z ułamkiem sekundy) z rysunkiem, własnym opisem, kategoriami i wątkiem. Leży wśród klipów, ale jest osobną tabelą (`mentor_shots`, `app/mentor_shot_tables.py`); może być **samodzielny** albo **przy klipie**. Decyzje właściciela: pamięć `zrzuty-klatek-decyzje`. Kod: `app/mentor_shots.py` (trasy, dołączanie, źródła obrazu), `app/mentor_shot_rules.py` (reguły czyste), `app/mentor_shot_render.py` (Pillow), Teczka w `app/mentor_drive.py`; testy `tests/test_mentor_shots.py`. Prefiks tras `/mentor-panel`, autoryzacja i `act_as` jak przy klipach, błędy `{detail: {code, message}}` po polsku (Teczka: koperta z `error`, jak reszta Teczki).
+
+### 13.1 Obiekt `Shot`
+```json
+{
+  "id": "9f2c...", "pair_id": "pair-1", "match_id": "m1", "video_id": "v1",
+  "at_s": 110.534, "title": "Faul w ataku", "note": "Ręka na biodrze", "category_ids": ["cat1"],
+  "shapes": [ {"type": "ellipse", "cx": 0.5, "cy": 0.5, "rx": 0.1, "ry": 0.15, "color": "#ff0000", "width": 0.005} ],
+  "clip_id": "c1", "attach_mode": "auto",
+  "image_status": "ready", "image_reason": null, "image_message": null, "image_source": "browser",
+  "image_url": "https://...podpisany...", "thumb_url": "https://...podpisany...", "width": 1280, "height": 720,
+  "author": {"judge_id": "101", "name": "Anna Nowak"}, "acted_by": null,
+  "created_at": "...", "updated_at": "...", "can_edit": true,
+  "threads": {"total": 1, "open": 1, "comments": 2}
+}
+```
+- `at_s`: sekundy od początku nagrania, zaokrąglone do milisekundy, `0..czas nagrania` (bez znanej długości do 6 h). Po utworzeniu **niezmienne** (inny moment = nowy zrzut).
+- `title` do 80 znaków, `note` do 1000; długich myślników serwer nie przyjmuje (zamienia na `-`). `category_ids` jak przy klipach (kategorie pary albo globalne, bez zarchiwizowanych).
+- `attach_mode`: `auto` (serwer sam dobiera klip), `manual` (ktoś dołączył do klipu), `detached` (ktoś odłączył; nie wraca sam). `clip_id` null = zrzut samodzielny.
+- `image_status`: `ready` (jest obraz) | `processing` (serwer wycina klatkę, klient pyta `GET /shots/{id}` co 1-2 s) | `none` (brak obrazu, patrz `image_reason`) | `failed` (próba się nie udała, `image_reason` mówi dlaczego; można ponowić). `processing` starsze niż 5 minut serwer zwraca jako `failed` z `FRAME_TIMEOUT` (przerwane restartem).
+- `image_reason` (kod) i `image_message` (polski tekst do pokazania wprost): `YOUTUBE_NO_IMAGE`, `LINK_NO_IMAGE`, `BASTION_OFF`, `BASTION_NOT_CONNECTED`, `BASTION_AUTH_REQUIRED`, `BASTION_UNAVAILABLE`, `BASTION_FRAME_FAILED`, `VIDEO_NOT_READY`, `FFMPEG_MISSING`, `FRAME_FAILED`, `FRAME_TIMEOUT`, `STORAGE_OFF`, `VEO_PRIVATE`, `VEO_GONE`, `VEO_PROCESSING`, `VEO_UNAVAILABLE`.
+- `image_source`: `browser` (wgrane z przeglądarki) | `server` (klatka wycięta przez serwer) | null. `image_url` i `thumb_url` to adresy PODPISANE (ważne ok. 6 h, JPEG): wolno je wyświetlać, nie zapisuj ich po stronie klienta ani w logach. Gdy `image_status != ready`, są null. `width`/`height` to wymiary obrazu w pikselach (kształty liczone względem tego kadru).
+- Kosz jak przy klipach: `DELETE` ustawia `deleted_at`, wiersz zostaje, z list znika, obraz w magazynie jest kasowany, wątki zostają.
+
+### 13.2 `shapes` (kształty, współrzędne 0..1 względem kadru)
+Lista do **40** kształtów, JSON do **48 KB**. Każdy ma `type`, `color` (`#rrggbb`, domyślnie `#ffd60a`), `width` (grubość linii jako ułamek SZEROKOŚCI obrazu, `0.001..0.05`, domyślnie `0.005`; na małych obrazach serwer wymusza minimum 2 px) i opcjonalne `id` (do 40 znaków, klient może nosić własny klucz). `x`/`cx`/`rx` są względem szerokości, `y`/`cy`/`ry` względem wysokości. Współrzędne poza `0..1`, `NaN`, nieznane typy i złe kolory dają `422 SHOT_SHAPES_INVALID` z numerem zaznaczenia (`"Zaznaczenie nr 2: ..."`); nic nie jest po cichu poprawiane.
+
+| `type` | pola | uwagi |
+|---|---|---|
+| `ellipse` | `cx, cy, rx, ry` | obrys (nie koło: `rx` i `ry` osobno), promienie > 0 |
+| `arrow` | `x1, y1, x2, y2` | grot w punkcie `x2,y2`; zerowa długość odrzucona |
+| `text` | `x, y, text, size` | `x,y` lewy górny róg; `text` do 120 znaków, jedna linia; `size` = wysokość tekstu jako ułamek WYSOKOŚCI obrazu `0.02..0.2` (domyślnie `0.05`); serwer przesuwa tekst, żeby mieścił się w kadrze |
+| `free` | `points: [[x, y], ...]` | rysunek odręczny, 2 do 300 punktów |
+| `spotlight` | `cx, cy, rx, ry, dim` | reflektor: wszystko poza elipsą przyciemnione, `dim 0.2..0.9` (domyślnie `0.6`); najwyżej **1** na zrzut; `color`/`width` rysują obwódkę |
+| `loupe` | `cx, cy, r, zoom` | lupa w miejscu: koło o promieniu `r` (ułamek SZEROKOŚCI, `0.02..0.5`, domyślnie `0.1`) pokazuje powiększenie `zoom` (`1.5..8`, domyślnie `2.5`) okolicy `cx,cy`; najwyżej **3** na zrzut |
+
+Przykład:
+```json
+[
+  {"type": "ellipse", "cx": 0.42, "cy": 0.55, "rx": 0.06, "ry": 0.12, "color": "#ff3b30", "width": 0.006},
+  {"type": "arrow", "x1": 0.7, "y1": 0.2, "x2": 0.46, "y2": 0.45, "color": "#ffd60a"},
+  {"type": "text", "x": 0.05, "y": 0.06, "text": "Kontakt w polu", "color": "#ffffff", "size": 0.06},
+  {"type": "free", "points": [[0.1, 0.8], [0.15, 0.78], [0.22, 0.8]], "color": "#34c759", "width": 0.008},
+  {"type": "spotlight", "cx": 0.42, "cy": 0.55, "rx": 0.15, "ry": 0.25, "dim": 0.7},
+  {"type": "loupe", "cx": 0.62, "cy": 0.4, "r": 0.1, "zoom": 3}
+]
+```
+Kolejność w PNG: reflektor, lupy, potem wszystkie linie i tekst (lupa i reflektor dostają obwódkę w kolorze kształtu). Każda linia ma ciemną obwódkę, żeby było ją widać na jasnej murawie i w ciemnej hali. Ten sam rysunek klient rysuje na żywym filmie (YouTube bez obrazu) tym samym kontraktem.
+
+### 13.3 Trasy
+- `GET /pairs/{pairId}/shots?match_id=&clip_id=&video_id=&category=&author=&q=&standalone=` → `{shots: Shot[], rev}` (od najnowszych, do 1000; `standalone=true` = tylko bez klipu). Dostęp: każdy z pary i mentorów oraz komisja (odczyt).
+- `GET /shots/{id}` → `Shot` (tym pytamy o `processing`).
+- `POST /pairs/{pairId}/shots` body `{match_id, video_id, at_s, title?, note?, category_ids?, shapes?, clip_id?, attach_mode?, server_frame?}` → `Shot`. Akcja `create` (para, mentor, administrator; komisja nie). Dołączanie: bez `clip_id` i `attach_mode` = `auto` (patrz 13.4); `clip_id` = `manual` (klip musi być z tego samego meczu: `422 SHOT_CLIP_MATCH`, `404 NOT_FOUND`); `attach_mode: "detached"` = samodzielny. Inne `attach_mode` przy tworzeniu: `422 SHOT_ATTACH_MODE`. `server_frame: true` od razu zamawia obraz z serwera (13.5). Limit **300** zrzutów na mecz (`409 SHOT_LIMIT`). Błędy: `422 SHOT_AT|SHOT_AT_RANGE|SHOT_SHAPES_INVALID|SHOT_SHAPES_TOO_MANY|SHOT_SHAPES_TOO_LARGE`, `404 VIDEO_NOT_FOUND`.
+- `PATCH /shots/{id}` body (wszystko opcjonalne) `{title, note, category_ids, shapes, clip_id, attach_mode}` → `Shot`. Tylko autor albo administrator (jak klipy: `403`). `clip_id: "<id>"` = dołącz ręcznie (`manual`), `clip_id: null` = odłącz (`detached`), `attach_mode: "auto"` = wróć do automatu (serwer wybiera od nowa). `shapes` zastępuje całą listę (`[]` czyści rysunek). `at_s` nie zmienia się.
+- `DELETE /shots/{id}` → `{ok: true}`.
+- `POST /shots/{id}/image` obraz z przeglądarki (np. `canvas.toBlob`): **surowe ciało** żądania, nagłówek `Content-Type: image/jpeg` albo `image/webp` (inne typy `415 SHOT_IMAGE_TYPE`; typ musi zgadzać się z magicznymi bajtami pliku). Limit **8 MB** (`413 SHOT_IMAGE_TOO_LARGE`), boki `64..4096 px` (`422 SHOT_IMAGE_SMALL|SHOT_IMAGE_DIMENSIONS`), uszkodzony plik `422 SHOT_IMAGE_CORRUPT`, pusty `422 SHOT_IMAGE_EMPTY`, brak magazynu `503 STORAGE_OFF`. Serwer dekoduje obraz, usuwa metadane, zapisuje JPEG (boki do 3840 px) i miniaturę 480 px; odpowiedź to `Shot` z `image_status: "ready"`, `image_source: "browser"`. Ponowne wgranie zastępuje obraz.
+- `POST /shots/{id}/frame` obraz z serwera (13.5) → `Shot` z `processing` (albo od razu `none`/`failed` z powodem). Idempotentne, gdy zadanie trwa.
+- `GET /shots/{id}/png?banner=false&shapes=true` pobranie PNG: odpowiedź to **sam plik** `image/png` z `Content-Disposition: attachment; filename="..."` (nazwa `<numer meczu> <tytuł> <mm-ss>.png`), `Cache-Control: private, no-store`. Pobierz przez `fetch` z nagłówkiem autoryzacji i zapisz jako blob (adresu podpisanego tu nie ma). `shapes=true` (domyślnie) wypala zaznaczenia (reflektor i lupa też), `shapes=false` oddaje samą klatkę; `banner=true` dokleja POD kadrem pasek (mecz z numerem, czas nagrania `mm:ss`, nazwa pierwszej kategorii), kadr zostaje nietknięty. Bez gotowego obrazu: `409 SHOT_NO_IMAGE` (z `message` z powodem, np. tekst o YouTube), `409 SHOT_IMAGE_PROCESSING`, `409 SHOT_IMAGE_FAILED`. Każdy z pary, mentorów i komisja.
+- Wątek przy zrzucie: istniejące `POST /pairs/{pairId}/threads` z `target_kind: "shot"`, `target_id: <id zrzutu>` (te same pola, follow/mute, wzmianki, odpowiedzi, push). `GET .../threads?target_kind=shot&target_id=` listuje. `Thread` zrzutu ma dodatkowo `shot: {id, match_id, video_id, at_s, title, clip_id, image_status, thumb_url, deleted}`; wątek zrzutu nie ma `clip`/`anchor`. `deleted: true` po usunięciu zrzutu (wątek zostaje). `404 NOT_FOUND` dla nieistniejącego albo usuniętego zrzutu. Push ma `shotId` (obok `threadId`), link web `/mentor/{pair}/klipy?zrzut={id}&watek={threadId}`.
+- Zmiany na żywo: każdy zapis podbija rewizję ze scope `shots` (jest w `ALL_SCOPES`, `GET /changes` go zwraca).
+
+### 13.4 Dołączanie do klipów (automat)
+- Nowy zrzut `auto`: dołącza się do klipu **na tym samym nagraniu** (`video_id`), w którego zakresie leży (`start_s <= at_s <= end_s`, brzegi włącznie); przy kilku wygrywa **najkrótszy** klip, przy remisie najstarszy.
+- Nowy albo zmieniony (zmiana zakresu) klip zgarnia zrzuty `auto` bez klipu, które w nim leżą. Zrzut `auto` już przy tym klipie, który po zmianie zakresu wypadł z przedziału, wraca do stanu bez klipu (zostaje `auto`, więc może go zgarnąć inny klip). `manual` i `detached` zostają zawsze nietknięte (ręcznie dołączony przeżywa zmianę zakresu, odłączony ręcznie nie wraca sam).
+- Usunięcie klipu zostawia zrzuty samodzielne: `auto` może od razu zostać zgarnięty przez inny klip w zakresie, `manual` staje się `detached`, `detached` bez zmian.
+- Liczba zrzutów przy klipie: `Clip.shots_count` (liczba żywych zrzutów z `clip_id` tego klipu) jest w `GET /pairs/{id}/clips`, w `clips` pokoju meczu, w zestawieniach i wszędzie tam, gdzie klip idzie przez wspólny kształt; klipy-znaczniki z aplikacji (tylko do odczytu) mają `0`.
+- `GET /pairs/{pairId}/matches/{matchId}` (pokój) dostaje listę `shots: Shot[]` (rosnąco po `at_s`), a każdy wątek meczu ze zrzutu ma `shot`.
+
+### 13.5 Źródła obrazu
+| źródło nagrania | `image_status` po utworzeniu | obraz z serwera (`/frame`) |
+|---|---|---|
+| własny plik (wgrany) | `none` | tak: ffmpeg na pliku z R2, `-ss` PRZED `-i`, jedna klatka, szerokość do 1920 px |
+| Veo | `none` | tak: ffmpeg na adresie MP4 z `c.veocdn.com` (adres odświeżany i sprawdzany jak przy klipach MP4) |
+| Bastion | `none` | tak, o ile `BASTION_ENABLED` i connector działa: istniejące `POST /frame` connectora z `at_s`, zakres domyślny, potem osobisty (konto użytkownika); do 80 s |
+| YouTube | `none`, `YOUTUBE_NO_IMAGE` | nie: zrzut zostaje momentem z rysunkiem na żywym filmie |
+| inny link (Vimeo itd.) | `none`, `LINK_NO_IMAGE` | nie |
+
+- Obraz z serwera powstaje w tle: odpowiedź `POST` ma `processing`, gotowość klient sprawdza przez `GET /shots/{id}`. Przy porażce `failed` + `image_reason` (VEO_*, BASTION_*, `VIDEO_NOT_READY`, `FFMPEG_MISSING`, `FRAME_FAILED`, `FRAME_TIMEOUT`, `STORAGE_OFF`); `POST /frame` ponawia. Adresy źródeł (Veo, R2) nigdy nie trafiają do logów ani komunikatów.
+- Zalecany przepływ klienta: na Veo i plikach i tak najpierw spróbować `canvas` w przeglądarce (`POST /image`); gdy się nie da (obca ramka, CORS), `POST /frame` albo `server_frame: true` przy tworzeniu. Dla Bastionu i YouTube przeglądarka nie odczyta obrazu z obcej ramki: Bastion ma `/frame` (dokładność zależy od connectora, patrz 13.8), YouTube nie ma obrazu wcale.
+
+### 13.6 Teczka (Dysk Google)
+`POST /pairs/{pairId}/drive/save-shots` body `{shot_ids: [..]}` (do 50) → `{items: [{shot_id, status, file_id?, web_view_link?, reason?, hint?}], accepted}`; `status`: `queued`, `requeued`, `already_queued`, `already_saved`, `rejected` (`reason`: `NOT_FOUND`, `SHOT_NO_IMAGE`, `SHOT_IMAGE_PROCESSING`, `SHOT_IMAGE_FAILED`, z polskim `hint`). Reszta jak `drive/save`: flaga `MENTOR_DRIVE_ENABLED`, akcja `video`, `409 DRIVE_NOT_CONNECTED|NO_FOLDER`, `403 DRIVE_OFF`, odmowa dla obcych i komisji.
+- Zrzut idzie tą samą kolejką (`mentor_drive_files`, wariant `shot`, `clip_id` = id zrzutu) do tego samego podfolderu co klipy według układu pary (domyślnie mecz > kategoria, nazwy z planu pobierania). Plik to PNG z wypalonymi zaznaczeniami **i paskiem** (mecz, czas nagrania, kategoria), renderowany tuż przed wysyłką; nazwa jak w pobraniu. Zmiana rysunku po zapisie nie nadpisuje pliku na Dysku (żeby zapisać nową wersję, trzeba usunąć plik z Dysku; `drive/verify` oznaczy go `gone`, potem `save-shots` zapisze od nowa).
+- `GET /drive/tree`: element ma `kind` (`clip` | `shot`) i `shot_id` (dla zrzutów; `clip_id` jest wtedy id zrzutu, `title_card` false).
+- Dziennik (`GET /drive/activity`): nowe rodzaje `shot_saved` (przy udanym zapisie) i `shot_gone` (gdy `drive/verify` stwierdzi brak pliku), `details: {shot_id, shot_title, match_label, file_name}`.
+
+### 13.7 Uprawnienia i prywatność
+Odczyt (`GET`, PNG): każdy z pary, mentorzy, komisja, administrator; zapis (`create`): para, mentor, administrator; zmiana, usunięcie, obraz, `frame`: autor albo administrator (`403` dla pozostałych), tak jak klipy. Zrzut z cudzej pary: `403 NO_ACCESS`. Adresy podpisane (`image_url`, `thumb_url`, adresy źródeł) nie trafiają do logów ani do dziennika. Nie ma publicznego linku do zrzutu (decyzja właściciela).
+
+### 13.8 Dane, migracja, nie sprawdzono
+- Tabela `mentor_shots` powstaje z `metadata.create_all`, indeksy domyka idempotentne `MIGRATIONS` (`CREATE INDEX IF NOT EXISTS`, bezpieczne przy każdym starcie). Zmiany w istniejących tabelach: brak.
+- Obrazy w R2 pod `mentor/<para>/shots/<id>-<ms>.jpg` i `-thumb.jpg`; stary obiekt kasowany po udanej wymianie i po usunięciu zrzutu.
+- **Nie sprawdzono na prawdziwych źródłach**: lokalnie nie ma ffmpeg, a Docker i produkcja nie były uruchamiane. Wycinanie klatki z pliku i Veo przetestowano na atrapie `subprocess` (kontrola argumentów: `-ss` przed `-i`, `-frames:v 1`, opcje https) i na obrazach z Pillow; prawdziwego ffmpeg na prawdziwym MP4 nie uruchomiono. Klatka z Bastionu to istniejące `POST /frame` connectora (zrobione dla miniatur kaset: ffmpeg na playliście HLS, zapas to zrzut ekranu odtwarzacza w Chromium; connector zaokrągla zwracane `at_s` do 0,1 s i przycina do `długość - 1 s`), więc dokładność co do klatki NIE jest gwarantowana dla Bastionu, a z samym connectorem nie rozmawiano. Rysowanie PNG sprawdzono pikselami (kolory kształtów, przyciemnienie reflektora, powiększenie lupy, pasek) na rozmiarach 160 do 3000 px; wyglądu na prawdziwej klatce nie oceniano wzrokiem.

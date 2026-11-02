@@ -321,6 +321,13 @@ async def clip_payload(ctx: Dict[str, Any], clip_id: str) -> Dict[str, Any]:
     return (await C.clips_payload(ctx, [row]))[0]
 
 
+async def _reattach_shots(clip: Dict[str, Any]) -> None:
+    """Zrzuty klatek: nowy albo zmieniony klip zgarnia zrzuty `auto` bez klipu (`app/mentor_shots.py`)."""
+    from app.mentor_shots import on_clip_saved
+
+    await on_clip_saved(clip)
+
+
 async def _with_offer(payload: Dict[str, Any], row: Dict[str, Any], video: Optional[Dict[str, Any]], actor: Actor) -> Dict[str, Any]:
     """Dla dialogu „Zapisz też jako MP4”: czas, limit, połączenie i konto (tylko nagrania Bastion przy włączonej fladze)."""
     from app import mentor_bastion_jobs as J
@@ -355,6 +362,7 @@ async def create_clip(pair_id: str, body: ClipBody, actor: Actor = Depends(mento
     }
     await database.execute(mentor_clips.insert().values(**row))
     await C.touch(ctx, actor.judge_id, "clip_created", "clips", card["match_id"], {"id": row["id"]})
+    await _reattach_shots(row)
     from app import mentor_bastion_jobs as J
 
     # Bastion: MP4 powstaje tylko na wybór użytkownika (`mp4: true`), w tej samej operacji. Domyślnie klip jest wirtualny.
@@ -406,6 +414,8 @@ async def update_clip(clip_id: str, body: ClipPatch, actor: Actor = Depends(ment
     await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip_id).values(**values))
     audit = {"id": clip_id, **{k: values[k] for k in ("important", "to_discuss") if k in values}}
     await C.touch(ctx, actor.judge_id, "clip_updated", "clips", row["match_id"], audit)
+    if range_changed:
+        await _reattach_shots({**row, **values})
     if newly_discuss:
         await _notify_clip_to_discuss(ctx, actor, row)
     if bastion and (range_changed or patch.get("mp4")):
@@ -446,6 +456,9 @@ async def delete_clip(clip_id: str, actor: Actor = Depends(mentor_actor)):
     except Exception:  # noqa: BLE001
         pass
     await C.touch(ctx, actor.judge_id, "clip_deleted", "clips", row["match_id"], {"id": clip_id})
+    from app.mentor_shots import on_clip_deleted
+
+    await on_clip_deleted(row)  # zrzuty przy klipie zostają samodzielne
     return {"ok": True}
 
 
@@ -519,6 +532,8 @@ async def list_clips(pair_id: str, category: str = Query("", max_length=80), mat
             extra = [c for c in extra if category in c["category_ids"]]
         if needle:
             extra = [c for c in extra if needle in f"{R.s(c.get('title'))} {R.s(c.get('note'))}".casefold()]
+        for c in extra:
+            c.setdefault("shots_count", 0)
         clips += extra
     return {"clips": clips, "rev": ctx["rev"]}
 
@@ -561,6 +576,7 @@ async def clip_from_marker(pair_id: str, body: FromMarkerBody, actor: Actor = De
                 "acted_by": actor.acted_by, "created_at": stamp, "updated_at": stamp, "mp4_status": "none"})
     await database.execute(mentor_clips.insert().values(**row))
     await C.touch(ctx, actor.judge_id, "clip_created", "clips", row["match_id"], {"id": row["id"], "marker_id": body.marker_id})
+    await _reattach_shots(row)
     return await clip_payload(ctx, row["id"])
 
 
@@ -820,6 +836,13 @@ async def _thread_target(ctx: Dict[str, Any], kind: str, target_id: str) -> Opti
         if not clip or clip["pair_id"] != ctx["pair_id"] or clip.get("deleted_at") is not None:
             raise C.err(404, "NOT_FOUND", "Nie ma takiego klipu.")
         return clip["match_id"]
+    if kind == "shot":
+        from app.db import mentor_shots
+
+        shot = await C.one(select(mentor_shots).where(mentor_shots.c.id == target_id))
+        if not shot or shot["pair_id"] != ctx["pair_id"] or shot.get("deleted_at") is not None:
+            raise C.err(404, "NOT_FOUND", "Nie ma takiego zrzutu.")
+        return shot["match_id"]
     if kind == "compilation":
         comp = await C.one(select(mentor_compilations).where(mentor_compilations.c.id == target_id))
         if not comp or comp["pair_id"] != ctx["pair_id"]:
@@ -829,7 +852,7 @@ async def _thread_target(ctx: Dict[str, Any], kind: str, target_id: str) -> Opti
         if target_id != ctx["pair_id"]:
             raise C.err(422, "THREAD_TARGET", "Wątek pary wskazuje tę parę.")
         return None
-    raise C.err(422, "THREAD_TARGET", "Wątek dotyczy meczu, klipu, zestawienia albo pary.")
+    raise C.err(422, "THREAD_TARGET", "Wątek dotyczy meczu, klipu, zrzutu, zestawienia albo pary.")
 
 
 def _comment_values(ctx: Dict[str, Any], body: Any, *, partial: bool = False,
@@ -911,6 +934,10 @@ async def _notify_comment(ctx: Dict[str, Any], actor: Actor, thread: Dict[str, A
         if local is not None:
             extra["clipS"] = f"{max(0.0, local):.2f}"
             extra["videoS"] = f"{float(anchor['video_s']):.2f}"
+    elif thread.get("target_kind") == "shot":
+        # Zrzut klatki: web otwiera Bibliotekę ze zrzutem i wątkiem, aplikacja - zrzut (`shotId`).
+        link = f"{C.WEB_BASE}/{ctx['pair_id']}/klipy?zrzut={thread['target_id']}&watek={thread['id']}"
+        extra["shotId"] = R.s(thread["target_id"])
     else:
         link = f"{C.WEB_BASE}/{ctx['pair_id']}" + (f"/mecz/{thread['match_id']}" if thread.get("match_id") else "")
     mentioned = {m for m in mentions if m != me}

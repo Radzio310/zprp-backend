@@ -4683,6 +4683,10 @@ mentor_auto_found, mentor_auto_found_seen = _define_mentor_auto_found_tables(met
 from app.mentor_drive_tables import define_tables as _define_mentor_drive_tables
 mentor_drive_connections, mentor_drive_files, mentor_drive_folders, mentor_drive_log = _define_mentor_drive_tables(metadata)
 
+# Zrzuty klatek Mentora (02.11.2026): tabela `mentor_shots` (`app/mentor_shot_tables.py`, kontrakt `docs/mentor-panel.md` sekcja 13).
+from app.mentor_shot_tables import define_tables as _define_mentor_shot_tables
+(mentor_shots,) = _define_mentor_shot_tables(metadata)
+
 # Mecze ręczne wspólne (31.10.2026) i ręczne podpięcie ProEla w panelu pary (`app/shared_match_tables.py`, kontrakt `docs/mecze-wspolne-api.md`).
 from app.shared_match_tables import define_tables as _define_shared_match_tables
 (
@@ -5369,6 +5373,19 @@ for _statement in _MENTOR_DRIVE_MIGRATIONS:
         import logging as _logging
 
         _logging.getLogger("app.db").warning("Migracja Teczki pary nie przeszla: %s", _statement, exc_info=True)
+
+# Zrzuty klatek: indeksy `mentor_shots` (`app/mentor_shot_tables.py`) - idempotentne, kazda migracja osobno.
+from app.mentor_shot_tables import MIGRATIONS as _MENTOR_SHOT_MIGRATIONS
+
+for _statement in _MENTOR_SHOT_MIGRATIONS:
+    try:
+        with engine.connect() as _conn:
+            _conn.execute(text(_statement))
+            _conn.commit()
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("app.db").warning("Migracja zrzutow klatek nie przeszla: %s", _statement, exc_info=True)
 
 # Trybuna: klucz idempotencji nagrań i jego unikalny indeks (`app/mentor_trybuna_tables.py`) - kazda migracja osobno.
 from app.mentor_trybuna_tables import MIGRATIONS as _MENTOR_TRYBUNA_MIGRATIONS
