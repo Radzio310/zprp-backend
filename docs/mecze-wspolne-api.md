@@ -32,11 +32,11 @@ Klient pokazuje różnicę (`current.match`, `current.log[0]` - kto i co zmieni�
 ## A. Mecze wspólne (`/shared-matches`)
 
 ### Kształty
-**match**: `id, card_id, creator_id, creator_name, rev, code, competition, home_name, away_name, match_at, date_key, hall, city,
-zprp_match_id, proel_key, result, extra, local_id (tylko twórca), created_at, updated_at, updated_by, updated_by_name`.
+**match**: `id, card_id, creator_id, creator_name, rev, code, competition, home_name, away_name, match_at, date_key, hall, city, match_kind, age_group,
+zprp_match_id, proel_key, key_stem, result, extra, local_id (tylko twórca), created_at, updated_at, updated_by, updated_by_name`.
 `result` = `null` albo `{score_home, score_away, half_home, half_away, by, by_name, at}` (kto i kiedy wpisał).
 **crew[]**: `{id (member_id), judge_id|null, manual (true = wpis ręczny bez konta, bez dostępu), name, photo_url, role, role_label, added_by, added_at}`.
-**my**: `{member_id, role, hidden, hidden_at, counts_in_stats, added_by, added_by_name}` (tylko własny stan; cudzych ukryć/flag nie widać).
+**my**: `{member_id, role, hidden, hidden_at, counts_in_stats, kind_stats_applied, added_by, added_by_name}` (tylko własny stan; cudzych ukryć/flag nie widać).
 **detail** (odpowiedź szczegółu i większości zapisów): `{match, crew[], my, can:{edit,delete,remove_members,hide}, log[], rev}`.
 `log[]`: `{id, rev, actor_id, actor_name, at, action, changes:[{field,from,to}]}`, najnowsze pierwsze (do 60).
 Akcje dziennika: `create, edit, result, result_clear, crew_add, crew_edit, crew_remove, join, zprp_link, proel_link, delete`.
@@ -48,7 +48,7 @@ Akcje dziennika: `create, edit, result, result_clear, crew_add, crew_edit, crew_
 | `GET /shared-matches?include_hidden=false&limit=300` | - | `{matches:[{match,crew,my}], count, hidden_count}` (bez usuniętych; ukryte tylko z `include_hidden=true`) | 401 |
 | `GET /shared-matches/{id}` | - | detail | 404 `MATCH_NOT_FOUND`, 410 `MATCH_DELETED` (członek, mecz usunięty) |
 | `POST /shared-matches` | `CreateBody` (niżej) | `{ok, existing, skipped[], ...detail}`; przy idempotentnym trafieniu `existing:true`; gdy lokalny mecz był już usunięty przez twórcę: `{ok, existing:true, deleted:true, id}` | 409 `DUPLICATE_MATCH`, 422 `VALIDATION`/`NOT_APP_USER`/`MANUAL_NAME_REQUIRED` |
-| `PUT /shared-matches/{id}` | `{base_rev, code?, competition?, home_name?, away_name?, match_at?, hall?, city?, extra?}` (tylko wysłane pola) | `{ok, unchanged, ...detail}` | 409 `REV_CONFLICT`, 422 `BASE_REV_REQUIRED`, 404 |
+| `PUT /shared-matches/{id}` | `{base_rev, code?, competition?, home_name?, away_name?, match_at?, hall?, city?, match_kind?, age_group?, extra?}` (tylko wysłane pola) | `{ok, unchanged, ...detail}` | 409 `REV_CONFLICT`, 422 `BASE_REV_REQUIRED`, 404 |
 | `DELETE /shared-matches/{id}?base_rev=` | `base_rev` opcjonalny | `{ok, deleted:true}`; reszta obsady dostaje push i przy następnym odczycie 410 | 403 `CREATOR_ONLY`, 409 (gdy podano `base_rev`) |
 | `PUT /shared-matches/{id}/result` | `{base_rev, score_home, score_away, half_home?, half_away?}` albo `{base_rev, clear:true}` | `{ok, unchanged, ...detail}` (`match.result.by/at`) | 409, 422 (oba wyniki wymagane, 0-199) |
 | `POST /shared-matches/{id}/crew` | `{base_rev, add:[{judge_id? , name?, role}]}` | `{ok, unchanged, skipped[], ...detail}`; `skipped[]`: `{judge_id, reason: ALREADY_MEMBER\|BLOCKED}` | 409 `ADD_BLOCKED` (gdy nikogo nie dodano z powodu blokady), 422 `NOT_APP_USER` (`judge_ids[]`), 422 `MANUAL_NAME_REQUIRED`, 409 `REV_CONFLICT` |
@@ -58,15 +58,14 @@ Akcje dziennika: `create, edit, result, result_clear, crew_add, crew_edit, crew_
 | `POST /shared-matches/{id}/restore` | - | `{ok, hidden:false}` | 404 |
 | `PUT /shared-matches/{id}/stats` | `{counts_in_stats: bool}` | `{ok, counts_in_stats}` (per członek, domyślnie false, `rev` bez zmian) | 404 |
 | `PUT /shared-matches/{id}/zprp` | `{base_rev, zprp_match_id: "123456"\|null}` | `{ok, unchanged, ...detail}` | 422 (tylko liczbowe IdZawody), 409 |
-| `PUT /shared-matches/{id}/proel` | `{base_rev, proel_key: "OSK/12"\|"T-XXXXXXXX/NUM"\|null}` | `{ok, unchanged, ...detail}`. Wołać automatycznie, gdy ktoś prowadzi ProEla z meczu wspólnego. To wskaźnik: nic nie zapisuje w `proel_matches`. | 403 `PROEL_SCOPE` (cudze szkolenie), 409 |
+| `PUT /shared-matches/{id}/proel` | `{base_rev, proel_key: "OSK/12"\|"M-XXXXXXXX/EHF/1"\|"T-XXXXXXXX/NUM"\|null}` | `{ok, unchanged, ...detail}`. Wołać automatycznie, gdy ktoś prowadzi ProEla z meczu wspólnego. To wskaźnik: nic nie zapisuje w `proel_matches`. | 403 `PROEL_SCOPE` (cudze szkolenie), 422 `PROEL_KEY_FOREIGN` (klucz `M-` z cudzą tuleją), 409 |
 | `POST /shared-matches/join` | `{match_id, role, home_name, away_name, match_at}` | `{ok, joined, already_member, ...detail}`. Dozwolone tylko dla duplikatu (serwer porównuje drużyny+datę; samo `zprp_match_id` NIE wystarcza). `role` jest wymagana; zajęta rola sędziowska (sędzia 1/2) nie jest przejmowana. Twórca dostaje push `joined` i może usunąć dołączonego z obsady. Ukryty członek dostaje przywrócenie | 403 `NOT_A_DUPLICATE`, 404, 409 `ROLE_TAKEN`, 422 `ROLE_REQUIRED` |
-| `POST /shared-matches/{id}/repeat` | `{match_at, code?, copy_crew=true, force=false}` | `{ok, existing:false, skipped[], ...detail}` nowego meczu | 409 `DUPLICATE_MATCH`, 422 |
 | `GET /shared-matches/blocks` | - | `{blocks:[{via_judge_id, via_name, created_at}]}` | |
 | `DELETE /shared-matches/blocks/{via_judge_id}` | - | `{ok}` | |
-| `GET /shared-matches/users/search?q=&limit=10` | `q` min. 2 znaki: imię/nazwisko (tokeny AND, bez wieloznaczników) albo dokładny numer sędziego | `{users:[{judge_id,name,photo_url,province}]}` - tylko konta z aplikacji (`login_records`), bez siebie. Limit 60 zapytań/min na konto (pamięć procesu) | 429 `RATE_LIMITED` |
+| `GET /shared-matches/users/search?q=&limit=10` | `q` min. 2 znaki: imię/nazwisko (tokeny AND, bez wieloznaczników) albo dokładny numer sędziego | `{users:[{judge_id,name,photo_url,province}]}` - tylko konta z aplikacji (`login_records`), bez siebie. `photo_url` jak w obsadzie: z konta, a gdy puste, z listy sędziów okręgu. Limit 60 zapytań/min na konto (pamięć procesu) | 429 `RATE_LIMITED` |
 | `GET /shared-matches/users/suggestions?limit=8` | - | `{suggestions:[{judge_id,name,photo_url,reason: partner\|frequent\|recent, reasons[], shared_count}]}` | |
 
-**CreateBody:** `{local_id?, code?, competition?, home_name?, away_name?, match_at?, hall?, city?, zprp_match_id?, proel_key?,
+**CreateBody:** `{local_id?, code?, competition?, home_name?, away_name?, match_at?, hall?, city?, match_kind?, age_group?, zprp_match_id?, proel_key?,
 my_role="sedzia1", crew:[{judge_id?|name?, role}], counts_in_stats=false, extra?, result?:{score_home,score_away,half_home?,half_away?}, force=false}`.
 
 - `local_id`: ten sam twórca + ten sam `local_id` = ten sam mecz (migracja lokalnych meczów idempotentna, także przy równoległych
@@ -80,6 +79,17 @@ my_role="sedzia1", crew:[{judge_id?|name?, role}], counts_in_stats=false, extra?
   (inaczej 422 `NOT_APP_USER`). Osoba z blokadą względem twórcy trafia do `skipped[]` z `reason:"BLOCKED"` (klient to pokazuje).
 - Wynik (`result`) przy migracji: autorem wyniku zostaje twórca, czas = chwila utworzenia.
 - Mecz testowy nigdy nie jest wysyłany (decyzja: tylko lokalnie).
+
+### Rodzaj meczu (02.11.2026)
+`match_kind`: `miedzypanstwowy` | `miedzynarodowy` | `zwykly` (świadome „Nie traktuj tak tego meczu") | `null` (nikt nie rozstrzygnął).
+`age_group`: `seniorzy` | `mlodziez` | `null`. Oba pola są treścią meczu: wspólne dla obsady, zapis z `base_rev`, wchodzą do dziennika.
+Inna wartość = 422 `VALIDATION`. Serwer niczego nie wnioskuje z nazw drużyn; sugestię liczy aplikacja.
+
+Statystyki: oznaczenie meczu jako międzypaństwowy albo międzynarodowy włącza `counts_in_stats` każdemu członkowi RAZ
+(`kind_stats_applied`). Później dodany członek też dostaje włączone. `PUT .../stats` stawia ten znacznik, więc ręczne wyłączenie
+zostaje przy ponownym oznaczeniu. Odznaczenie nie włącza i nie wyłącza. Twórca przy `POST` decyduje sam przez `counts_in_stats`.
+
+Łączenie rozliczenia w serię jest osobiste i serwer go nie zna (magazyn na telefonie).
 
 ### Powtórz mecz
 Kopiuje drużyny, rozgrywki, halę, miasto, `extra` i (opcjonalnie) obsadę z własną rolą powtarzającego. Kod: kolejny numer serii
@@ -128,11 +138,55 @@ Tylko odczyt; nie zapisuje nic w `proel_matches`, nie daje praw zapisu. Pierwsze
 - `GET /proel/` i `GET /proel/{numer}` nie są zawężone.
 
 ## C. Wdrożenie (kolejność)
-1. Railway: deploy backendu (nowe tabele powstają przez `metadata.create_all` przy starcie - bez migracji ręcznej; żadnej kolumny
-   w istniejącej tabeli nie dodano).
+1. Railway: kolumny match_kind, age_group, kind_stats_applied dokłada blok ALTER w app/db.py, a stawki ensure_intl_categories przy starcie. Deploy backendu (nowe tabele powstają przez `metadata.create_all` przy starcie; kolumna `shared_matches.proel_stem`
+   w istniejącej już tabeli dochodzi linią `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` w bloku migracji na końcu `app/db.py`).
 2. Dopiero potem build aplikacji i BAZA_web (stary backend nie zna tras `/shared-matches`).
 3. Nowy klucz preferencji `sharedMatch` - aplikacja dopisuje przełącznik w ustawieniach powiadomień (do tego czasu zgoda domyślna).
 
 - Karta w panelu pary po powiązaniu z ZPRP: ten sam mecz nie jest dwiema kartami. Główna jest karta ZPRP; gdy dane pary (flagi,
   klipy, wątki, wgrane, oceny, nagrania, podpięcie ProEla) wiszą pod `my:<id>`, a pod numerem ZPRP ich nie ma, główną zostaje karta `my:`.
   Gdy dane są po obu stronach, zostają obie karty (nic nie jest scalane na siłę). `GET .../matches/my:<id>` działa dalej też po scaleniu.
+
+## Powtórz mecz
+
+Nie ma osobnej trasy. Aplikacja otwiera kreator z danymi meczu (następny numer serii i termin to sugestie), a kopia idzie zwykłym `POST /shared-matches`, więc ma tę samą ochronę przed duplikatem i ten sam zapis obsady. Wynik i powiązania ZPRP/ProEl się nie kopiują.
+
+## Klucz protokołu ProEla meczu ręcznego (`M-`)
+
+Numer meczu ręcznego ("EHF/1") wpisują sędziowie sami, więc dwa różne mecze o tym numerze trafiały w jeden wiersz
+`proel_matches`. Protokół meczu ręcznego leży pod kluczem `M-<TULEJA>/<NUMER>` (np. `M-KDL2W2JS/EHF/1`, całość wielkimi literami).
+Mecz POZOSTAJE oficjalny (nie jest `T-`, nie znika z listy oficjalnych), a ekrany pokazują sam numer.
+
+- **Tuleja (8 znaków)** jest jedna na mecz wspólny i ta sama u całej obsady: serwer zapisuje ją przy tworzeniu meczu
+  (`shared_matches.proel_stem`) i oddaje w `match.key_stem` oraz na karcie pary (`key_stem`). Liczy się ze skrótu
+  `(creator_id, local_id)` (`app/proel_match_key.py:stem_from_local`, w aplikacji `utils/sharedProelKey.ts`; wektory testowe po obu
+  stronach), a bez `local_id` z początku id serwera. Dzięki temu telefon twórcy zna klucz ZANIM mecz dotrze na serwer (start offline).
+  Wiersz sprzed kolumny (pusta) ma tuleję = pierwsze 8 znaków id (`stem_of_row`).
+- **Pierwszeństwo klucza już użytego:** wskaźnik `proel_key` (serwer) i `shared_proel_want` (telefon) wygrywają z wyliczeniem;
+  to także goły numer sprzed zmiany. Protokoły zapisane pod gołym numerem zostają tam, gdzie są.
+- **Mecz połączony z prawdziwym IdZawody** (i bez użytego klucza) leży pod numerem jak każdy mecz z rozgrywek.
+- **Prywatność:** wiersz `M-` bez numerycznego `zprp_match_id` nie wchodzi do publicznych zestawień (live, statystyki ZPRP;
+  `public_rows_clause`), a wyszukiwarka panelu pary pokazuje go tylko temu, kto go zapisał (jak `T-`).
+- **ZPRP:** backend nie wysyła niczego do ZPRP z `proel_matches`; aplikacja nie pisze do ZPRP z meczu `M-` bez IdZawody
+  (`mayWriteToZprp`).
+- **Oś czasu w panelu:** gdy wskaźnik jeszcze nie dotarł z telefonu, serwer sam składa `M-<key_stem>/<match_code>` i używa go,
+  jeśli taki protokół istnieje.
+
+## Wiązanie nazwisk z kontami (`app/shared_match_link.py`)
+
+Mecz zmigrowany ze starego `myMatches.json` niesie obsadę jako same nazwiska, więc drugi sędzia jest wpisem ręcznym
+(`judge_id = NULL`) i nie widzi meczu, a panel Mentor go pomija (karta `my:` wymaga OBU sędziów jako kont). Serwer wiąże taki wpis
+z kontem aplikacji (`login_records`) sam, ale tylko przy dokładnym, jednoznacznym dopasowaniu:
+
+- imię i nazwisko po normalizacji (`person_name_key`: polskie znaki, wielkość liter, dowolna kolejność członów; inicjał i Jr/Sr
+  rozróżniają), co najmniej dwa człony,
+- dokładnie JEDNO konto z takim kluczem (dwa konta o tym nazwisku = bez wiązania),
+- konto nie jest już w obsadzie tego meczu i nie ma blokady „nie dodawaj mnie przez tę osobę" względem autora wpisu.
+
+Wiązanie jest idempotentne (UPDATE warunkowy `judge_id IS NULL`, wyścig wygrywa pierwsze wywołanie) i nigdy nie psuje odczytu
+(błąd tylko do logu). Skutek to zwykła zmiana obsady: `rev` rośnie, wpis `crew_edit` w dzienniku (`actor_id` pusty), odświeżenie
+paneli par i push „Dodano Cię do meczu" (z wyjątkiem osoby, która wywołała odczyt). Wołane przy: tworzeniu meczu, dodaniu i edycji
+wpisu ręcznego, odczycie listy i szczegółów przez członka (`link_matches`), wejściu konta do aplikacji (`link_for_account`, odwrotny
+kierunek) oraz budowie kart pary (`repair_pair`). Gdy nazwisko nie pasuje (inna pisownia, dwa konta), aplikacja pokazuje
+wskazówkę „Wybierz X z listy" (`SharedCrewLinkHint`) i otwiera wybór osoby dla tej roli.
+

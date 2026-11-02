@@ -560,6 +560,26 @@
               "below100": 529,
               "100to300": 579,
               "above300": 739
+            },
+            "Międzypaństwowe seniorzy": {
+              "below100": 529,
+              "100to300": 579,
+              "above300": 739
+            },
+            "Międzypaństwowe młodzież": {
+              "below100": 339,
+              "100to300": 389,
+              "above300": 549
+            },
+            "Międzynarodowe seniorzy": {
+              "below100": 264,
+              "100to300": 314,
+              "above300": 474
+            },
+            "Międzynarodowe młodzież": {
+              "below100": 195,
+              "100to300": 245,
+              "above300": 245
             }
           },
           "stolikowy": {
@@ -574,7 +594,11 @@
             "1/4 i 1/2PP": 110,
             "Finał PP": 110,
             "el. PP": 110,
-            "1/2PP": 110
+            "1/2PP": 110,
+            "Międzypaństwowe seniorzy": 110,
+            "Międzypaństwowe młodzież": 110,
+            "Międzynarodowe seniorzy": 110,
+            "Międzynarodowe młodzież": 110
           }
         },
         "weekday": {
@@ -638,6 +662,26 @@
               "below100": 592,
               "100to300": 642,
               "above300": 802
+            },
+            "Międzypaństwowe seniorzy": {
+              "below100": 592,
+              "100to300": 642,
+              "above300": 802
+            },
+            "Międzypaństwowe młodzież": {
+              "below100": 408,
+              "100to300": 458,
+              "above300": 618
+            },
+            "Międzynarodowe seniorzy": {
+              "below100": 327,
+              "100to300": 377,
+              "above300": 537
+            },
+            "Międzynarodowe młodzież": {
+              "below100": 247,
+              "100to300": 297,
+              "above300": 297
             }
           },
           "stolikowy": {
@@ -652,7 +696,11 @@
             "1/4 i 1/2PP": 110,
             "Finał PP": 110,
             "el. PP": 110,
-            "1/2PP": 110
+            "1/2PP": 110,
+            "Międzypaństwowe seniorzy": 110,
+            "Międzypaństwowe młodzież": 110,
+            "Międzynarodowe seniorzy": 110,
+            "Międzynarodowe młodzież": 110
           }
         },
         "MP": {

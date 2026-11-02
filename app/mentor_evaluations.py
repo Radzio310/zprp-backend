@@ -730,9 +730,10 @@ async def timeline_for_match(
     )
     if not stored:
         return empty
+    from app.proel_match_key import is_shared_key
     from app.proel_training_key import is_training_key
 
-    if owner_ids is not None and is_training_key(code):
+    if owner_ids is not None and (is_training_key(code) or is_shared_key(code)):
         from app.proel_fields import same_judge_number
 
         writer = str(stored["doc_writer_judge"] or "").strip()

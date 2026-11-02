@@ -14,6 +14,7 @@ odbijał się z 409, aplikacja logowała to do konsoli i szła dalej, a następn
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict
 
 #: Pola konfiguracji, które wystarczają, żeby narysować wiersz na liście wyboru
@@ -319,3 +320,120 @@ def identity_verdict(known: Any, incoming: Any) -> str:
     if identity_rank(inc) > identity_rank(kn):
         return IDENTITY_UPGRADE
     return IDENTITY_CONFLICT
+
+
+# ─────────────────── KLUCZ PROTOKOŁU MECZU RĘCZNEGO (WSPÓLNEGO) ───────────────────
+#
+# Mecz ręczny nie ma IdZawody, a numer ("EHF/1") wpisują sędziowie sami, więc dwa
+# różne mecze o tym samym numerze trafiały w jeden wiersz `proel_matches`. Mecz
+# ręczny dostaje więc klucz z przedrostkiem jak szkoleniowy (`T-`), ale własnym:
+#
+#     M-<TULEJA 8 znaków>/<NUMER>      np. M-3F9A0C21/EHF/1
+#
+# Mecz POZOSTAJE oficjalny (nie jest szkoleniowy, nie trafia pod `T-%`), a sędzia
+# na ekranach widzi sam numer. Tuleja jest jedna na mecz wspólny i taka sama na
+# telefonach całej obsady, bo to serwer ją zapisuje (`shared_matches.proel_stem`)
+# i oddaje w `key_stem`.
+#
+# TULEJA liczona jest z (twórca, local_id) - a nie z id serwera - bo telefon
+# twórcy musi znać klucz ZANIM mecz dotrze na serwer (start offline w hali). Obie
+# strony (aplikacja: `utils/sharedProelKey.ts`, serwer: tu) liczą ten sam skrót,
+# co pilnują wektory testowe po obu stronach. Mecz bez `local_id` (albo sprzed tej
+# zmiany: kolumna pusta) ma tuleję = pierwsze 8 znaków id serwera.
+
+#: Przedrostek klucza meczu ręcznego. Myślnik jak przy `T-`: numery ZPRP go nie mają.
+SHARED_KEY_PREFIX = "M-"
+
+#: Wzorzec do `LIKE` w SQL (jak `TRAINING_KEY_LIKE`).
+SHARED_KEY_LIKE = "M-%/%"
+
+_SHARED_KEY_RE = re.compile(r"^M-[A-Z0-9]{6,16}/.+$", re.IGNORECASE)
+
+_STEM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+STEM_LENGTH = 8
+
+
+def _fnv32(text: str, basis: int) -> int:
+    """FNV-1a po kodach UTF-16 znaków - tak samo liczy to `Math.imul` po stronie aplikacji."""
+    h = basis & 0xFFFFFFFF
+    units = text.encode("utf-16-le")
+    for i in range(0, len(units), 2):
+        h ^= units[i] | (units[i + 1] << 8)
+        h = (h * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def stem_from_local(creator_id: Any, local_id: Any) -> str:
+    """Tuleja klucza z twórcy i lokalnego `Id` wpisu - pusta, gdy któregoś brakuje."""
+    creator = str(creator_id or "").strip()
+    local = str(local_id or "").strip()
+    if not creator or not local:
+        return ""
+    text = f"{creator}|{local}"
+    bits = _fnv32(text, 0x811C9DC5) * 256 + (_fnv32(text, 0x9747B28C) & 255)
+    out = ""
+    for i in range(STEM_LENGTH):
+        out += _STEM_ALPHABET[(bits >> (5 * (STEM_LENGTH - 1 - i))) & 31]
+    return out
+
+
+def stem_from_server_id(server_id: Any) -> str:
+    """Tuleja z id serwera - dla meczu bez `local_id` i dla wierszy sprzed kolumny."""
+    return "".join(ch for ch in str(server_id or "").upper() if ch.isalnum())[:STEM_LENGTH]
+
+
+def new_shared_stem(creator_id: Any, local_id: Any, server_id: Any) -> str:
+    """Tuleja nowego meczu wspólnego: z twórcy i `local_id`, a bez nich z id serwera."""
+    return stem_from_local(creator_id, local_id) or stem_from_server_id(server_id)
+
+
+def is_shared_key(key: Any) -> bool:
+    """Czy ten klucz wiersza należy do meczu ręcznego (wspólnego)."""
+    return bool(_SHARED_KEY_RE.match(str(key or "").strip()))
+
+
+def shared_key_of(stem: Any, match_number: Any) -> str:
+    """`M-<TULEJA>/<NUMER>` albo pusty napis, gdy brakuje któregoś składnika."""
+    s = str(stem or "").strip().upper()
+    number = str(match_number or "").strip()
+    # Wielkie litery w całości - tak samo jak `proelMatchKey` w aplikacji (numer jest w kluczu kanoniczny).
+    return f"{SHARED_KEY_PREFIX}{s}/{number}".upper() if s and number else ""
+
+
+def shared_stem_of_key(key: Any) -> str:
+    """Tuleja z klucza meczu ręcznego (pusta dla innych kluczy)."""
+    text = str(key or "").strip()
+    if not is_shared_key(text):
+        return ""
+    return text[len(SHARED_KEY_PREFIX) : text.index("/")].upper()
+
+
+def number_of_key(key: Any) -> str:
+    """Numer meczu bez przedrostka `M-`; inny klucz wraca bez zmian (szkoleniowy obsługuje `proel_training_key`)."""
+    text = str(key or "").strip()
+    return text[text.index("/") + 1 :] if is_shared_key(text) else text
+
+
+def stem_of_row(row: Any) -> str:
+    """Tuleja zapisanego meczu wspólnego: kolumna, a w wierszu sprzed kolumny początek id serwera."""
+    try:
+        stored = str(row.get("proel_stem") or "").strip()
+        return stored.upper() or stem_from_server_id(row.get("id"))
+    except AttributeError:
+        return ""
+
+
+def public_rows_clause(match_number_col: Any, zprp_col: Any = None) -> Any:
+    """Warunek SQL „wiersz może trafić do publicznych zestawień": nie szkoleniowy i nie prywatny mecz ręczny.
+
+    Mecz ręczny (`M-...`) bez numerycznego IdZawody nie istnieje w rozgrywkach, więc nie wchodzi w publiczne statystyki
+    ani na żywo. Gdy został połączony z prawdziwym meczem (kolumna `zprp_col` niepusta), jest taki jak każdy inny.
+    """
+    from sqlalchemy import and_, or_
+
+    from app.proel_training_key import TRAINING_KEY_LIKE
+
+    private = match_number_col.ilike(SHARED_KEY_LIKE)
+    linked = and_(zprp_col.isnot(None), zprp_col != "") if zprp_col is not None else None
+    allowed = or_(~private, linked) if linked is not None else ~private
+    return and_(~match_number_col.ilike(TRAINING_KEY_LIKE), allowed)

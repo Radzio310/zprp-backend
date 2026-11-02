@@ -34,7 +34,7 @@ MODULES = (
     "app.mentor_bastion_search", "app.mentor_trybuna", "app.mentor_trybuna_rules", "app.mentor_trybuna_feed", "app.mentor_trybuna_thumbs", "app.mentor_trybuna_rank", "app.mentor_trybuna_suggest",
     "app.delegate_sharing", "app.mentor_auto_found", "app.mentor_auto_found_rules",
     "app.mentor_drive", "app.mentor_drive_google", "app.mentor_drive_transfer",
-    "app.shared_matches", "app.shared_match_pair", "app.shared_match_notify", "app.shared_match_rules", "app.mentor_proel_link", "app.mentor_veo",
+    "app.shared_matches", "app.shared_match_pair", "app.shared_match_link", "app.shared_match_notify", "app.shared_match_rules", "app.mentor_proel_link", "app.mentor_veo",
 )
 
 PAIR = "pair-1"
@@ -150,6 +150,7 @@ class Env:
         self.drive_google = importlib.import_module("app.mentor_drive_google")
         self.shared = importlib.import_module("app.shared_matches")
         self.shared_pair = importlib.import_module("app.shared_match_pair")
+        self.shared_link = importlib.import_module("app.shared_match_link")
         self.shared_rules = importlib.import_module("app.shared_match_rules")
         self.shared_notify = importlib.import_module("app.shared_match_notify")
         self.proel_link = importlib.import_module("app.mentor_proel_link")

@@ -103,6 +103,7 @@ class AnnouncementResponse(BaseModel):
     content: str
     link: Optional[str] = None
     image_url: Optional[str] = None
+    thumb_url: Optional[str] = None
     priority: int
     updated_at: datetime
     judge_name: Optional[str] = None

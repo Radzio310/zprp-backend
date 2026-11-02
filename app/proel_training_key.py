@@ -25,6 +25,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.proel_match_key import is_shared_key, number_of_key
+
 #: Przedrostek klucza szkoleniowego. Myślnik jest tu celowo: numery ZPRP go nie
 #: używają, więc przedrostek nie ma jak pomylić się z prawdziwym numerem meczu.
 TRAINING_KEY_PREFIX = "T-"
@@ -45,9 +47,12 @@ def is_training_key(key: Any) -> bool:
 def match_number_from_key(key: Any) -> str:
     """Numer meczu ukryty w kluczu - do pokazania i do porównań z bazą ZPRP.
 
-    Klucz, który nie jest szkoleniowy, wraca bez zmian: on już jest numerem.
+    Zdejmuje `T-<PODEJŚCIE>/` i `M-<TULEJA>/` (mecz ręczny). Klucz bez przedrostka
+    wraca bez zmian: on już jest numerem.
     """
     text = str(key or "").strip()
+    if is_shared_key(text):
+        return number_of_key(text)
     if not is_training_key(text):
         return text
     return text[text.index("/") + 1 :]

@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str
     BACKEND_URL: str
     FRONTEND_DEEP_LINK: str
+    # Kalendarze drugorzędne Google (BAZA - Boiskowy / Stolikowy / Mecze).
+    # Domyślnie wyłączone: wtedy kalendarz działa dokładnie jak dotąd.
+    GOOGLE_CALENDAR_SECONDARY_ENABLED: bool = False
 
     # PEM prywatnego klucza RSA (multi-line stored as literal '\n')
     RSA_PRIVATE_KEY: str

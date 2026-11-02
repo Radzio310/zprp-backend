@@ -35,6 +35,7 @@ except Exception:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 
 from app.admin_guard import admin_write_guard
+from app.central_rates_intl import needs_intl_seed, with_intl_categories
 from app.db import central_rates, database
 from app.schemas import (
     CentralRateItem,
@@ -259,6 +260,39 @@ async def delete_central_rate_version(rate_id: int) -> Response:
 # ---------------------------------------------------------------------------
 # Zasilenie
 # ---------------------------------------------------------------------------
+
+async def ensure_intl_categories() -> None:
+    """
+    Dopisuje mecze miedzypanstwowe i miedzynarodowe do wersji od 01.09.2026.
+
+    Zasilenie z pliku wchodzi tylko do PUSTEJ tabeli, a na produkcji wiersze juz
+    stoja. Dopisujemy TYLKO do wersji, ktora startuje dokladnie 01.09.2026 i nie
+    ma jeszcze zadnego wpisu tych kategorii (`needs_intl_seed`): raz zasilona
+    albo poprawiona przez czlowieka wersja zostaje, wiec swiadomie usuniety klucz
+    nie wraca przy kazdym starcie, a wersje z innej daty nie dostaja kwot nie ze
+    swojego okresu. Zapis jest warunkowy na `updated_at` (kto zdazyl pierwszy,
+    ten wygrywa), a zmiana `updated_at` podbija manifest, wiec aplikacje sie odswieza.
+    """
+    try:
+        rows = await database.fetch_all(select(central_rates))
+        for row in rows:
+            data = dict(row)
+            content = data.get("content")
+            if isinstance(content, str):
+                content = json.loads(content)
+            if not needs_intl_seed(data.get("valid_from"), content):
+                continue
+            stamp = data.get("updated_at")
+            where = [central_rates.c.id == data["id"]]
+            where.append(central_rates.c.updated_at == stamp if stamp is not None else central_rates.c.updated_at.is_(None))
+            done = await database.fetch_one(
+                update(central_rates).where(*where).values(content=with_intl_categories(content)).returning(central_rates.c.id)
+            )
+            if done is not None:
+                logger.info("[central_rates] wersja %s: dopisano mecze miedzypanstwowe", data["id"])
+    except Exception as exc:  # nie blokuj startu serwera
+        logger.warning("[central_rates] dopisanie meczow miedzypanstwowych nieudane: %s", exc)
+
 
 async def seed_central_rates() -> None:
     """

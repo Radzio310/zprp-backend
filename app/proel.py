@@ -2691,6 +2691,13 @@ async def list_proel_matches(
             ~saved_matches.c.match_number.ilike(TRAINING_KEY_LIKE)
         )
 
+    # Mecz ręczny (M-...) bez IdZawody nie jest publiczny: lista oddaje go piszącemu i członkowi meczu wspólnego.
+    # Pełny klucz w GET /proel/{numer} zostaje poza tym filtrem (reguła czytania wspólnego).
+    if not training:
+        from app.proel_list_scope import manual_rows_clause
+
+        stmt = stmt.where(await manual_rows_clause(actor.judge_id))
+
     # jeżeli użytkownik podał finished, dodajemy WHERE
     if finished is not None:
         stmt = stmt.where(saved_matches.c.is_finished == finished)

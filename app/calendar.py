@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import os
 import re
 import secrets
 import time
@@ -28,6 +29,30 @@ from app.calendar_storage import (
     delete_event_mapping,
 )
 from app.calendar_utils import create_flow  # Twój helper do Flow
+from app.calendar_secondary_engine import (
+    account_uses_secondary,
+    after_connect,
+    cleanup_previous,
+    plan_write,
+    previous_placement,
+    primary_body_extras,
+    remove_event,
+    require_primary_read,
+    run_job,
+    write_event,
+)
+from app.calendar_secondary_engine import disconnect as secondary_disconnect
+from app.calendar_secondary_google import build_deps as build_secondary_deps
+from app.calendar_secondary_rules import (
+    SecondaryError,
+    email_from_id_token,
+    flag_enabled,
+    make_state,
+    missing_scopes,
+    parse_tier,
+    scope_to_string,
+    tier_from_state,
+)
 
 router = APIRouter(prefix="/calendar", tags=["Calendar"])
 
@@ -80,6 +105,10 @@ class EventCreate(BaseModel):
     # Google API dostanie ta wartość, rozpoznawane po formacie.
     colorId: str
     reminders: list[dict]  # np. [{"method":"popup","minutes":180}, ...]
+    # Cel wpisu (whistle | stopwatch | primary). Bez pola decyduje SERWER po
+    # prefiksie tytułu (⚽️ boiskowy, ⏱️ stolikowy, reszta główny). Działa tylko
+    # przy włączonej fladze kalendarzy drugorzędnych.
+    target: str | None = None
 
 
 class EventLabelCreate(BaseModel):
@@ -119,6 +148,20 @@ def _apply_event_label_version(request):
     return request
 
 
+def _secondary_http(exc: SecondaryError) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=exc.detail())
+
+
+async def _guard_primary_read(settings, user_login: str) -> None:
+    """Flaga włączona: kalendarz główny tylko dla legacy i district (inaczej 403)."""
+    if not flag_enabled(settings):
+        return
+    try:
+        await require_primary_read(build_secondary_deps(settings), user_login)
+    except SecondaryError as exc:
+        raise _secondary_http(exc) from exc
+
+
 async def _get_calendar_service(user_login: str, settings):
     """Credentials + odświeżenie tokena — ten sam wzorzec co w każdym
     endpoincie kalendarza niżej, wydzielony dla nowych endpointów etykiet,
@@ -149,9 +192,31 @@ async def _get_calendar_service(user_login: str, settings):
 
 @router.get("/auth-url", summary="Wygeneruj URL do Google OAuth2")
 async def get_auth_url(
+    tier: str | None = Query(None, description="matches | district (przy włączonej fladze)"),
     settings=Depends(get_settings),
     user_login: str = Depends(get_current_user),
 ):
+    if flag_enabled(settings):
+        try:
+            level = parse_tier(tier)
+        except SecondaryError as exc:
+            raise _secondary_http(exc) from exc
+        flow = create_flow(settings, level)
+        verifier, challenge = _make_pkce_pair()
+        # Poziom jedzie w state (state sprawdzamy w bazie, więc przedrostek jest
+        # wiarygodny). matches: tylko kalendarze BAZY; district: dokładany przyrostowo.
+        auth_url, state = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes="true" if level == "district" else "false",
+            prompt="consent",
+            state=make_state(level, secrets.token_urlsafe(32)),
+            code_challenge=challenge,
+            code_challenge_method="S256",
+        )
+        await save_oauth_state(user_login, state)
+        _store_pkce_verifier(state, verifier)
+        return JSONResponse({"url": auth_url})
+
     flow = create_flow(settings)
     verifier, challenge = _make_pkce_pair()
     auth_url, state = flow.authorization_url(
@@ -172,6 +237,9 @@ async def oauth2callback(
     state: str = Query(...),
     settings=Depends(get_settings),
 ):
+    if flag_enabled(settings):
+        return await _secondary_callback(code, state, settings)
+
     user_login = await get_user_login_by_state(state)
     if not user_login:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
@@ -198,6 +266,82 @@ async def oauth2callback(
     return RedirectResponse(f"{settings.FRONTEND_DEEP_LINK}?connected=true")
 
 
+async def _secondary_callback(code: str, state: str, settings):
+    """Callback po włączeniu flagi: zapisuje przyznane zakresy, przejmuje albo
+    zakłada kalendarze BAZY i (gdy trzeba) uruchamia przenoszenie w tle."""
+    user_login = await get_user_login_by_state(state)
+    if not user_login:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state")
+
+    # Przy poziomie district Google zwraca sumę zakresów (include_granted_scopes),
+    # a oauthlib rzuca wyjątek, gdy zakres w odpowiedzi różni się od żądanego.
+    # Przyznane zakresy i tak zapisujemy z odpowiedzi.
+    os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+    tier = tier_from_state(state) or "matches"
+    verifier = _pop_pkce_verifier(state)
+    flow = create_flow(settings, tier)
+    try:
+        if verifier:
+            flow.fetch_token(code=code, code_verifier=verifier)
+        else:
+            flow.fetch_token(code=code)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "token_exchange_failed",
+                "message": f"Nie udało się wymienić kodu Google na dostęp: {e}",
+            },
+        )
+
+    creds = flow.credentials
+    token = getattr(getattr(flow, "oauth2session", None), "token", None) or {}
+    granted = scope_to_string(token.get("scope") or getattr(creds, "scopes", None))
+    if missing_scopes(tier, granted):
+        # Zgoda częściowa: nie nadpisujemy tokenu ani stanu, aplikacja dostaje powód.
+        return RedirectResponse(
+            f"{settings.FRONTEND_DEEP_LINK}?connected=false&calendar_error=scope_missing"
+        )
+    email = email_from_id_token(token.get("id_token") or getattr(creds, "id_token", None))
+    existing = await get_calendar_tokens(user_login)
+    previous = dict(getattr(existing, "_mapping", existing)) if existing else None
+    refresh_token = creds.refresh_token or (previous or {}).get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "refresh_token_missing",
+                "message": "Google nie przekazał tokenu odświeżania. Usuń dostęp BAZY w koncie Google i połącz ponownie.",
+            },
+        )
+    deps = build_secondary_deps(settings)
+    try:
+        start, warnings = await after_connect(
+            deps,
+            user_login,
+            previous=previous,
+            new_tokens={
+                "access_token": creds.token,
+                "refresh_token": refresh_token,
+                "expires_at": creds.expiry.isoformat(),
+                "scope": granted,
+            },
+            email=email,
+        )
+    except SecondaryError as exc:
+        raise _secondary_http(exc) from exc
+    url = f"{settings.FRONTEND_DEEP_LINK}?connected=true"
+    if warnings:
+        url += "&calendar_warning=1"
+    response = RedirectResponse(url)
+    if start:
+        # Przenoszenie startuje po odpowiedzi (zadanie w tle, wznawialne).
+        from starlette.background import BackgroundTask  # noqa: PLC0415
+
+        response.background = BackgroundTask(run_job, deps, user_login)
+    return response
+
+
 @router.get("/status", summary="Sprawdź, czy kalendarz Google jest połączony")
 async def calendar_status(
     user_login: str = Depends(get_current_user),
@@ -208,8 +352,29 @@ async def calendar_status(
 
 @router.post("/disconnect", summary="Rozłącz konto Google Calendar")
 async def disconnect_calendar(
-    user_login: str = Depends(get_current_user)
+    remove_calendars: bool | None = Query(
+        None, description="true: usuń kalendarze BAZY w Google; false: zostaw wpisy"
+    ),
+    settings=Depends(get_settings),
+    user_login: str = Depends(get_current_user),
 ):
+    if flag_enabled(settings):
+        try:
+            was_connected, warnings = await secondary_disconnect(
+                build_secondary_deps(settings), user_login, remove_calendars
+            )
+        except SecondaryError as exc:
+            raise _secondary_http(exc) from exc
+        if not was_connected:
+            return JSONResponse(
+                {"detail": "Brak połączenia z kalendarzem"},
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
+        body = {"disconnected": True}
+        if warnings:
+            body["warnings"] = warnings
+        return JSONResponse(body)
+
     existing = await get_calendar_tokens(user_login)
     if not existing:
         return JSONResponse(
@@ -288,6 +453,7 @@ async def list_event_labels(
     — w przeciwieństwie do klasycznego colorId (zawsze 11) pozwala na
     DOWOLNY hex i istnieje per-kalendarz. To właśnie te kolory widać w
     natywnej apce Google Calendar przy wyborze koloru wydarzenia."""
+    await _guard_primary_read(settings, user_login)
     try:
         service = await _get_calendar_service(user_login, settings)
         cal = service.calendars().get(calendarId="primary").execute()
@@ -338,6 +504,7 @@ async def create_event_label(
     if not _is_valid_hex(payload.hex):
         raise HTTPException(status_code=400, detail="Nieprawidłowy hex koloru")
 
+    await _guard_primary_read(settings, user_login)
     try:
         service = await _get_calendar_service(user_login, settings)
         # Patch NADPISUJE całą listę etykiet — trzeba najpierw pobrać
@@ -373,6 +540,7 @@ async def list_events(
     settings=Depends(get_settings),
     user_login: str = Depends(get_current_user),
 ):
+    await _guard_primary_read(settings, user_login)
     tokens = await get_calendar_tokens(user_login)
     if not tokens:
         raise HTTPException(status_code=404, detail="Kalendarz nie połączony")
@@ -435,6 +603,32 @@ async def create_event(
     settings=Depends(get_settings),
     user_login: str = Depends(get_current_user),
 ):
+    # Kalendarze drugorzędne (flaga): trasuje SERWER. Przy wyłączonej fladze
+    # i dla kont legacy `sec_plan` zostaje None i działa dotychczasowa ścieżka.
+    sec_plan = None
+    sec_deps = None
+    prev_placement = None
+    if flag_enabled(settings):
+        sec_deps = build_secondary_deps(settings)
+        try:
+            sec_plan = await plan_write(sec_deps, user_login, payload.summary, payload.target)
+            if sec_plan is not None and sec_plan.kind is not None:
+                return await write_event(
+                    sec_deps,
+                    user_login,
+                    sec_plan,
+                    payload.matchId,
+                    summary=payload.summary,
+                    start=payload.start,
+                    end=payload.end,
+                    location=payload.location,
+                    reminders=payload.reminders,
+                )
+            if sec_plan is not None:
+                prev_placement = await previous_placement(sec_deps, user_login, payload.matchId)
+        except SecondaryError as exc:
+            raise _secondary_http(exc) from exc
+
     tokens = await get_calendar_tokens(user_login)
     if not tokens:
         raise HTTPException(status_code=404, detail="Kalendarz nie połączony")
@@ -467,10 +661,21 @@ async def create_event(
         **_event_color_field(payload.colorId),
         "reminders": {"useDefault": False, "overrides": payload.reminders},
     }
+    if sec_plan is not None:
+        try:
+            event_body.update(
+                await primary_body_extras(sec_deps, user_login, payload.reminders)
+            )
+        except SecondaryError as exc:
+            raise _secondary_http(exc) from exc
 
     service = build("calendar", "v3", credentials=creds)
     events = service.events()
     mapped_id = await get_event_mapping(user_login, payload.matchId)
+    if sec_plan is not None and prev_placement and prev_placement.get("calendar_id"):
+        # Wpis leży w kalendarzu drugorzędnym: w głównym wstawiamy nowy,
+        # a stary kasujemy dopiero po zapisie (cleanup_previous niżej).
+        mapped_id = None
     if mapped_id:
         request = events.update(calendarId="primary", eventId=mapped_id, body=event_body)
         if _is_label_id(payload.colorId):
@@ -500,8 +705,18 @@ async def create_event(
             request = _apply_event_label_version(request)
         saved = request.execute()
 
-    await save_event_mapping(user_login, payload.matchId, saved["id"])
-    return {"eventId": saved["id"]}
+    if sec_plan is None:
+        await save_event_mapping(user_login, payload.matchId, saved["id"])
+        return {"eventId": saved["id"]}
+
+    # Konto po przejściu, cel primary: wpis mógł leżeć w kalendarzu drugorzędnym.
+    # Najpierw zapis w nowym miejscu (wyżej), dopiero teraz kasujemy stare.
+    await save_event_mapping(user_login, payload.matchId, saved["id"], calendar_id=None)
+    result = {"eventId": saved["id"]}
+    warning = await cleanup_previous(sec_deps, user_login, prev_placement)
+    if warning:
+        result["warning"] = warning
+    return result
 
 @router.put(
     "/events/{match_id:path}",
@@ -514,6 +729,23 @@ async def update_event(
     settings=Depends(get_settings),
     user_login: str = Depends(get_current_user),
 ):
+    if flag_enabled(settings):
+        sec_deps = build_secondary_deps(settings)
+        try:
+            plan = await plan_write(sec_deps, user_login, payload.summary, payload.target)
+            if plan is not None and not await previous_placement(sec_deps, user_login, match_id):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Nie znaleziono powiązanego wydarzenia do edycji",
+                )
+        except SecondaryError as exc:
+            raise _secondary_http(exc) from exc
+        if plan is not None:
+            # Kalendarze drugorzędne: ta sama logika trasowania co przy POST.
+            return await create_event(
+                payload.model_copy(update={"matchId": match_id}), settings, user_login
+            )
+
     # 1) znajdź event_id z mapowania
     event_id = await get_event_mapping(user_login, match_id)
     if not event_id:
@@ -593,6 +825,15 @@ async def delete_event(
     settings=Depends(get_settings),
     user_login: str = Depends(get_current_user),
 ):
+    if flag_enabled(settings):
+        sec_deps = build_secondary_deps(settings)
+        try:
+            if await account_uses_secondary(sec_deps, user_login):
+                await remove_event(sec_deps, user_login, match_id)
+                return
+        except SecondaryError as exc:
+            raise _secondary_http(exc) from exc
+
     event_id = await get_event_mapping(user_login, match_id)
     if not event_id:
         # DELETE jest idempotentny: brak mapowania znaczy, że żądany stan już

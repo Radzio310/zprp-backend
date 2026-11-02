@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, func, insert, or_, select, update
 
 from app import mentor_panel_core as C
+from app import shared_match_link as LK
 from app import shared_match_notify as N
 from app import shared_match_rules as SR
 from app.db import (
@@ -39,6 +40,7 @@ from app.db import (
     zprp_public_matches,
 )
 from app.mentor_panel_auth import base_actor
+from app.proel_match_key import is_shared_key, new_shared_stem, shared_stem_of_key, stem_of_row
 
 logger = logging.getLogger("app.shared_match")
 router = APIRouter(prefix="/shared-matches", tags=["Mecze wspólne"])
@@ -117,7 +119,9 @@ def match_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], *, viewer
         "home_name": row.get("home_name"), "away_name": row.get("away_name"),
         "match_at": row.get("match_at"), "date_key": row.get("date_key"),
         "hall": row.get("hall"), "city": row.get("city"),
+        "match_kind": row.get("match_kind"), "age_group": row.get("age_group"),
         "zprp_match_id": row.get("zprp_match_id"), "proel_key": row.get("proel_key"),
+        "key_stem": stem_of_row(row),
         "result": {
             "score_home": row.get("score_home"), "score_away": row.get("score_away"),
             "half_home": row.get("half_home"), "half_away": row.get("half_away"),
@@ -131,11 +135,14 @@ def match_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], *, viewer
     }
 
 
-def member_shape(member: Dict[str, Any], names: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+def member_shape(member: Dict[str, Any], names: Dict[str, Dict[str, Any]], suggested: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     judge_id = s(member.get("judge_id"))
     info = names.get(judge_id) or {}
     return {
         "id": member["id"], "judge_id": judge_id or None, "manual": not judge_id,
+        "no_auto_link": bool(member.get("no_auto_link")) and not judge_id,
+        #: Podpowiedź dla wpisu ręcznego: konto o tym samym nazwisku. Nie daje dostępu, przypisuje je człowiek.
+        "suggested_account": suggested or None,
         "name": s(info.get("name")) or s(member.get("name")) or (f"Sędzia {judge_id}" if judge_id else ""),
         "photo_url": info.get("photo_url"), "role": member["role"], "role_label": SR.role_label(member["role"]),
         "added_by": member.get("added_by"), "added_at": member.get("added_at"),
@@ -148,8 +155,19 @@ def my_shape(member: Optional[Dict[str, Any]], names: Dict[str, Dict[str, Any]])
     return {
         "member_id": member["id"], "role": member["role"], "hidden": member.get("hidden_at") is not None,
         "hidden_at": member.get("hidden_at"), "counts_in_stats": bool(member.get("counts_in_stats")),
+        "kind_stats_applied": bool(member.get("kind_stats_applied")),
         "added_by": member.get("added_by"), "added_by_name": _name_of(names, member.get("added_by")) if member.get("added_by") else None,
     }
+
+
+async def _suggested(members: List[Dict[str, Any]], names: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
+    """member_id wpisu ręcznego -> {judge_id, name, photo_url}. Tylko dla członków meczu (wołane z odczytów członka)."""
+    found = await LK.suggestions_for(members)
+    if not found:
+        return {}
+    info = await _names(found.values())
+    return {mid: {"judge_id": jid, "name": _name_of(info, jid), "photo_url": (info.get(jid) or {}).get("photo_url")}
+            for mid, jid in found.items()}
 
 
 async def _row(match_id: str) -> Optional[Dict[str, Any]]:
@@ -186,11 +204,12 @@ async def detail_payload(row: Dict[str, Any], members: List[Dict[str, Any]], act
     ids = [row["creator_id"], row.get("updated_by"), row.get("result_by"), *[m.get("judge_id") for m in members],
            *[m.get("added_by") for m in members], *[entry.get("actor_id") for entry in log]]
     names = await _names(ids)
+    hints = await _suggested(members)
     mine = next((m for m in members if s(m.get("judge_id")) == s(actor.judge_id)), None)
     is_creator = s(actor.judge_id) == s(row["creator_id"])
     return {
         "match": match_shape(row, names, viewer=actor.judge_id),
-        "crew": [member_shape(m, names) for m in members],
+        "crew": [member_shape(m, names, hints.get(s(m["id"]))) for m in members],
         "my": my_shape(mine, names),
         "can": {"edit": bool(mine), "delete": is_creator, "remove_members": is_creator, "hide": bool(mine)},
         "log": [{"id": e["id"], "rev": e["rev"], "actor_id": e["actor_id"], "actor_name": _name_of(names, e["actor_id"]),
@@ -261,6 +280,8 @@ class CrewIn(BaseModel):
     judge_id: Optional[str] = Field(default=None, max_length=40)
     name: Optional[str] = Field(default=None, max_length=120)
     role: str = Field(max_length=20)
+    #: Wpis świadomie dodany jako osoba BEZ aplikacji ("Wpisz nazwisko"): nigdy nie wiąże się z kontem automatycznie.
+    no_app: bool = False
 
 
 class ResultIn(BaseModel):
@@ -280,6 +301,10 @@ class CreateBody(BaseModel):
     match_at: Optional[str] = Field(default=None, max_length=40)
     hall: Optional[str] = Field(default=None, max_length=160)
     city: Optional[str] = Field(default=None, max_length=120)
+    #: miedzypanstwowy | miedzynarodowy | zwykly (pusty = brak decyzji).
+    match_kind: Optional[str] = Field(default=None, max_length=20)
+    #: seniorzy | mlodziez.
+    age_group: Optional[str] = Field(default=None, max_length=20)
     zprp_match_id: Optional[str] = Field(default=None, max_length=20)
     proel_key: Optional[str] = Field(default=None, max_length=80)
     my_role: str = Field(default="sedzia1", max_length=20)
@@ -300,6 +325,8 @@ class EditBody(BaseModel):
     match_at: Optional[str] = Field(default=None, max_length=40)
     hall: Optional[str] = Field(default=None, max_length=160)
     city: Optional[str] = Field(default=None, max_length=120)
+    match_kind: Optional[str] = Field(default=None, max_length=20)
+    age_group: Optional[str] = Field(default=None, max_length=20)
     extra: Optional[Dict[str, Any]] = None
 
 
@@ -323,6 +350,8 @@ class CrewEditBody(BaseModel):
     role: Optional[str] = Field(default=None, max_length=20)
     #: Tylko dla wpisu ręcznego.
     name: Optional[str] = Field(default=None, max_length=120)
+    #: Jawne przypisanie konta do wpisu ręcznego ("To ta osoba? Połącz"). Uprawnienia jak przy dodawaniu: każdy członek.
+    judge_id: Optional[str] = Field(default=None, max_length=40)
 
 
 class HideBody(BaseModel):
@@ -357,15 +386,6 @@ class JoinBody(BaseModel):
     zprp_match_id: Optional[str] = Field(default=None, max_length=20)
 
 
-class RepeatBody(BaseModel):
-    #: Nowa data meczu (ISO 8601) - wymagana.
-    match_at: str = Field(max_length=40)
-    #: Własny kod zamiast kolejnego numeru serii.
-    code: Optional[str] = Field(default=None, max_length=60)
-    copy_crew: bool = True
-    force: bool = False
-
-
 # ─── Obsada: walidacja i wstawianie ─────────────────────────────────────────
 
 
@@ -384,7 +404,7 @@ async def _prepare_crew(items: List[CrewIn], *, actor_id: str, skip_ids: Iterabl
             seen.add(judge_id)
         elif not name:
             raise _bad("Wpis ręczny wymaga imienia i nazwiska.", "MANUAL_NAME_REQUIRED")
-        wanted.append({"judge_id": judge_id or None, "name": name, "role": role})
+        wanted.append({"judge_id": judge_id or None, "name": name, "role": role, "no_auto_link": bool(item.no_app) and not judge_id})
     known = await _app_users(w["judge_id"] for w in wanted if w["judge_id"])
     missing = [w["judge_id"] for w in wanted if w["judge_id"] and w["judge_id"] not in known]
     if missing:
@@ -403,6 +423,16 @@ async def _prepare_crew(items: List[CrewIn], *, actor_id: str, skip_ids: Iterabl
     return ok, skipped
 
 
+async def _apply_kind_stats(match_id: str) -> None:
+    """Oznaczenie jako międzypaństwowy włącza „Wliczaj do moich statystyk" - każdemu RAZ.
+
+    Znacznik `kind_stats_applied` stoi na serwerze, nie na telefonie: inaczej nowe urządzenie włączyłoby z powrotem to, co
+    sędzia świadomie wyłączył. Ręczna decyzja (`PUT .../stats`) też stawia ten znacznik.
+    """
+    await database.execute(update(MM).where(MM.c.match_id == match_id).where(MM.c.kind_stats_applied.is_(False))
+                           .values(counts_in_stats=True, kind_stats_applied=True))
+
+
 async def _insert_members(match_id: str, items: List[Dict[str, Any]], added_by: str) -> List[Dict[str, Any]]:
     out = []
     names = await _names(i["judge_id"] for i in items if i["judge_id"])
@@ -410,7 +440,8 @@ async def _insert_members(match_id: str, items: List[Dict[str, Any]], added_by: 
         member_id = uuid.uuid4().hex
         values = {"id": member_id, "match_id": match_id, "judge_id": item["judge_id"],
                   "name": _name_of(names, item["judge_id"], s(item.get("name"))) if item["judge_id"] else s(item.get("name")),
-                  "role": item["role"], "added_by": s(added_by) or None, "added_at": C.now(), "counts_in_stats": False}
+                  "role": item["role"], "added_by": s(added_by) or None, "added_at": C.now(), "counts_in_stats": False,
+                  "no_auto_link": bool(item.get("no_auto_link"))}
         await database.execute(insert(MM).values(**values))
         out.append(values)
     return out
@@ -469,6 +500,10 @@ def _core_values(body: Any, *, for_edit: bool = False) -> Dict[str, Any]:
             values[field] = SR.clean_text(getattr(body, field, None), 160)
     if not for_edit or "match_at" in sent:
         values["match_at"] = _guard(SR.parse_match_at, getattr(body, "match_at", None))
+    if not for_edit or "match_kind" in sent:
+        values["match_kind"] = _guard(SR.clean_match_kind, getattr(body, "match_kind", None))
+    if not for_edit or "age_group" in sent:
+        values["age_group"] = _guard(SR.clean_age_group, getattr(body, "age_group", None))
     return values
 
 
@@ -493,7 +528,7 @@ async def _create(actor: Actor, params: Dict[str, Any], *, force: bool, crew_in:
         existing = await C.one(select(M).where(M.c.creator_id == actor.judge_id).where(M.c.local_id == local_id))
         if existing:
             return await _existing_response(existing, actor)
-    values = _with_keys({k: params.get(k) for k in ("code", "competition", "home_name", "away_name", "hall", "city", "match_at")})
+    values = _with_keys({k: params.get(k) for k in ("code", "competition", "home_name", "away_name", "hall", "city", "match_at", "match_kind", "age_group")})
     if not force:
         dupes = await _duplicates(actor, key=SR.duplicate_key(values.get("home_name"), values.get("away_name"), values.get("match_at")))
         if dupes:
@@ -515,12 +550,17 @@ async def _create(actor: Actor, params: Dict[str, Any], *, force: bool, crew_in:
         async with database.transaction():
             await database.execute(insert(M).values(
                 id=match_id, creator_id=actor.judge_id, local_id=local_id or None, rev=1, **values,
-                zprp_match_id=zprp_id or None, proel_key=proel_key, extra_json=C.dumps(extra), created_at=C.now(), updated_at=C.now(),
+                zprp_match_id=zprp_id or None, proel_key=proel_key, proel_stem=new_shared_stem(actor.judge_id, local_id, match_id),
+                extra_json=C.dumps(extra), created_at=C.now(), updated_at=C.now(),
                 updated_by=actor.judge_id, **scores))
             await _insert_members(match_id, [{"judge_id": actor.judge_id, "name": actor.display_name, "role": role}], actor.judge_id)
+            # Twórca wybrał na ekranie sam: jego przełącznik jest już decyzją, także gdy wyłączył.
+            international = SR.is_international(values.get("match_kind"))
             await database.execute(update(MM).where(MM.c.match_id == match_id).where(MM.c.judge_id == actor.judge_id)
-                                   .values(counts_in_stats=bool(counts)))
+                                   .values(counts_in_stats=bool(counts), kind_stats_applied=international))
             added = await _insert_members(match_id, crew, actor.judge_id)
+            if international:
+                await _apply_kind_stats(match_id)
             await _write_log(match_id, 1, actor.judge_id, "create", [{"field": "created", "from": None, "to": values.get("code") or True}])
     except Exception:
         if local_id:  # wyścig dwóch migracji tego samego lokalnego meczu: wygrywa pierwsza, druga dostaje ten sam mecz
@@ -529,8 +569,10 @@ async def _create(actor: Actor, params: Dict[str, Any], *, force: bool, crew_in:
                 return await _existing_response(existing, actor)
         raise
     row = await _row(match_id)
-    members = await _members(match_id)
     await _notify_added(row, actor, added)
+    await LK.link_matches([match_id], actor_id=actor.judge_id, refresh=False)
+    row = await _row(match_id)
+    members = await _members(match_id)
     await _after(row, actor)
     payload = await detail_payload(row, members, actor)
     return {"ok": True, "existing": False, "skipped": skipped, **payload}
@@ -564,7 +606,9 @@ async def create_match(body: CreateBody, actor: Actor = Depends(base_actor)):
 @router.get("")
 async def list_matches(include_hidden: bool = Query(False), limit: int = Query(300, ge=1, le=500), actor: Actor = Depends(base_actor)):
     """Moje mecze wspólne (domyślnie bez ukrytych; `include_hidden=true` dokłada je z `my.hidden=true`)."""
+    await LK.link_for_account(actor.judge_id)
     mine = await C.rows(select(MM).where(MM.c.judge_id == actor.judge_id))
+    await LK.link_matches([m["match_id"] for m in mine], actor_id=actor.judge_id)
     hidden = len([1 for m in mine if m.get("hidden_at") is not None]) if not include_hidden else 0
     if not include_hidden:
         mine = [m for m in mine if m.get("hidden_at") is None]
@@ -579,7 +623,9 @@ async def list_matches(include_hidden: bool = Query(False), limit: int = Query(3
         crew.setdefault(s(m["match_id"]), []).append(m)
     names = await _names([r["creator_id"] for r in rows] + [m.get("judge_id") for ms in crew.values() for m in ms]
                          + [r.get("result_by") for r in rows] + [by_match[r["id"]].get("added_by") for r in rows])
-    items = [{"match": match_shape(r, names, viewer=actor.judge_id), "crew": [member_shape(m, names) for m in crew.get(r["id"], [])],
+    hints = await _suggested([m for ms in crew.values() for m in ms])
+    items = [{"match": match_shape(r, names, viewer=actor.judge_id),
+              "crew": [member_shape(m, names, hints.get(s(m["id"]))) for m in crew.get(r["id"], [])],
               "my": my_shape(by_match[r["id"]], names)} for r in rows]
     return {"matches": items, "count": len(items), "hidden_count": hidden}
 
@@ -639,7 +685,10 @@ async def search_users(q: str = Query("", max_length=60), limit: int = Query(10,
     found = await C.rows(
         select(login_records.c.judge_id, login_records.c.full_name, login_records.c.photo_url, login_records.c.province)
         .where(or_(*conds)).where(login_records.c.judge_id != actor.judge_id).order_by(login_records.c.full_name.asc()).limit(limit))
-    return {"users": [{"judge_id": r["judge_id"], "name": r["full_name"], "photo_url": r.get("photo_url") or None, "province": r.get("province")}
+    # Zdjęcie tak samo jak w obsadzie i sugestiach: konto, a gdy puste, lista sędziów okręgu.
+    names = await _names(r["judge_id"] for r in found)
+    return {"users": [{"judge_id": r["judge_id"], "name": r["full_name"],
+                       "photo_url": (names.get(s(r["judge_id"])) or {}).get("photo_url") or None, "province": r.get("province")}
                       for r in found]}
 
 
@@ -713,6 +762,8 @@ async def join_match(body: JoinBody, actor: Actor = Depends(base_actor)):
         if found is None:
             raise C.err(410, "MATCH_DELETED", "Twórca usunął ten mecz u wszystkich.")
         await _insert_members(row["id"], [{"judge_id": actor.judge_id, "name": actor.display_name, "role": role}], actor.judge_id)
+        if SR.is_international(row.get("match_kind")):
+            await _apply_kind_stats(row["id"])
         await _write_log(row["id"], int(found["rev"]), actor.judge_id, "join", [{"field": "crew", "from": None, "to": f"{actor.display_name} ({role})"}])
     fresh = await _row(row["id"])
     title, text = N.joined(row, actor.display_name, role)
@@ -727,6 +778,8 @@ async def join_match(body: JoinBody, actor: Actor = Depends(base_actor)):
 @router.get("/{match_id}")
 async def get_match(match_id: str, actor: Actor = Depends(base_actor)):
     row, members, _ = await _load(match_id, actor)
+    if any(not m.get("judge_id") for m in members) and await LK.link_matches([match_id], actor_id=actor.judge_id):
+        row, members, _ = await _load(match_id, actor)
     return await detail_payload(row, members, actor)
 
 
@@ -747,6 +800,8 @@ async def edit_match(match_id: str, body: EditBody, actor: Actor = Depends(base_
     async with database.transaction():
         rev = await _bump(row["id"], actor, body.base_rev, values)
         await _write_log(row["id"], rev, actor.judge_id, "edit", changes)
+        if SR.turned_international(row.get("match_kind"), values.get("match_kind", row.get("match_kind"))):
+            await _apply_kind_stats(row["id"])
     fresh = await _row(row["id"])
     await _after(fresh, actor)
     return {"ok": True, "unchanged": False, **await detail_payload(fresh, await _members(row["id"]), actor)}
@@ -822,11 +877,14 @@ async def add_crew(match_id: str, body: CrewAddBody, actor: Actor = Depends(base
     async with database.transaction():
         rev = await _bump(row["id"], actor, body.base_rev, {})
         added = await _insert_members(row["id"], ok, actor.judge_id)
+        if SR.is_international(row.get("match_kind")):
+            await _apply_kind_stats(row["id"])
         names = await _names(a["judge_id"] for a in added if a["judge_id"])
         await _write_log(row["id"], rev, actor.judge_id, "crew_add",
                          [{"field": "crew", "from": None, "to": f"{x['name']} ({x['role']})"} for x in _summary_label(added, names)])
+    await _notify_added(await _row(row["id"]), actor, added)
+    await LK.link_matches([row["id"]], actor_id=actor.judge_id, refresh=False)
     fresh = await _row(row["id"])
-    await _notify_added(fresh, actor, added)
     await _after(fresh, actor)
     return {"ok": True, "unchanged": False, "skipped": skipped, **await detail_payload(fresh, await _members(row["id"]), actor)}
 
@@ -860,6 +918,22 @@ async def edit_crew(match_id: str, member_id: str, body: CrewEditBody, actor: Ac
         if name != target.get("name"):
             values["name"] = name
             changes.append({"field": "name", "from": target.get("name"), "to": name})
+    bound_id = ""
+    if s(body.judge_id):
+        bound_id = s(body.judge_id)
+        if s(target.get("judge_id")):
+            raise _bad("Konto można przypisać tylko do wpisu ręcznego.", "NOT_MANUAL")
+        present = {s(m.get("judge_id")) for m in members if s(m.get("judge_id"))}
+        if bound_id in present:
+            raise HTTPException(409, detail={"code": "ALREADY_MEMBER", "message": "Ta osoba jest już w obsadzie tego meczu."})
+        ok, skipped = await _prepare_crew([CrewIn(judge_id=bound_id, role=target["role"])], actor_id=actor.judge_id, skip_ids=present)
+        if not ok:
+            raise HTTPException(409, detail={"code": "ADD_BLOCKED", "skipped": skipped,
+                                             "message": "Ta osoba nie chce być dodawana przez Ciebie do meczów wspólnych."})
+        account_name = _name_of(await _names([bound_id]), bound_id)
+        values.update({"judge_id": bound_id, "name": account_name, "no_auto_link": False})
+        changes.append({"field": "crew", "from": f"{s(target.get('name'))} (wpis ręczny)", "to": f"{account_name} (konto w aplikacji)",
+                        "member": s(target.get("name"))})
     if not changes:
         if body.base_rev is None:
             raise _bad("Brak base_rev - podaj wersję meczu, którą widzisz.", "BASE_REV_REQUIRED")
@@ -868,6 +942,10 @@ async def edit_crew(match_id: str, member_id: str, body: CrewEditBody, actor: Ac
         rev = await _bump(row["id"], actor, body.base_rev, {})
         await database.execute(update(MM).where(MM.c.id == member_id).values(**values))
         await _write_log(row["id"], rev, actor.judge_id, "crew_edit", changes)
+    if bound_id:
+        await _notify_added(await _row(row["id"]), actor, [{"judge_id": bound_id, "role": values.get("role") or target["role"]}])
+    if "name" in values and not bound_id:
+        await LK.link_matches([row["id"]], actor_id=actor.judge_id, refresh=False)
     fresh = await _row(row["id"])
     await _after(fresh, actor)
     return {"ok": True, "unchanged": False, **await detail_payload(fresh, await _members(row["id"]), actor)}
@@ -925,7 +1003,7 @@ async def restore_match(match_id: str, actor: Actor = Depends(base_actor)):
 async def put_stats(match_id: str, body: StatsBody, actor: Actor = Depends(base_actor)):
     """Czy ten mecz liczy się do MOICH statystyk (osobno u każdego członka, domyślnie nie). Nie zmienia `rev` meczu."""
     row, members, mine = await _load(match_id, actor)
-    await database.execute(update(MM).where(MM.c.id == mine["id"]).values(counts_in_stats=bool(body.counts_in_stats)))
+    await database.execute(update(MM).where(MM.c.id == mine["id"]).values(counts_in_stats=bool(body.counts_in_stats), kind_stats_applied=True))
     return {"ok": True, "counts_in_stats": bool(body.counts_in_stats)}
 
 
@@ -977,6 +1055,8 @@ async def put_proel(match_id: str, body: ProelBody, actor: Actor = Depends(base_
     key = _guard(SR.clean_proel_key, body.proel_key)
     if key and not await proel_key_allowed(key, [m.get("judge_id") for m in members if m.get("judge_id")]):
         raise C.err(403, "PROEL_SCOPE", "Mecz szkoleniowy może podpiąć tylko jego autor albo osoba z tej obsady.")
+    if key and is_shared_key(key) and shared_stem_of_key(key) != stem_of_row(row):
+        raise C.err(422, "PROEL_KEY_FOREIGN", "Ten klucz protokołu należy do innego meczu.")
     values = {"proel_key": key}
     changes = SR.diff_fields(row, {**row, **values}, ("proel_key",))
     if not changes:
@@ -989,24 +1069,3 @@ async def put_proel(match_id: str, body: ProelBody, actor: Actor = Depends(base_
     fresh = await _row(row["id"])
     await _after(fresh, actor)
     return {"ok": True, "unchanged": False, **await detail_payload(fresh, await _members(row["id"]), actor)}
-
-
-# ─── Powtórz mecz (seria) ───────────────────────────────────────────────────
-
-
-@router.post("/{match_id}/repeat")
-async def repeat_match(match_id: str, body: RepeatBody, actor: Actor = Depends(base_actor)):
-    """Kopia meczu z nową datą i kolejnym numerem serii (EHF/1 -> EHF/2). Kopiuje drużyny, miejsce, rozgrywki i (opcjonalnie)
-    obsadę; NIE kopiuje wyniku, powiązań ZPRP/ProEl ani statystyk. Autorem kopii jest ten, kto ją tworzy."""
-    row, members, mine = await _load(match_id, actor)
-    when = _guard(SR.parse_match_at, body.match_at)
-    if when is None:
-        raise _bad("Podaj datę nowego meczu.")
-    own_ids = [s(m["match_id"]) for m in await C.rows(select(MM.c.match_id).where(MM.c.judge_id == actor.judge_id))]
-    codes = [s(r.get("code")) for r in await C.rows(select(M.c.code).where(M.c.id.in_(own_ids)).where(M.c.deleted_at.is_(None)))] if own_ids else []
-    code = SR.clean_text(body.code, 60) or SR.next_series_code(row.get("code"), codes)
-    params = {"code": code, "competition": row.get("competition"), "home_name": row.get("home_name"), "away_name": row.get("away_name"),
-              "hall": row.get("hall"), "city": row.get("city"), "match_at": when, "extra": _extra(row)}
-    crew = [CrewIn(judge_id=m.get("judge_id"), name=m.get("name"), role=m["role"]) for m in members
-            if s(m.get("judge_id")) != s(actor.judge_id)] if body.copy_crew else []
-    return await _create(actor, params, force=body.force, crew_in=crew, my_role=mine["role"], counts=False, local_id=None, result=None)

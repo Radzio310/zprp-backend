@@ -51,8 +51,15 @@ def define_tables(metadata):
         Column("teams_key", String, nullable=True, index=True),
         Column("hall", String, nullable=True),
         Column("city", String, nullable=True),
+        #: Rodzaj meczu, wspólny dla obsady (02.11.2026): miedzypanstwowy | miedzynarodowy | zwykly. NULL = nikt nie rozstrzygnął.
+        Column("match_kind", String, nullable=True),
+        #: Grupa wiekowa do stawki: seniorzy | mlodziez. Tylko przy meczu międzypaństwowym i międzynarodowym.
+        Column("age_group", String, nullable=True),
         Column("zprp_match_id", String, nullable=True, index=True),
         Column("proel_key", String, nullable=True),
+        #: Tuleja klucza protokołu ProEla `M-<tuleja>/<numer>` - jedna na mecz, ta sama u całej obsady
+        #: (`app/proel_match_key.py`). Pusta w wierszach sprzed kolumny: wtedy tuleją jest początek id.
+        Column("proel_stem", String, nullable=True),
         #: Wynik skrócony wpisany ręcznie. NIGDY nie idzie do ZPRP.
         Column("score_home", Integer, nullable=True),
         Column("score_away", Integer, nullable=True),
@@ -86,6 +93,12 @@ def define_tables(metadata):
         Column("hidden_at", DateTime(timezone=True), nullable=True),
         #: Czy mecz liczy się do statystyk TEJ osoby. Domyślnie nie.
         Column("counts_in_stats", Boolean, nullable=False, server_default=text("false")),
+        #: Oznaczenie meczu jako międzypaństwowy włączyło już statystyki tej osobie (albo sama o nich zdecydowała).
+        #: Działa RAZ: późniejsze ręczne wyłączenie zostaje, ponowne oznaczenie go nie cofa.
+        Column("kind_stats_applied", Boolean, nullable=False, server_default=text("false")),
+        #: Wpis ręczny dodany świadomie jako "osoba bez aplikacji": nigdy nie wiąże się z kontem automatycznie (nawet przez
+        #: partnera). Serwer może najwyżej podpowiedzieć konto, a przypisuje je człowiek (`shared_match_link`).
+        Column("no_auto_link", Boolean, nullable=False, server_default=text("false")),
         UniqueConstraint("match_id", "judge_id", name="uq_shared_member_match_judge"),
     )
 

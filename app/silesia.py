@@ -31,6 +31,7 @@ from app.db import (
     province_offtime_sync_runs,
     silesia_offtimes,
 )
+from app.announcement_rules import make_thumbnail
 from app.calendar_feed_rules import judge_key
 from app.ical_feed import is_feed_entry
 from app.province_match_offtimes import (
@@ -85,6 +86,24 @@ def _static_path_for_url(image_url: str) -> str:
     return os.path.join(STATIC_DIR, filename)
 
 
+def _remove_static_file(url: Optional[str]) -> None:
+    """Kasuje plik z /static/ (oryginał albo miniaturę); błędy ignoruje."""
+    if not url:
+        return
+    path = _static_path_for_url(url)
+    if os.path.isfile(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _save_thumb_url(image_filename: str) -> Optional[str]:
+    """Miniatura obok oryginału -> '/static/<nazwa>' albo None. Nie rzuca."""
+    name = make_thumbnail(os.path.join(STATIC_DIR, image_filename), STATIC_DIR)
+    return f"/static/{name}" if name else None
+
+
 # -------------------------
 # Helpers
 # -------------------------
@@ -115,6 +134,7 @@ def _announcement_row_to_response(row) -> AnnouncementResponse:
         title=row["title"],
         content=row["content"],
         image_url=row["image_url"],
+        thumb_url=row["thumb_url"],
         priority=row["priority"],
         link=row["link"],
         updated_at=row["updated_at"],
@@ -179,7 +199,16 @@ async def get_last_update(province: Optional[str] = Query(None)):
     Zwraca timestamp ostatniej zmiany spośród ogłoszeń.
     Jeśli podasz ?province=..., filtruje po województwie.
     """
-    q = select(func.max(announcements.c.updated_at))
+    # Sygnał "coś się zmieniło": największa z edycji (updated_at) i reakcji/komentarzy
+    # (activity_at). Reakcje nie ruszają updated_at, więc kolejność ogłoszeń zostaje.
+    q = select(
+        func.max(
+            func.greatest(
+                announcements.c.updated_at,
+                func.coalesce(announcements.c.activity_at, announcements.c.updated_at),
+            )
+        )
+    )
     if province:
         q = q.where(announcements.c.province == province)
     row = await database.fetch_one(q)
@@ -251,6 +280,7 @@ async def create_announcement(
 
     # domyślnie brak obrazka
     image_url = None
+    thumb_url = None
 
     # jeśli obrazek jest, zapisujemy plik i ustawiamy image_url
     if image:
@@ -260,6 +290,7 @@ async def create_announcement(
         with open(dest, "wb") as out:
             shutil.copyfileobj(image.file, out)
         image_url = f"/static/{filename}"
+        thumb_url = _save_thumb_url(filename)
 
     # 🔴 TO MUSI BYĆ POZA if image: 🔴
     stmt = (
@@ -270,6 +301,7 @@ async def create_announcement(
             title=title_plain,
             content=content_plain,
             image_url=image_url,   # None lub ścieżka
+            thumb_url=thumb_url,
             priority=priority,
             link=link_plain,
             province=province_plain,
@@ -333,19 +365,17 @@ async def update_announcement(
     )
 
     image_url = None
+    thumb_url = None
     if image:
-        # Usuń poprzedni plik (jeśli był)
+        # Usuń poprzedni plik i jego miniaturę (jeśli były)
         old = await database.fetch_one(
-            select(announcements.c.image_url).where(announcements.c.id == ann_id)
+            select(announcements.c.image_url, announcements.c.thumb_url).where(
+                announcements.c.id == ann_id
+            )
         )
-        old_url = old["image_url"] if old else None
-        if old_url:
-            old_path = _static_path_for_url(old_url)
-            if os.path.isfile(old_path):
-                try:
-                    os.remove(old_path)
-                except OSError:
-                    pass
+        if old:
+            _remove_static_file(old["image_url"])
+            _remove_static_file(old["thumb_url"])
 
         ext = (image.filename or "img").split(".")[-1]
         filename = f"{uuid.uuid4()}.{ext}"
@@ -353,6 +383,7 @@ async def update_announcement(
         with open(dest, "wb") as out:
             shutil.copyfileobj(image.file, out)
         image_url = f"/static/{filename}"
+        thumb_url = _save_thumb_url(filename)
 
     update_values = {
         "judge_id": judge_plain,
@@ -370,6 +401,8 @@ async def update_announcement(
         update_values["province"] = province  # ⬅ zmiana województwa
     if image_url is not None:
         update_values["image_url"] = image_url
+        # nowa grafika: miniatura zawsze podmieniona (None, gdy się nie udała)
+        update_values["thumb_url"] = thumb_url
 
     stmt = (
         update(announcements)
@@ -451,7 +484,7 @@ async def toggle_reaction(ann_id: int, payload: ToggleReactionRequest):
     stmt = (
         update(announcements)
         .where(announcements.c.id == ann_id)
-        .values(likes=likes)
+        .values(likes=likes, updated_at=announcements.c.updated_at, activity_at=func.now())
         .returning(announcements)
     )
     updated = await database.fetch_one(stmt)
@@ -495,7 +528,7 @@ async def add_comment(ann_id: int, payload: AddCommentRequest):
     stmt = (
         update(announcements)
         .where(announcements.c.id == ann_id)
-        .values(comments=comments)
+        .values(comments=comments, updated_at=announcements.c.updated_at, activity_at=func.now())
         .returning(announcements)
     )
     updated = await database.fetch_one(stmt)
@@ -545,7 +578,7 @@ async def pin_comment(
     stmt = (
         update(announcements)
         .where(announcements.c.id == ann_id)
-        .values(comments=comments)
+        .values(comments=comments, updated_at=announcements.c.updated_at, activity_at=func.now())
         .returning(announcements)
     )
     updated = await database.fetch_one(stmt)
@@ -591,7 +624,7 @@ async def delete_comment(
     stmt = (
         update(announcements)
         .where(announcements.c.id == ann_id)
-        .values(comments=comments)
+        .values(comments=comments, updated_at=announcements.c.updated_at, activity_at=func.now())
         .returning(announcements)
     )
     updated = await database.fetch_one(stmt)
@@ -608,7 +641,11 @@ async def delete_announcement(
     token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
 ):
     row = await database.fetch_one(
-        select(announcements.c.image_url, announcements.c.province).where(
+        select(
+            announcements.c.image_url,
+            announcements.c.thumb_url,
+            announcements.c.province,
+        ).where(
             announcements.c.id == ann_id
         )
     )
@@ -620,15 +657,8 @@ async def delete_announcement(
         token_payload, province=row["province"], action="Usunięcie ogłoszenia"
     )
 
-    image_url = row["image_url"]
-    if image_url:
-        path = _static_path_for_url(image_url)
-        if os.path.isfile(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-
+    _remove_static_file(row["image_url"])
+    _remove_static_file(row["thumb_url"])
 
     await database.execute(delete(announcements).where(announcements.c.id == ann_id))
     return

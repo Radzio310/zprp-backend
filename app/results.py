@@ -5601,7 +5601,34 @@ async def _record_protocol_audit(row: Dict[str, Any]) -> None:
         )
 
 
-async def _with_exam_overlay(data_json: Dict[str, Any]) -> Dict[str, Any]:
+async def _may_read_shared_key(key: str, judge_id: str) -> bool:
+    """Klucz meczu ręcznego `M-...` z bloba klienta wolno użyć jako klucza odczytu overlaya tylko wołającemu, który ma do
+    tego meczu prawo: jest piszącym ten protokół albo członkiem meczu wspólnego z tą tuleją. Inaczej cudzy klucz w blobie
+    wydrukowałby badania z cudzego protokołu."""
+    judge = str(judge_id or "").strip()
+    if not judge:
+        return False
+    try:
+        from sqlalchemy import select as _select
+
+        from app.db import database, saved_matches
+        from app.proel_fields import same_judge_number
+        from app.proel_list_scope import member_stems
+        from app.proel_match_key import shared_stem_of_key
+
+        if shared_stem_of_key(key) in await member_stems(judge):
+            return True
+        row = await database.fetch_one(
+            _select(saved_matches.c.doc_writer_judge).where(saved_matches.c.match_number == key)
+        )
+        writer = str(row["doc_writer_judge"] or "").strip() if row is not None else ""
+        return bool(writer) and same_judge_number(writer, judge)
+    except Exception:  # noqa: BLE001 - brak pewności = brak prawa
+        logger.warning("protokół PDF: nie sprawdzono prawa do klucza meczu ręcznego", exc_info=True)
+        return False
+
+
+async def _with_exam_overlay(data_json: Dict[str, Any], judge_id: str = "") -> Dict[str, Any]:
     """Blob DO WYDRUKU z nałożonymi wpisami badań z overlaya.
 
     Telefon generuje protokół ze SWOJEGO stanu, a ten o awansie z bazy związku
@@ -5624,6 +5651,14 @@ async def _with_exam_overlay(data_json: Dict[str, Any]) -> Dict[str, Any]:
     number = str(mc.get("matchNumber") or "").strip()
     if not number:
         return data_json
+    # Mecz ręczny leży pod własnym kluczem (M-<tuleja>/<numer>), a nie pod numerem z wydruku.
+    from app.proel_match_key import is_shared_key as _is_shared_key
+
+    explicit_key = str(mc.get("proelKey") or "").strip()
+    if _is_shared_key(explicit_key):
+        if not await _may_read_shared_key(explicit_key, judge_id):
+            return data_json  # cudzy klucz M-: bez nakładki, protokół drukuje się ze stanu sędziego
+        number = explicit_key
     try:
         from sqlalchemy import select as _select
 
@@ -5728,7 +5763,7 @@ async def generate_protocol_pdf(
 
     # Overlay badań na blob do wydruku - PO policzeniu odcisku stanu, bo odcisk
     # opisuje to, co przysłał sędzia, a nie to, co dołożył serwer.
-    data_json = await _with_exam_overlay(data_json)
+    data_json = await _with_exam_overlay(data_json, actor_judge_id)
 
     core = _get_match_core(data_json)
     has_second_delegate = bool(core.get("delegate2"))

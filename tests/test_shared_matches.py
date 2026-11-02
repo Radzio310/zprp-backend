@@ -50,15 +50,6 @@ def test_klucz_duplikatu_bez_kolejnosci_ogonkow_i_strefy(env):
     assert R.duplicate_key("A", "", R.parse_match_at("2026-11-05")) is None
 
 
-def test_kolejny_numer_serii(env):
-    R = env.shared_rules
-    assert R.next_series_code("EHF/1") == "EHF/2"
-    assert R.next_series_code("EHF 3") == "EHF 4"
-    assert R.next_series_code("EHF") == "EHF/2"
-    assert R.next_series_code("EHF/1", ["ehf/2", "EHF/3"]) == "EHF/4"
-    assert R.next_series_code("12") is None and R.next_series_code("") is None
-
-
 def test_uprawnienia_do_obsady_i_konflikt_wersji(env):
     R = env.shared_rules
     assert R.may_remove_member(actor_id="1", creator_id="1", member_judge_id="2")
@@ -281,23 +272,69 @@ def test_duplikat_pozwala_dolaczyc_tylko_do_pasujacego_meczu(env):
     assert forced["existing"] is False and forced["match"]["id"] != created["match"]["id"]
 
 
-def test_powtorz_mecz_kopia_z_nowa_data_i_kolejnym_numerem(env):
+def test_rodzaj_meczu_wspolny_dla_obsady_z_base_rev_i_w_dzienniku(env):
+    async def go():
+        created = await make(env, match_kind="miedzypanstwowy", age_group="mlodziez", counts_in_stats=True)
+        mid = created["match"]["id"]
+        seen_by_b = await env.shared.get_match(mid, await env.actor(B))
+        edited = await env.shared.edit_match(mid, env.shared.EditBody(base_rev=created["rev"], age_group="seniorzy"), await env.actor(B))
+        try:
+            await env.shared.edit_match(mid, env.shared.EditBody(base_rev=created["rev"], match_kind="zwykly"), await env.actor(A))
+            conflict = None
+        except HTTPException as exc:
+            conflict = exc.status_code
+        return created, seen_by_b, edited, conflict
+
+    created, seen_by_b, edited, conflict = env.run(go)
+    assert created["match"]["match_kind"] == "miedzypanstwowy" and created["match"]["age_group"] == "mlodziez"
+    assert seen_by_b["match"]["match_kind"] == "miedzypanstwowy"
+    assert edited["match"]["age_group"] == "seniorzy" and edited["rev"] == created["rev"] + 1
+    assert any(c["field"] == "age_group" for c in edited["log"][0]["changes"])
+    assert conflict == 409
+
+
+def test_rodzaj_meczu_nieznany_to_blad(env):
+    SR = env.shared.SR
+    with pytest.raises(ValueError):
+        SR.clean_match_kind("towarzyski")
+    with pytest.raises(ValueError):
+        SR.clean_age_group("kadet")
+    assert SR.clean_match_kind("") is None and SR.clean_age_group(None) is None
+    assert SR.turned_international("zwykly", "miedzynarodowy") and not SR.turned_international("miedzypanstwowy", "miedzynarodowy")
+
+
+def test_oznaczenie_wlacza_statystyki_raz_a_reczne_wylaczenie_zostaje(env):
     async def go():
         created = await make(env)
         mid = created["match"]["id"]
-        await env.shared.put_result(mid, env.shared.ResultBody(base_rev=created["rev"], score_home=20, score_away=18), await env.actor(A))
-        # Nie można powtórzyć na tę samą datę bez force.
-        same_day = await denied(env.shared.repeat_match(mid, env.shared.RepeatBody(match_at="2026-11-05T19:00:00"), await env.actor(B)))
-        copy = await env.shared.repeat_match(mid, env.shared.RepeatBody(match_at="2026-11-12T18:00:00"), await env.actor(B))
-        third = await env.shared.repeat_match(copy["match"]["id"], env.shared.RepeatBody(match_at="2026-11-19T18:00:00"), await env.actor(B))
-        return created, same_day, copy, third
+        rev = created["rev"]
+        off_before = (await env.shared.get_match(mid, await env.actor(B)))["my"]["counts_in_stats"]
+        marked = await env.shared.edit_match(mid, env.shared.EditBody(base_rev=rev, match_kind="miedzypanstwowy", age_group="seniorzy"), await env.actor(A))
+        on_a = marked["my"]["counts_in_stats"]
+        on_b = (await env.shared.get_match(mid, await env.actor(B)))["my"]
+        # B wyłącza ręcznie, ktoś odznacza i oznacza ponownie: zostaje wyłączone, a u A zostaje włączone.
+        await env.shared.put_stats(mid, env.shared.StatsBody(counts_in_stats=False), await env.actor(B))
+        un = await env.shared.edit_match(mid, env.shared.EditBody(base_rev=marked["rev"], match_kind="zwykly"), await env.actor(A))
+        after_unmark_a = un["my"]["counts_in_stats"]
+        again = await env.shared.edit_match(mid, env.shared.EditBody(base_rev=un["rev"], match_kind="miedzynarodowy"), await env.actor(A))
+        off_b = (await env.shared.get_match(mid, await env.actor(B)))["my"]["counts_in_stats"]
+        return off_before, on_a, on_b, after_unmark_a, off_b, again["my"]["counts_in_stats"]
 
-    created, same_day, copy, third = env.run(go)
-    assert same_day[:2] == (409, "DUPLICATE_MATCH")
-    assert copy["match"]["code"] == "EHF/2" and third["match"]["code"] == "EHF/3"
-    assert copy["match"]["creator_id"] == B and copy["match"]["result"] is None and copy["match"]["hall"] == "Hala Łabędy"
-    assert sorted(c["judge_id"] for c in copy["crew"]) == [A, B]
-    assert {c["judge_id"]: c["role"] for c in copy["crew"]} == {A: "sedzia1", B: "sedzia2"}
+    off_before, on_a, on_b, after_unmark_a, off_b, again_a = env.run(go)
+    assert off_before is False and on_a is True and on_b["counts_in_stats"] is True and on_b["kind_stats_applied"] is True
+    assert after_unmark_a is True  # odznaczenie nie wyłącza
+    assert off_b is False  # ręczne wyłączenie uszanowane
+    assert again_a is True
+
+
+def test_tworca_moze_wylaczyc_statystyki_na_bilecie_a_reszta_obsady_ma_wlaczone(env):
+    async def go():
+        created = await make(env, match_kind="miedzynarodowy", age_group="seniorzy", counts_in_stats=False)
+        mid = created["match"]["id"]
+        return created["my"]["counts_in_stats"], (await env.shared.get_match(mid, await env.actor(B)))["my"]["counts_in_stats"]
+
+    mine, other = env.run(go)
+    assert mine is False and other is True
 
 
 def test_wliczanie_do_statystyk_domyslnie_wylaczone_i_osobne(env):

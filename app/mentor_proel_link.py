@@ -28,6 +28,7 @@ from app import shared_match_rules as SR
 from app.db import database, mentor_proel_links, saved_matches
 from app.mentor_panel_auth import mentor_actor
 from app.mentor_video_rules import EVENT_KINDS
+from app.proel_match_key import SHARED_KEY_LIKE, is_shared_key, shared_key_of
 from app.proel_training_key import TRAINING_KEY_LIKE, is_training_key, match_number_from_key
 
 logger = logging.getLogger("app.mentor_panel")
@@ -87,7 +88,12 @@ async def timeline_target(ctx: Dict[str, Any], card: Dict[str, Any]) -> Dict[str
                 "trusted": False, "owner_ids": None, "source": "trybuna"}
     if card.get("shared"):
         if s(card.get("proel_key")):
-            return {"match_id": s(card.get("zprp_match_id")), "code": s(card["proel_key"]), "trusted": True, "owner_ids": owners, "source": "shared"}
+            return {"match_id": s(card.get("zprp_match_id")), "code": s(card["proel_key"]), "trusted": True,
+                    "owner_ids": None if is_shared_key(s(card["proel_key"])) else owners, "source": "shared"}
+        # Wskaźnik mógł nie dojść z telefonu (offline), a protokół już leży pod kluczem M-<tuleja>/<numer>.
+        derived = shared_key_of(card.get("key_stem"), card.get("match_code"))
+        if derived and await C.one(select(saved_matches.c.match_number).where(saved_matches.c.match_number == derived)):
+            return {"match_id": s(card.get("zprp_match_id")), "code": derived, "trusted": True, "owner_ids": None, "source": "shared"}
         # Ręczny numer meczu bez ID ZPRP nie wskazuje niczego pewnego (numer nie jest kluczem między sezonami).
         if s(card.get("zprp_match_id")):
             return {"match_id": s(card["zprp_match_id"]), "code": s(card.get("match_code")), "trusted": False, "owner_ids": None, "source": "auto"}
@@ -128,14 +134,18 @@ def owner_variants(judge_ids: Iterable[Any]) -> List[str]:
 
 def scope_clause(owner_ids: Iterable[Any], kind: str = "all"):
     """Zakres wyszukiwania: oficjalne bez ograniczeń, szkoleniowe tylko zapisane przez ludzi z pary."""
-    official = ~S.c.match_number.ilike(TRAINING_KEY_LIKE)
+    # Mecz ręczny (M-<tuleja>/<numer>) jest oficjalny, ale NIE publiczny: widzi go tylko ten, kto go zapisał, jak szkoleniowy.
+    manual = S.c.match_number.ilike(SHARED_KEY_LIKE)
+    official = and_(~S.c.match_number.ilike(TRAINING_KEY_LIKE), ~manual)
     variants = owner_variants(owner_ids)
-    training = and_(S.c.match_number.ilike(TRAINING_KEY_LIKE), S.c.doc_writer_judge.in_(variants)) if variants else None
+    own = S.c.doc_writer_judge.in_(variants) if variants else None
+    training = and_(S.c.match_number.ilike(TRAINING_KEY_LIKE), own) if own is not None else None
+    own_manual = and_(manual, own) if own is not None else None
     if kind == "official":
-        return official
+        return or_(official, own_manual) if own_manual is not None else official
     if kind == "training":
         return training if training is not None else (S.c.match_number == "\u0000")
-    return or_(official, training) if training is not None else official
+    return or_(official, training, own_manual) if training is not None else official
 
 
 async def search_proel(owner_ids: Iterable[Any], *, q: str = "", number: str = "", team: str = "", date: str = "", kind: str = "all",
@@ -235,12 +245,12 @@ async def _checked_row(key: str, judge_ids: Iterable[Any]) -> Dict[str, Any]:
                       .where(S.c.match_number == key))
     if not row:
         raise C.err(404, "PROEL_NOT_FOUND", "Nie ma takiego protokołu w ProElu.")
-    if is_training_key(key):
+    if is_training_key(key) or is_shared_key(key):
         from app.proel_fields import same_judge_number
 
         writer = s(row.get("doc_writer_judge"))
         if not writer or not any(same_judge_number(writer, j) for j in judge_ids):
-            raise C.err(403, "PROEL_SCOPE", "Mecz szkoleniowy może podpiąć tylko ten, kto go prowadził, albo jego partner z pary.")
+            raise C.err(403, "PROEL_SCOPE", "Ten protokół może podpiąć tylko ten, kto go prowadził, albo jego partner z pary.")
     return row
 
 

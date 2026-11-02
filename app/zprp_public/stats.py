@@ -45,6 +45,7 @@ from app.db import (
     zprp_public_seasons,
     zprp_public_team_rosters,
 )
+from app.proel_match_key import public_rows_clause
 from app.proel_training_key import TRAINING_KEY_LIKE
 from app.zprp_public import corrections
 from app.zprp_public import proel_card_rules as PCR
@@ -212,7 +213,7 @@ async def refresh_proel(max_blobs: int = PROEL_PER_CYCLE) -> int:
             _proel_state["loaded"] = True
         rows = await database.fetch_all(
             select(T.c.match_number, T.c.zprp_match_id, T.c.status, T.c.updated_at)
-            .where(T.c.status.in_(P.FINISHED)).where(~T.c.match_number.ilike(TRAINING_KEY_LIKE))
+            .where(T.c.status.in_(P.FINISHED)).where(public_rows_clause(T.c.match_number, T.c.zprp_match_id))
         )
         meta: Dict[str, Dict[str, Any]] = {}
         for r in rows:

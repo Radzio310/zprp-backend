@@ -314,7 +314,7 @@ def match_summary(match_key: Any, status: Any, blob_raw: Any) -> Dict[str, Any]:
     cfg = as_dict(blob.get("matchConfig"))
     key = str(match_key or "").strip()
     training = is_training_key(key) or cfg.get("training") is not None
-    number = match_number_from_key(key) if is_training_key(key) else key
+    number = match_number_from_key(key)
     kind = classify_match_code(number)
     level = match_level(number) if kind.competition else "unknown"
     at = _match_moment(blob)

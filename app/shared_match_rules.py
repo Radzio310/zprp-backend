@@ -28,7 +28,12 @@ MAX_EXTRA_BYTES = 20_000
 MAX_TEXT = 200
 
 #: Pola treści meczu, które edytuje każdy członek (z `PUT /shared-matches/{id}`).
-EDITABLE_FIELDS: Tuple[str, ...] = ("code", "competition", "home_name", "away_name", "match_at", "hall", "city")
+EDITABLE_FIELDS: Tuple[str, ...] = ("code", "competition", "home_name", "away_name", "match_at", "hall", "city", "match_kind", "age_group")
+
+#: Rodzaj meczu (02.11.2026). `zwykly` = ktoś świadomie wybrał „Nie traktuj tak tego meczu".
+MATCH_KINDS: Tuple[str, ...] = ("miedzypanstwowy", "miedzynarodowy", "zwykly")
+INTERNATIONAL_KINDS: Tuple[str, ...] = ("miedzypanstwowy", "miedzynarodowy")
+AGE_GROUPS: Tuple[str, ...] = ("seniorzy", "mlodziez")
 
 
 def s(value: Any) -> str:
@@ -40,6 +45,34 @@ def clean_text(value: Any, limit: int = MAX_TEXT) -> Optional[str]:
     text = "".join(ch for ch in s(value) if ch == " " or (ch.isprintable() and ch not in "\r\n\t"))
     text = re.sub(r"\s+", " ", text).strip()
     return text[:limit] or None
+
+
+def clean_match_kind(value: Any) -> Optional[str]:
+    """Pusty = brak decyzji. Nieznana wartość to błąd: rodzaj decyduje o stawce, więc nie zgadujemy."""
+    kind = s(value).lower()
+    if not kind:
+        return None
+    if kind not in MATCH_KINDS:
+        raise ValueError(f"Nieznany rodzaj meczu: {s(value)}.")
+    return kind
+
+
+def clean_age_group(value: Any) -> Optional[str]:
+    group = s(value).lower()
+    if not group:
+        return None
+    if group not in AGE_GROUPS:
+        raise ValueError(f"Nieznana grupa wiekowa: {s(value)}.")
+    return group
+
+
+def is_international(kind: Any) -> bool:
+    return s(kind) in INTERNATIONAL_KINDS
+
+
+def turned_international(old_kind: Any, new_kind: Any) -> bool:
+    """Czy ten zapis dopiero co oznaczył mecz jako międzypaństwowy albo międzynarodowy."""
+    return is_international(new_kind) and not is_international(old_kind)
 
 
 def clean_role(value: Any) -> str:
@@ -145,37 +178,6 @@ def duplicate_key(home: Any, away: Any, moment: Optional[datetime]) -> Optional[
 
 
 # ─── Seria meczów ───────────────────────────────────────────────────────────
-
-_SERIES = re.compile(r"^(?P<base>.*?[^\d\s/\-_.])(?P<sep>[\s/\-_.]*)(?P<num>\d{1,4})$")
-
-
-def split_series(code: Any) -> Tuple[str, str, Optional[int]]:
-    """„EHF/1" -> („EHF", „/", 1); „EHF" -> („EHF", „", None)."""
-    text = s(code)
-    found = _SERIES.match(text)
-    if not found or not found.group("base").strip():
-        return text, "", None
-    return found.group("base").strip(), found.group("sep") or "/", int(found.group("num"))
-
-
-def next_series_code(code: Any, existing: Iterable[Any] = ()) -> Optional[str]:
-    """Kolejny numer serii: EHF/1 -> EHF/2; EHF (bez numeru) -> EHF/2. Pomija zajęte numery.
-
-    Kod, który jest samym numerem („12") albo pusty, nie tworzy serii - zwraca None (powtórzony mecz zostaje bez kodu).
-    """
-    base, sep, number = split_series(code)
-    if not base or base.replace(" ", "").isdigit():
-        return None
-    taken = {s(c).casefold() for c in existing}
-    sep = sep or "/"
-    n = (number or 1) + 1
-    for _ in range(10_000):
-        candidate = f"{base}{sep}{n}"
-        if candidate.casefold() not in taken:
-            return candidate
-        n += 1
-    return None
-
 
 # ─── Różnice do dziennika ───────────────────────────────────────────────────
 

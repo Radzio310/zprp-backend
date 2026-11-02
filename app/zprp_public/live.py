@@ -28,6 +28,7 @@ from sqlalchemy import and_, or_, select
 from app import time_pl as TP
 from app.db import database, proel_match_state as S, saved_matches as T, zprp_public_matches as M
 from app.proel_match_key import zprp_id_of
+from app.proel_match_key import public_rows_clause
 from app.proel_training_key import TRAINING_KEY_LIKE
 from app.zprp_public import proel_live_rules as L
 from app.zprp_public.portal import _card_cols, _cards
@@ -102,7 +103,7 @@ async def _live_rows() -> List[Dict[str, Any]]:
             T.c.status, T.c.updated_at.label("doc_at"), T.c.zprp_match_id.label("doc_zid"),
         )
         .select_from(S.join(T, T.c.match_number == S.c.match_number))
-        .where(~S.c.match_number.ilike(TRAINING_KEY_LIKE))
+        .where(public_rows_clause(S.c.match_number, S.c.zprp_match_id))
         .where(or_(S.c.lease_until > now, T.c.updated_at > now - JUST_FINISHED))
         .where(or_(S.c.live_started_at.is_not(None), T.c.status.in_(("finished", "approved"))))
         .limit(120)

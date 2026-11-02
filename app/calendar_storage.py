@@ -54,28 +54,40 @@ async def get_user_login_by_state(state: str) -> str | None:
 # Google Calendar tokens storage
 # -------------------------
 
+# Znacznik "nie podano": zapis bez zakresu (stare ścieżki) zostawia kolumnę
+# `scope` w spokoju, a jawne None (albo napis) ją ustawia.
+UNSET = object()
+
+
 async def save_calendar_tokens(
     user_login: str,
     access_token: str,
     refresh_token: str,
-    expires_at: str
+    expires_at: str,
+    scope=UNSET,
 ) -> None:
     """
     Insert or update Google Calendar access and refresh tokens for a user.
+    `scope` (przyznane zakresy) zapisujemy tylko, gdy go podano.
     """
     try:
-        stmt = pg_insert(calendar_tokens).values(
+        values = dict(
             user_login=user_login,
             access_token=access_token,
             refresh_token=refresh_token,
             expires_at=expires_at,
-        ).on_conflict_do_update(
+        )
+        update_set = {
+            "access_token": pg_insert(calendar_tokens).excluded.access_token,
+            "refresh_token": pg_insert(calendar_tokens).excluded.refresh_token,
+            "expires_at": pg_insert(calendar_tokens).excluded.expires_at,
+        }
+        if scope is not UNSET:
+            values["scope"] = scope
+            update_set["scope"] = pg_insert(calendar_tokens).excluded.scope
+        stmt = pg_insert(calendar_tokens).values(**values).on_conflict_do_update(
             index_elements=[calendar_tokens.c.user_login],
-            set_={
-                "access_token": pg_insert(calendar_tokens).excluded.access_token,
-                "refresh_token": pg_insert(calendar_tokens).excluded.refresh_token,
-                "expires_at": pg_insert(calendar_tokens).excluded.expires_at,
-            }
+            set_=update_set,
         )
         await database.execute(stmt)
     except Exception:
@@ -112,19 +124,22 @@ async def delete_calendar_tokens(user_login: str) -> None:
 async def save_event_mapping(
     user_login: str,
     match_id: str,
-    event_id: str
+    event_id: str,
+    calendar_id=UNSET,
 ) -> None:
     """
     Save or update the mapping between a match identifier and a Google Calendar event ID for a user.
+    `calendar_id`: None = kalendarz główny; bez podania kolumna zostaje nietknięta.
     """
     try:
-        stmt = pg_insert(event_mappings).values(
-            user_login=user_login,
-            match_id=match_id,
-            event_id=event_id
-        ).on_conflict_do_update(
+        values = dict(user_login=user_login, match_id=match_id, event_id=event_id)
+        update_set = {"event_id": pg_insert(event_mappings).excluded.event_id}
+        if calendar_id is not UNSET:
+            values["calendar_id"] = calendar_id
+            update_set["calendar_id"] = pg_insert(event_mappings).excluded.calendar_id
+        stmt = pg_insert(event_mappings).values(**values).on_conflict_do_update(
             index_elements=[event_mappings.c.user_login, event_mappings.c.match_id],
-            set_={"event_id": pg_insert(event_mappings).excluded.event_id}
+            set_=update_set,
         )
         await database.execute(stmt)
     except Exception:

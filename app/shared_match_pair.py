@@ -24,6 +24,7 @@ from app.db import (
     shared_match_members,
     shared_matches,
 )
+from app.proel_match_key import stem_of_row
 from app.shared_match_rules import REFEREE_ROLES, s
 from app.shared_match_tables import SHARED_CARD_PREFIX
 
@@ -62,14 +63,25 @@ def card_from_shared(row: Dict[str, Any], crew: List[Dict[str, Any]]) -> Dict[st
         # Znacznik pochodzenia na karcie (aplikacja i web pokazują „Mecz wspólny" / „Ręczny").
         "shared": True, "origin_kind": "shared", "shared_id": row["id"],
         "zprp_match_id": row.get("zprp_match_id"), "proel_key": row.get("proel_key"),
+        "key_stem": stem_of_row(row),
         "result_by": row.get("result_by"), "result_at": row.get("result_at"),
         "shared_rev": int(row.get("rev") or 1),
     })
     return card
 
 
+async def repair_pair(a: str, b: str) -> int:
+    """Mecz zmigrowany ze starej listy ma drugiego sędziego jako wpis ręczny (samo nazwisko). Zanim zbudujemy karty pary,
+    wiążemy takie wpisy z kontami (dokładne, jednoznaczne dopasowanie nazwiska - `shared_match_link`). Idempotentne."""
+    from app import shared_match_link as LK
+
+    mine = await C.rows(select(MM.c.match_id).where(MM.c.judge_id.in_([a, b])).where(MM.c.role.in_(REFEREE_ROLES)))
+    return len(await LK.link_matches((m["match_id"] for m in mine), refresh=False))
+
+
 async def pair_cards(a: str, b: str) -> List[Dict[str, Any]]:
     """Mecze wspólne, w których `a` i `b` są razem w obsadzie sędziowskiej (loader dla `pair_match_cards`)."""
+    await repair_pair(a, b)
     hits = await C.rows(
         select(MM.c.match_id).where(MM.c.judge_id.in_([a, b])).where(MM.c.role.in_(REFEREE_ROLES))
         .group_by(MM.c.match_id).having(func.count(func.distinct(MM.c.judge_id)) == 2)

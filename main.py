@@ -47,7 +47,9 @@ from app.judge_documents import router as judge_documents_router
 from app.national_distances import router as national_distances_router
 from app.results import router as results_router
 from app.calendar import router as calendar_router
+from app.calendar_secondary_routes import router as calendar_secondary_router
 from app.calendar_feeds import router as calendar_feeds_router
+from app.calendar_refresh_errors import install_google_refresh_handlers
 from app.silesia import router as silesia_router
 from app.admin import router as admin_router
 from app.training import router as training_router
@@ -94,7 +96,7 @@ from app.atlas_routes import router as atlas_router
 from app.province_judges import router as province_judges_router
 from app.badges import router as badges_router
 from app.baza_vips import router as baza_vips_router
-from app.central_rates import router as central_rates_router, seed_central_rates
+from app.central_rates import ensure_intl_categories, router as central_rates_router, seed_central_rates
 from app.distance_table_seed import promote_official_distance_tables
 from app.province_settlements import (
     router as province_settlements_router,
@@ -261,6 +263,7 @@ from app import loop_lag as _loop_lag
 app.add_middleware(_loop_lag.RequestNoteMiddleware)
 app.include_router(_loop_lag.make_router())
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+install_google_refresh_handlers(app)
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -298,7 +301,23 @@ STATIC_DIR = (
 )
 
 os.makedirs(STATIC_DIR, exist_ok=True)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+class _CachedStaticFiles(StaticFiles):
+    """Pliki o nazwie UUID (grafiki i miniatury ogłoszeń) nigdy nie są podmieniane
+    pod tą samą nazwą (nowa grafika = nowy UUID), więc cache może być wieczny.
+    Reszta /static/ zostaje bez zmian."""
+
+    _UUID_NAME = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(_thumb)?\.\w+$"
+    )
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        resp = super().file_response(full_path, stat_result, scope, status_code)
+        if self._UUID_NAME.match(os.path.basename(str(full_path))):
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return resp
+
+
+app.mount("/static", _CachedStaticFiles(directory=STATIC_DIR), name="static")
 
 
 app.include_router(auth_router)
@@ -324,6 +343,7 @@ app.include_router(results_router)
 # z tamtego routera złapałoby ścieżkę `/calendar/feeds/...`.
 app.include_router(calendar_feeds_router)
 app.include_router(calendar_router)
+app.include_router(calendar_secondary_router)
 app.include_router(silesia_router)
 app.include_router(admin_router)
 app.include_router(training_router)
@@ -1595,6 +1615,7 @@ async def startup():
     # tabeli, wiec restart nigdy nie cofnie kwoty poprawionej przez czlowieka.
     try:
         await seed_central_rates()
+        await ensure_intl_categories()
     except Exception:
         logger.exception("Central rates seed failed")
 

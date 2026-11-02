@@ -46,6 +46,9 @@ calendar_tokens = Table(
     Column("access_token", String, nullable=False),
     Column("refresh_token", String, nullable=False),
     Column("expires_at", String, nullable=False),
+    # Zakresy faktycznie przyznane przez Google (spacja jako separator).
+    # NULL = token sprzed kalendarzy drugorzędnych ("legacy").
+    Column("scope", String, nullable=True),
 )
 
 # 2) Tabela CSRF state dla OAuth2
@@ -63,6 +66,54 @@ event_mappings = Table(
     Column("user_login", String, primary_key=True),
     Column("match_id", String, primary_key=True),
     Column("event_id", String, nullable=False),
+    # Kalendarz, w którym leży wydarzenie. NULL = kalendarz główny (primary).
+    Column("calendar_id", String, nullable=True),
+)
+
+# 3b) Kalendarze drugorzędne BAZY w Google (BAZA - Boiskowy / Stolikowy / Mecze):
+# ustawienia, zapamiętane identyfikatory, stary token na czas przenoszenia
+# i stan zadania w tle. Jeden wiersz na konto (klucz user_login).
+calendar_secondary = Table(
+    "calendar_secondary",
+    metadata,
+    Column("user_login", String, primary_key=True),
+    Column("mode", String, nullable=False, server_default="two"),
+    Column("busy", Boolean, nullable=False, server_default="true"),
+    Column("email", String, nullable=True),
+    Column("whistle_id", String, nullable=True),
+    Column("stopwatch_id", String, nullable=True),
+    Column("shared_id", String, nullable=True),
+    Column("whistle_color", String, nullable=True),
+    Column("stopwatch_color", String, nullable=True),
+    Column("shared_color", String, nullable=True),
+    # Kalendarz założony od nowa (np. po ręcznym usunięciu): aplikacja ma
+    # uzupełnić wpisy. Zdejmuje to PUT /calendar/setup z `refilled`.
+    Column("whistle_refill", Boolean, nullable=False, server_default="false"),
+    Column("stopwatch_refill", Boolean, nullable=False, server_default="false"),
+    Column("shared_refill", Boolean, nullable=False, server_default="false"),
+    Column("migrated", Boolean, nullable=False, server_default="false"),
+    # Stary token (kalendarz główny) leży tu tylko na czas przenoszenia.
+    Column("park_access", String, nullable=True),
+    Column("park_refresh", String, nullable=True),
+    Column("park_expires", String, nullable=True),
+    Column("park_scope", String, nullable=True),
+    Column("job_kind", String, nullable=True),
+    Column("job_state", String, nullable=True),
+    Column("job_total", Integer, nullable=False, server_default="0"),
+    Column("job_done", Integer, nullable=False, server_default="0"),
+    Column("job_skipped", Integer, nullable=False, server_default="0"),
+    Column("job_failed", Integer, nullable=False, server_default="0"),
+    Column("job_error", Text, nullable=True),
+    # Kalendarze zostawione po zmianie układu (ręczne wpisy): [{kind, name}].
+    Column("job_kept", JSON, nullable=True),
+    # Prosta uwaga do zadania (np. dawne wpisy mogły zostać w kalendarzu głównym).
+    Column("job_note", Text, nullable=True),
+    # Po rozłączeniu zostały w kalendarzu głównym dawne wpisy meczów.
+    Column("legacy_left", Boolean, nullable=False, server_default="false"),
+    # Rodzaje kalendarzy, którym Google nie zapisał koloru (po przecinku).
+    Column("color_pending", String, nullable=True),
+    Column("job_heartbeat", DateTime(timezone=True), nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
 )
 
 # 4) Tabela ogłoszeń (Silesia)
@@ -75,6 +126,8 @@ announcements = Table(
     Column("title", String, nullable=False),
     Column("content", Text, nullable=False),
     Column("image_url", String, nullable=True),
+    # miniatura 480 px obok oryginalu (null = brak, klient bierze image_url)
+    Column("thumb_url", String, nullable=True),
     Column("priority", Integer, nullable=False, default=0),
     Column("link", String, nullable=True),
     Column("province", String, nullable=False, index=True),
@@ -88,6 +141,9 @@ announcements = Table(
         server_default=func.now(),
         onupdate=func.now(),
     ),
+    # reakcje i komentarze: NIE zmieniaja updated_at (kolejnosc = dodanie/edycja),
+    # ale licza sie do sygnalu "cos nowego" w /last_update
+    Column("activity_at", DateTime(timezone=True), nullable=True),
 )
 
 
@@ -4847,6 +4903,13 @@ with engine.connect() as _conn:
             "WHERE status IN ('approval_pending', 'open', 'applying')"
         )
     )
+    # Kalendarze drugorzędne Google: obie tabele stoją na produkcji.
+    _conn.execute(text("ALTER TABLE calendar_tokens ADD COLUMN IF NOT EXISTS scope varchar"))
+    _conn.execute(text("ALTER TABLE event_mappings ADD COLUMN IF NOT EXISTS calendar_id varchar"))
+    _conn.execute(text("ALTER TABLE calendar_secondary ADD COLUMN IF NOT EXISTS job_kept json"))
+    _conn.execute(text("ALTER TABLE calendar_secondary ADD COLUMN IF NOT EXISTS job_note text"))
+    _conn.execute(text("ALTER TABLE calendar_secondary ADD COLUMN IF NOT EXISTS legacy_left boolean NOT NULL DEFAULT false"))
+    _conn.execute(text("ALTER TABLE calendar_secondary ADD COLUMN IF NOT EXISTS color_pending varchar"))
     # Globalna polityka zewnętrznych pushy i identyfikator konkretnego buildu.
     # Obie tabele istnieją na produkcji, więc samo metadata.create_all nie
     # dołoży nowych kolumn przy wdrożeniu.
@@ -4950,6 +5013,9 @@ with engine.connect() as _conn:
             "ADD COLUMN IF NOT EXISTS no_solo boolean NOT NULL DEFAULT false"
         )
     )
+    # Ogłoszenia: miniatura i czas aktywności (reakcje/komentarze). Tabela stoi na produkcji.
+    _conn.execute(text("ALTER TABLE announcements ADD COLUMN IF NOT EXISTS thumb_url varchar"))
+    _conn.execute(text("ALTER TABLE announcements ADD COLUMN IF NOT EXISTS activity_at timestamptz"))
     # Tablica Komisji (16.09.2026): kosz, autorstwo i skład z odznaki. Tabele
     # istnieją na produkcji, więc `create_all` tych kolumn nie dołoży.
     for _board_sql in (
@@ -5205,6 +5271,13 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS stage_total integer"))
     _conn.execute(text("ALTER TABLE province_zprp_write_journal ADD COLUMN IF NOT EXISTS date_before varchar"))
     _conn.execute(text("ALTER TABLE province_zprp_write_journal ADD COLUMN IF NOT EXISTS date_after varchar"))
+    # Mecze międzypaństwowe (02.11.2026): rodzaj meczu wspólny dla obsady i jednorazowe włączenie statystyk.
+    _conn.execute(text("ALTER TABLE shared_matches ADD COLUMN IF NOT EXISTS match_kind varchar"))
+    _conn.execute(text("ALTER TABLE shared_matches ADD COLUMN IF NOT EXISTS age_group varchar"))
+    _conn.execute(text("ALTER TABLE shared_match_members ADD COLUMN IF NOT EXISTS kind_stats_applied boolean NOT NULL DEFAULT false"))
+    _conn.execute(text("ALTER TABLE shared_match_members ADD COLUMN IF NOT EXISTS no_auto_link boolean NOT NULL DEFAULT false"))
+    # Tuleja klucza protokołu meczu ręcznego (M-<tuleja>/<numer>); tabela shared_matches jest już na produkcji.
+    _conn.execute(text("ALTER TABLE shared_matches ADD COLUMN IF NOT EXISTS proel_stem varchar"))
     # Dziennik giełdy powstał później niż sama giełda, więc oferty sprzed jego
     # wprowadzenia nie mają ani jednego wpisu. Dopisujemy je WSTECZ z własnych
     # stempli czasu wiersza - tyle, ile z nich wynika: wystawienie zawsze, a

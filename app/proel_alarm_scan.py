@@ -67,6 +67,7 @@ def oficjalny_mecz(key: Any, config: Any, zprp_match_id: Any, w_terminarzu: bool
 
 async def oficjalne_klucze(keys: Iterable[Any]) -> Set[str]:
     """Które z podanych kluczy meczów są oficjalne. Nigdy nie rzuca - błąd = „nie wiem", czyli tak."""
+    from app.proel_match_key import is_shared_key
     from app.proel_training_key import is_training_key, match_number_from_key
 
     teraz = time.monotonic()
@@ -83,7 +84,7 @@ async def oficjalne_klucze(keys: Iterable[Any]) -> Set[str]:
                    saved_matches.c.data_json["matchConfig"].label("config"))
             .where(saved_matches.c.match_number.in_(pytaj))
         )}
-        numery = sorted({match_number_from_key(k) for k in pytaj if not is_training_key(k)})
+        numery = sorted({match_number_from_key(k) for k in pytaj if not is_training_key(k) and not is_shared_key(k)})
         znane: Set[str] = set()
         if numery:
             znane |= {str(r[0]) for r in await database.fetch_all(
@@ -100,7 +101,7 @@ async def oficjalne_klucze(keys: Iterable[Any]) -> Set[str]:
     for k in pytaj:
         w = wiersze.get(k) or {}
         werdykt = oficjalny_mecz(k, _as_mapping(w.get("config")), w.get("zprp_match_id"),
-                                 match_number_from_key(k) in znane)
+                                 not is_shared_key(k) and match_number_from_key(k) in znane)
         _OFICJALNY[k] = (werdykt, teraz + OFICJALNY_TTL_S)
         if werdykt:
             out.add(k)
