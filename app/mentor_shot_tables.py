@@ -24,6 +24,8 @@ def define_tables(metadata):
         #: Kształty (JSON, lista); walidacja i limity w `mentor_shot_rules.clean_shapes`.
         Column("shapes_json", Text, nullable=False, server_default=text("'[]'")),
         Column("clip_id", String, nullable=True),
+        #: Kadr zrzutu zrobionego w zoomie (JSON `{cx,cy,zoom}`, `mentor_shot_rules.clean_view`); NULL = cała klatka.
+        Column("view_json", Text, nullable=True),
         #: `auto` | `manual` | `detached`.
         Column("attach_mode", String, nullable=False, server_default=text("'auto'")),
         #: `none` | `processing` | `ready` | `failed`.
@@ -52,6 +54,7 @@ def define_tables(metadata):
 
 #: Wykonywane przy starcie przez `app/db.py` (PostgreSQL), każde osobno i idempotentnie.
 MIGRATIONS = (
+    "ALTER TABLE mentor_shots ADD COLUMN IF NOT EXISTS view_json TEXT",
     "CREATE INDEX IF NOT EXISTS ix_mentor_shots_pair_match ON mentor_shots (pair_id, match_id)",
     "CREATE INDEX IF NOT EXISTS ix_mentor_shots_video ON mentor_shots (video_id)",
     "CREATE INDEX IF NOT EXISTS ix_mentor_shots_clip ON mentor_shots (clip_id)",

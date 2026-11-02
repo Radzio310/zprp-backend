@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import math
 import re
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from app.mentor_panel_rules import RuleError, aware, plain, safe_filename, s
+from app.mentor_panel_rules import RuleError, aware, json_value, plain, safe_filename, s
 
 # ─── Limity ─────────────────────────────────────────────────────────────────
 
@@ -165,7 +165,45 @@ def clean_shape(raw: Any, index: int) -> Dict[str, Any]:
     elif kind == "loupe":
         out.update(cx=_unit(raw, "cx", index), cy=_unit(raw, "cy", index), r=_range(raw, "r", index, 0.02, 0.5, 0.1),
                    zoom=_range(raw, "zoom", index, 1.5, 8.0, 2.5))
+        if raw.get("px") is not None or raw.get("py") is not None:
+            if raw.get("px") is None or raw.get("py") is None:
+                raise _bad(index, "pola px i py podaje się razem albo wcale.")
+            out.update(px=_unit(raw, "px", index), py=_unit(raw, "py", index))
     return out
+
+
+MAX_VIEW_ZOOM = 6.0
+
+
+def clean_view(raw: Any) -> Optional[Dict[str, float]]:
+    """Kadr zrzutu: `{cx, cy, zoom}` (środek 0..1, zoom 1..6) albo None (cała klatka). zoom <= 1 daje None. Błąd = 422."""
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, Mapping):
+        raise RuleError(422, "SHOT_VIEW_INVALID", "Kadr musi być obiektem {cx, cy, zoom} albo null.")
+    out: Dict[str, float] = {}
+    for key, low, high in (("cx", 0.0, 1.0), ("cy", 0.0, 1.0), ("zoom", 1.0, MAX_VIEW_ZOOM)):
+        value = _num(raw.get(key))
+        if value is None or value < low or value > high:
+            raise RuleError(422, "SHOT_VIEW_INVALID", f"Kadr: pole {key} musi być liczbą od {low:g} do {high:g}.")
+        out[key] = round(value, 4)
+    return None if out["zoom"] <= 1.0001 else out
+
+
+def view_of(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Kadr zapisany w wierszu zrzutu (`view_json`) albo None."""
+    value = json_value(row.get("view_json"), {})
+    return value if value and "zoom" in value else None
+
+
+def view_window(view: Optional[Mapping[str, Any]]) -> Tuple[float, float, float, float]:
+    """Okno kadru w ułamkach klatki `(x0, y0, x1, y1)`: szerokość i wysokość 1/zoom, środek cx,cy, dosunięte do krawędzi."""
+    if not view:
+        return 0.0, 0.0, 1.0, 1.0
+    size = 1.0 / max(1.0, float(view["zoom"]))
+    x0 = min(max(float(view["cx"]) - size / 2, 0.0), 1.0 - size)
+    y0 = min(max(float(view["cy"]) - size / 2, 0.0), 1.0 - size)
+    return x0, y0, x0 + size, y0 + size
 
 
 def clean_shapes(raw: Any) -> List[Dict[str, Any]]:

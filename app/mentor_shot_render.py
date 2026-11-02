@@ -162,6 +162,7 @@ def _apply_loupe(image, shape: Dict[str, Any], source):
     zoom = shape["zoom"]
     half = max(4.0, radius / zoom)
     cx, cy = shape["cx"] * W, shape["cy"] * H
+    px, py = (shape["px"] * W, shape["py"] * H) if shape.get("px") is not None else (cx, cy)
     left = min(max(cx - half, 0), max(0, W - 2 * half))
     top = min(max(cy - half, 0), max(0, H - 2 * half))
     crop = source.crop((int(left), int(top), int(min(W, left + 2 * half)), int(min(H, top + 2 * half))))
@@ -171,8 +172,60 @@ def _apply_loupe(image, shape: Dict[str, Any], source):
     mask = Image.new("L", (diameter * ss, diameter * ss), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, diameter * ss - 1, diameter * ss - 1), fill=255)
     mask = mask.resize((diameter, diameter), Image.LANCZOS)
-    image.paste(big, (int(round(cx - radius)), int(round(cy - radius))), mask)
+    image.paste(big, (int(round(px - radius)), int(round(py - radius))), mask)
     # Obwódka lupy rysujemy razem z resztą linii (kolor i grubość kształtu) w `render_png`.
+
+
+def _tangents(c1: Tuple[float, float], r1: float, c2: Tuple[float, float], r2: float):
+    """Dwie zewnętrzne styczne między kołami: lista par (punkt na kole 1, punkt na kole 2). Puste, gdy jedno koło zawiera drugie."""
+    dx, dy = c2[0] - c1[0], c2[1] - c1[1]
+    dist = math.hypot(dx, dy)
+    if dist <= abs(r2 - r1) + 1e-6:
+        return []
+    base, phi = math.atan2(dy, dx), math.acos((r1 - r2) / dist)
+    out = []
+    for sign in (1, -1):
+        t = base + sign * phi
+        out.append(((c1[0] + r1 * math.cos(t), c1[1] + r1 * math.sin(t)), (c2[0] + r2 * math.cos(t), c2[1] + r2 * math.sin(t))))
+    return out
+
+
+def _cone_fill(image, loupe: Dict[str, Any]):
+    """Półprzezroczysty stożek między źródłem lupy a kołem powiększenia (pod kołem powiększenia)."""
+    from PIL import Image, ImageDraw
+
+    W, H = image.size
+    r2 = max(12.0, loupe["r"] * W)
+    r1 = max(2.0, r2 / loupe["zoom"])
+    tans = _tangents((loupe["cx"] * W, loupe["cy"] * H), r1, (loupe["px"] * W, loupe["py"] * H), r2)
+    if len(tans) != 2:
+        return image
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).polygon([tans[0][0], tans[0][1], tans[1][1], tans[1][0]], fill=_rgb(loupe["color"]) + (70,))
+    return Image.alpha_composite(image.convert("RGBA"), layer).convert("RGB")
+
+
+def _loupe_links(loupe: Dict[str, Any], size: Tuple[int, int]) -> List[Dict[str, Any]]:
+    """Kształty rysowane z liniami: małe kółko źródła i dwie styczne (kolor i grubość lupy)."""
+    W, H = size
+    r2 = max(12.0, loupe["r"] * W)
+    r1 = max(2.0, r2 / loupe["zoom"])
+    base = {"color": loupe["color"], "width": loupe["width"]}
+    out = [{"type": "ellipse", "cx": loupe["cx"], "cy": loupe["cy"], "rx": r1 / W, "ry": r1 / H, **base}]
+    for a, b in _tangents((loupe["cx"] * W, loupe["cy"] * H), r1, (loupe["px"] * W, loupe["py"] * H), r2):
+        out.append({"type": "free", "points": [[a[0] / W, a[1] / H], [b[0] / W, b[1] / H]], **base})
+    return out
+
+
+def _apply_view(image, view: Optional[Dict[str, Any]]):
+    """Kadr zrzutu: wycina okno kadru i skaluje (LANCZOS) do rozmiaru klatki."""
+    from PIL import Image
+
+    x0, y0, x1, y1 = SR.view_window(view)
+    if (x0, y0, x1, y1) == (0.0, 0.0, 1.0, 1.0):
+        return image
+    W, H = image.size
+    return image.resize((W, H), Image.LANCZOS, box=(x0 * W, y0 * H, x1 * W, y1 * H))
 
 
 def _banner(image, lines: Sequence[str]):
@@ -194,8 +247,10 @@ def _banner(image, lines: Sequence[str]):
     return canvas
 
 
-def render_png(image_bytes: bytes, shapes: Sequence[Dict[str, Any]], banner: Optional[Sequence[str]] = None) -> bytes:
-    """Obraz zrzutu + kształty -> PNG. `banner` (lista fragmentów) dokleja pasek pod obrazem (nie zakrywa kadru)."""
+def render_png(image_bytes: bytes, shapes: Sequence[Dict[str, Any]], banner: Optional[Sequence[str]] = None,
+               view: Optional[Dict[str, Any]] = None) -> bytes:
+    """Obraz zrzutu + kształty -> PNG. `banner` (lista fragmentów) dokleja pasek pod obrazem (nie zakrywa kadru).
+    `view` (kadr `{cx,cy,zoom}`) tnie gotowy obraz do okna kadru i skaluje do rozmiaru klatki, przed paskiem."""
     from PIL import Image
 
     Image.MAX_IMAGE_PIXELS = SR.MAX_IMAGE_SIDE * SR.MAX_IMAGE_SIDE * 2
@@ -208,10 +263,15 @@ def render_png(image_bytes: bytes, shapes: Sequence[Dict[str, Any]], banner: Opt
         image = _apply_spotlight(image, spotlight)
     loupes = [s for s in shapes if s["type"] == "loupe"]
     for loupe in loupes:
+        if loupe.get("px") is not None:
+            image = _cone_fill(image, loupe)
         _apply_loupe(image, loupe, original)
     lines = [s for s in shapes if s["type"] != "spotlight" and s["type"] != "loupe"]
-    rims = [{"type": "ellipse", "color": s["color"], "width": s["width"], "cx": s["cx"], "cy": s["cy"],
+    rims = [{"type": "ellipse", "color": s["color"], "width": s["width"], "cx": s.get("px", s["cx"]), "cy": s.get("py", s["cy"]),
              "rx": s["r"], "ry": s["r"] * image.size[0] / image.size[1]} for s in loupes]
+    for loupe in loupes:
+        if loupe.get("px") is not None:
+            rims.extend(_loupe_links(loupe, image.size))
     # Obwódka lupy i obwódka reflektora (ten sam kolor i grubość co kształt).
     if spotlight:
         rims.append({"type": "ellipse", "color": spotlight["color"], "width": spotlight["width"], "cx": spotlight["cx"], "cy": spotlight["cy"],
@@ -224,6 +284,7 @@ def render_png(image_bytes: bytes, shapes: Sequence[Dict[str, Any]], banner: Opt
         if scale != 1.0:
             layer = layer.resize((W, H), Image.LANCZOS)
         image = Image.alpha_composite(image.convert("RGBA"), layer).convert("RGB")
+    image = _apply_view(image, view)
     if banner:
         image = _banner(image, banner)
     out = io.BytesIO()

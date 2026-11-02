@@ -111,7 +111,7 @@ def shot_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dict[s
         "id": row["id"], "pair_id": row.get("pair_id"), "match_id": row.get("match_id"), "video_id": row.get("video_id"),
         "at_s": row.get("at_s"), "title": row.get("title"), "note": row.get("note"),
         "category_ids": R.json_value(row.get("category_ids"), []), "shapes": R.json_value(row.get("shapes_json"), []),
-        "clip_id": row.get("clip_id"), "attach_mode": R.s(row.get("attach_mode")) or "auto",
+        "view": SR.view_of(row), "clip_id": row.get("clip_id"), "attach_mode": R.s(row.get("attach_mode")) or "auto",
         "image_status": status, "image_reason": reason, "image_message": SR.reason_text(reason),
         "image_source": row.get("image_source") if ready else None,
         "image_url": store_url(row.get("image_key")) if ready else None,
@@ -488,6 +488,8 @@ class ShotBody(BaseModel):
     note: Optional[str] = Field(default=None, max_length=5000)
     category_ids: List[str] = Field(default_factory=list, max_length=20)
     shapes: Optional[List[Any]] = Field(default=None, max_length=200)
+    #: Kadr zrzutu zrobionego w zoomie `{cx, cy, zoom}` (zoom 1..6); null = cała klatka.
+    view: Optional[Any] = None
     #: Podane `clip_id` = dołączenie ręczne (`manual`); pominięte = automat (`auto`); `attach_mode: "detached"` = bez klipu.
     clip_id: Optional[str] = Field(default=None, max_length=80)
     attach_mode: Optional[str] = Field(default=None, max_length=20)
@@ -500,6 +502,8 @@ class ShotPatch(BaseModel):
     note: Optional[str] = Field(default=None, max_length=5000)
     category_ids: Optional[List[str]] = Field(default=None, max_length=20)
     shapes: Optional[List[Any]] = Field(default=None, max_length=200)
+    #: Kadr (jak przy tworzeniu); null = cała klatka.
+    view: Optional[Any] = None
     #: Napis = dołącz ręcznie; null = odłącz (`detached`).
     clip_id: Optional[str] = Field(default=None, max_length=80)
     #: `auto` = wróć do automatu (serwer sam wybierze najkrótszy klip w zakresie).
@@ -542,6 +546,7 @@ async def create_shot(pair_id: str, body: ShotBody, actor: Actor = Depends(mento
     try:
         at_s = SR.validate_at(body.at_s, await _video_duration(video))
         shapes = SR.clean_shapes(body.shapes)
+        view = SR.clean_view(body.view)
     except R.RuleError as exc:
         raise _rule(exc) from exc
     live = await C.one(select(func.count().label("n")).select_from(mentor_shots).where(mentor_shots.c.pair_id == ctx["pair_id"])
@@ -562,7 +567,7 @@ async def create_shot(pair_id: str, body: ShotBody, actor: Actor = Depends(mento
         "id": R.new_id(), "pair_id": ctx["pair_id"], "match_id": card["match_id"], "video_id": video["id"], "at_s": at_s,
         "title": R.plain(body.title, SR.MAX_TITLE) or None, "note": R.plain(body.note, SR.MAX_NOTE) or None,
         "category_ids": C.dumps(R.clean_category_ids(body.category_ids, await _allowed_categories(ctx))),
-        "shapes_json": C.dumps(shapes), "clip_id": clip_id, "attach_mode": mode, "image_status": "none", "author_id": actor.judge_id,
+        "shapes_json": C.dumps(shapes), "view_json": C.dumps(view) if view else None, "clip_id": clip_id, "attach_mode": mode, "image_status": "none", "author_id": actor.judge_id,
         "acted_by": actor.acted_by, "created_at": stamp, "updated_at": stamp,
     }
     kind = await source_kind(video)
@@ -594,6 +599,12 @@ async def update_shot(shot_id: str, body: ShotPatch, actor: Actor = Depends(ment
             values["shapes_json"] = C.dumps(SR.clean_shapes(patch["shapes"]))
         except R.RuleError as exc:
             raise _rule(exc) from exc
+    if "view" in patch:
+        try:
+            view = SR.clean_view(patch["view"])
+        except R.RuleError as exc:
+            raise _rule(exc) from exc
+        values["view_json"] = C.dumps(view) if view else None
     mode = patch.get("attach_mode")
     if mode is not None and mode not in SR.ATTACH_MODES:
         raise C.err(422, "SHOT_ATTACH_MODE", "attach_mode to auto, manual albo detached.")
@@ -688,19 +699,21 @@ def _ready_or_error(row: Dict[str, Any]) -> None:
     raise C.err(409, "SHOT_NO_IMAGE", SR.reason_text(reason) or SR.NO_IMAGE_MESSAGE)
 
 
-async def render_from_row(row: Dict[str, Any], *, shapes: bool = True, lines: Optional[List[str]] = None) -> bytes:
+async def render_from_row(row: Dict[str, Any], *, shapes: bool = True, lines: Optional[List[str]] = None, view: bool = True) -> bytes:
     """Obraz z magazynu + zaznaczenia (+ pasek) -> PNG. Bez kontekstu pary: używa też worker Teczki."""
     raw = await asyncio.to_thread(store_get, row["image_key"])
-    return await asyncio.to_thread(SH.render_png, raw, R.json_value(row.get("shapes_json"), []) if shapes else [], lines)
+    frame = SR.view_of(row) if view else None
+    return await asyncio.to_thread(SH.render_png, raw, R.json_value(row.get("shapes_json"), []) if shapes else [], lines, frame)
 
 
-async def render_shot_png(ctx: Dict[str, Any], row: Dict[str, Any], *, banner: bool = False, shapes: bool = True) -> Tuple[bytes, str]:
+async def render_shot_png(ctx: Dict[str, Any], row: Dict[str, Any], *, banner: bool = False, shapes: bool = True,
+                         view: bool = True) -> Tuple[bytes, str]:
     """PNG z wypalonymi zaznaczeniami i (opcjonalnie) paskiem: mecz, minuta nagrania, kategoria. Wynik: (bajty, nazwa pliku)."""
     _ready_or_error(row)
     info = await match_info(ctx, row)
     lines = SR.banner_lines(info["label"], float(row["at_s"]), info["category"]) if banner else None
     try:
-        data = await render_from_row(row, shapes=shapes, lines=lines)
+        data = await render_from_row(row, shapes=shapes, lines=lines, view=view)
     except Exception as exc:  # noqa: BLE001 - brak obiektu w magazynie
         raise C.err(503, "STORAGE_OFF", SR.REASONS["STORAGE_OFF"]) from exc
     return data, SR.png_filename(row.get("title"), info["code"], float(row["at_s"]))
@@ -721,12 +734,14 @@ async def match_info(ctx: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, str]
 
 
 @router.get("/shots/{shot_id}/png")
-async def download_png(shot_id: str, banner: bool = Query(False), shapes: bool = Query(True), actor: Actor = Depends(mentor_actor)):
+async def download_png(shot_id: str, banner: bool = Query(False), shapes: bool = Query(True), actor: Actor = Depends(mentor_actor),
+                       view: bool = Query(True)):
     """Pobranie PNG: obraz z wypalonymi zaznaczeniami (`shapes=false` = sama klatka), `banner=true` dokleja pasek pod kadrem.
+    `view=true` (domyślnie) tnie do kadru zrzutu i skaluje do rozmiaru klatki, `view=false` daje całą klatkę (też przy `shapes=false`).
     Odpowiedź to sam plik (`Content-Disposition: attachment`), bez adresu podpisanego."""
     from app import mentor_panel_media as M
 
     ctx, row = await _shot_ctx(shot_id, actor)
-    data, filename = await render_shot_png(ctx, row, banner=banner, shapes=shapes)
+    data, filename = await render_shot_png(ctx, row, banner=banner, shapes=shapes, view=view)
     return Response(content=data, media_type="image/png",
                     headers={"Content-Disposition": M._disposition(filename), "Cache-Control": "private, no-store"})

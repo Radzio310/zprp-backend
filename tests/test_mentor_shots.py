@@ -213,12 +213,13 @@ def test_migracja_idempotentna(env):
     engine = create_engine(env.url)
     with engine.connect() as conn:
         for _ in range(2):
-            for statement in MIGRATIONS:
+            for statement in (m for m in MIGRATIONS if "ADD COLUMN" not in m):  # SQLite nie zna IF NOT EXISTS dla kolumn
                 conn.execute(text(statement))
             conn.commit()
         cols = {r[1] for r in conn.execute(text("PRAGMA table_info(mentor_shots)"))}
     assert {"id", "pair_id", "match_id", "video_id", "at_s", "shapes_json", "clip_id", "attach_mode", "image_status", "image_reason",
-            "image_source", "image_key", "thumb_key", "width", "height", "deleted_at"} <= cols
+            "image_source", "image_key", "thumb_key", "width", "height", "deleted_at", "view_json"} <= cols
+    assert any("view_json" in m for m in MIGRATIONS)
 
 
 # ─── Wypalanie: Pillow ───────────────────────────────────────────────────────
@@ -671,6 +672,119 @@ def test_pobranie_png_z_wypalonymi_zaznaczeniami_i_paskiem(env):
         assert not any(r > 200 and g < 80 and b < 80 for r, g, b in bare.getdata())  # shapes=false: sama klatka
         bar = png_pixels((await env.shots.download_png(shot["id"], True, True, await env.actor(A))).body)
         assert bar.size[0] == 960 and bar.size[1] > 540
+
+    env.run(go)
+
+
+# ─── Kadr zrzutu i lupa ze źródłem ───────────────────────────────────────────
+
+
+def test_kadr_walidacja_normalizacja_i_okno_przy_krawedzi():
+    assert SR.clean_view(None) is None and SR.clean_view("") is None
+    assert SR.clean_view({"cx": 0.5, "cy": 0.5, "zoom": 1}) is None  # zoom <= 1 = cała klatka
+    assert SR.clean_view({"cx": 0.3, "cy": 0.7, "zoom": 2.5}) == {"cx": 0.3, "cy": 0.7, "zoom": 2.5}
+    for bad in ({"cx": 1.2, "cy": 0.5, "zoom": 2}, {"cx": 0.5, "cy": 0.5, "zoom": 7}, {"cx": 0.5, "cy": 0.5, "zoom": 0.5},
+                {"cx": 0.5, "cy": 0.5}, {"cx": "a", "cy": 0.5, "zoom": 2}, [1, 2], 5):
+        with pytest.raises(R.RuleError) as exc:
+            SR.clean_view(bad)
+        assert exc.value.code == "SHOT_VIEW_INVALID"
+    assert SR.view_window(None) == (0.0, 0.0, 1.0, 1.0)
+    assert SR.view_window({"cx": 0.5, "cy": 0.5, "zoom": 2}) == (0.25, 0.25, 0.75, 0.75)
+    assert SR.view_window({"cx": 0.02, "cy": 0.99, "zoom": 4}) == (0.0, 0.75, 0.25, 1.0)  # dosunięte do krawędzi, nie zmniejszone
+
+
+def test_lupa_px_py_razem_albo_wcale():
+    ok = SR.clean_shapes([{"type": "loupe", "cx": 0.3, "cy": 0.3, "px": 0.7, "py": 0.6}])[0]
+    assert ok["px"] == 0.7 and ok["py"] == 0.6
+    assert "px" not in SR.clean_shapes([{"type": "loupe", "cx": 0.3, "cy": 0.3}])[0]
+    for bad in ({"px": 0.5}, {"py": 0.5}, {"px": 1.5, "py": 0.5}, {"px": "x", "py": 0.5}):
+        with pytest.raises(R.RuleError) as exc:
+            SR.clean_shapes([{"type": "loupe", "cx": 0.3, "cy": 0.3, **bad}])
+        assert exc.value.code == "SHOT_SHAPES_INVALID"
+
+
+def quadrant_frame():
+    """Klatka 400x300: lewa połowa czerwona, prawa niebieska, w lewej górnej ćwiartce żółty znacznik 10x10 w (100,75)."""
+    base = Image.new("RGB", (400, 300), (200, 0, 0))
+    for x in range(200, 400):
+        for y in range(300):
+            base.putpixel((x, y), (0, 0, 200))
+    for x in range(95, 105):
+        for y in range(70, 80):
+            base.putpixel((x, y), (255, 255, 0))
+    buf = io.BytesIO()
+    base.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def quadrant_jpeg():
+    out = io.BytesIO()
+    Image.open(io.BytesIO(quadrant_frame())).convert("RGB").save(out, "JPEG", quality=95)
+    return out.getvalue()
+
+
+def test_png_z_kadrem_tnie_do_okna_skaluje_i_pasek_zostaje_pod_kadrem():
+    frame = quadrant_frame()
+    full = png_pixels(SH.render_png(frame, []))
+    cut = png_pixels(SH.render_png(frame, [], None, {"cx": 0.25, "cy": 0.25, "zoom": 2}))  # lewa górna ćwiartka
+    assert cut.size == full.size == (400, 300)
+    assert full.getpixel((390, 10)) == (0, 0, 200) and cut.getpixel((390, 10)) == (200, 0, 0)
+    assert cut.getpixel((200, 150))[0] > 240 and cut.getpixel((200, 150))[1] > 240  # znacznik (środek ćwiartki) w środku kadru
+    yellow = sum(1 for p in cut.getdata() if p[0] > 240 and p[1] > 240 and p[2] < 40)
+    assert 280 <= yellow <= 450  # 10x10 px -> ok. 20x20
+    edge = png_pixels(SH.render_png(frame, [], None, {"cx": 0.99, "cy": 0.5, "zoom": 2}))  # okno dosunięte do prawej krawędzi
+    assert edge.getpixel((5, 150)) == (0, 0, 200) and edge.getpixel((395, 150)) == (0, 0, 200)
+    banner = png_pixels(SH.render_png(frame, [], ["Mecz", "01:10"], {"cx": 0.25, "cy": 0.25, "zoom": 2}))
+    assert banner.size[0] == 400 and banner.size[1] > 300 and banner.getpixel((390, 10)) == (200, 0, 0)
+    assert all(sum(banner.getpixel((x, banner.size[1] - 2))) < 120 for x in range(0, 400, 40))  # pasek pod kadrem
+
+
+def test_lupa_ze_zrodlem_stozek_kolko_zrodla_i_tresc_z_oryginalu():
+    frame = quadrant_frame()
+    loupe = SR.clean_shapes([{"type": "loupe", "cx": 0.25, "cy": 0.25, "px": 0.8, "py": 0.5, "r": 0.12, "zoom": 3,
+                              "color": "#00ff00", "width": 0.004}])
+    out = png_pixels(SH.render_png(frame, loupe))
+    # powiększenie wyrosło przy px,py (320,150) na niebieskiej połowie, a w środku ma żółty znacznik z oryginalnej klatki
+    centre = out.getpixel((320, 150))
+    assert centre[0] > 240 and centre[1] > 240 and centre[2] < 40
+    assert any(g > 200 and r < 60 and b < 60 for r, g, b in out.crop((260, 90, 380, 210)).getdata())  # obwódka koła powiększenia
+    # źródło zostaje na miejscu (100,75): kółko źródła o promieniu 0.12*400/3 = 16 px ma zieloną obwódkę
+    assert any(g > 200 and r < 60 and b < 60 for r, g, b in (out.getpixel((100 + dx, 75)) for dx in range(13, 20)))
+    # stożek: między kółkiem a kołem są zielone styczne, a poza nimi tło bez zmian
+    assert any(g > 200 and r < 60 and b < 60 for r, g, b in out.crop((120, 70, 260, 150)).getdata())
+    assert out.getpixel((10, 290)) == (200, 0, 0) and out.getpixel((390, 290)) == (0, 0, 200)
+    # bez px,py lupa jak dziś: powiększenie w miejscu źródła, nic nie wyrasta obok
+    plain = SR.clean_shapes([{"type": "loupe", "cx": 0.25, "cy": 0.25, "r": 0.12, "zoom": 3}])
+    inplace = png_pixels(SH.render_png(frame, plain))
+    assert inplace.getpixel((320, 150)) == (0, 0, 200) and inplace.getpixel((100, 75))[0] > 240
+
+
+def test_zrzut_pamieta_kadr_post_patch_stare_wiersze_i_png_view(env):
+    async def go():
+        old = await new_shot(env)
+        assert old["view"] is None  # bez pola = cała klatka
+        framed = await new_shot(env, at=200, view={"cx": 0.25, "cy": 0.25, "zoom": 2})
+        assert framed["view"] == {"cx": 0.25, "cy": 0.25, "zoom": 2}
+        assert (await env.shots.get_shot(framed["id"], await env.actor(B)))["view"] == framed["view"]
+        listed = await env.shots.list_shots(PAIR, match_id="m1", clip_id="", video_id="", category="", author="", q="", standalone=False,
+                                            actor=await env.actor(A))
+        assert {s["id"]: s["view"] for s in listed["shots"]}[framed["id"]] == framed["view"]
+        flat = await new_shot(env, at=210, view={"cx": 0.5, "cy": 0.5, "zoom": 1})
+        assert flat["view"] is None  # zoom <= 1 = null
+        assert (await denied(new_shot(env, at=220, view={"cx": 2, "cy": 0.5, "zoom": 2})))[0] == 422
+        await env.shots.upload_image(framed["id"], FakeRequest(quadrant_jpeg()), await env.actor(A))
+        cut = png_pixels((await env.shots.download_png(framed["id"], False, True, await env.actor(A))).body)
+        whole = png_pixels((await env.shots.download_png(framed["id"], False, True, await env.actor(A), view=False)).body)
+        assert cut.getpixel((390, 10))[0] > 150 and whole.getpixel((390, 10))[2] > 150  # kadr tnie, view=false = cała klatka
+        bare = png_pixels((await env.shots.download_png(framed["id"], False, False, await env.actor(A))).body)  # shapes=false też kadruje
+        assert bare.getpixel((390, 10))[0] > 150
+        patched = await env.shots.update_shot(framed["id"], env.shots.ShotPatch(view={"cx": 0.8, "cy": 0.5, "zoom": 3}), await env.actor(A))
+        assert patched["view"] == {"cx": 0.8, "cy": 0.5, "zoom": 3}
+        untouched = await env.shots.update_shot(framed["id"], env.shots.ShotPatch(title="x"), await env.actor(A))
+        assert untouched["view"] == patched["view"]  # PATCH bez view nie rusza kadru
+        assert (await env.shots.update_shot(framed["id"], env.shots.ShotPatch(view=None), await env.actor(A)))["view"] is None
+        bad = env.shots.ShotPatch(view={"cx": 0.5, "cy": 0.5, "zoom": 9})
+        assert (await denied(env.shots.update_shot(framed["id"], bad, await env.actor(A))))[0] == 422
 
     env.run(go)
 
