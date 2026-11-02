@@ -48,6 +48,7 @@ from app.national_distances import router as national_distances_router
 from app.results import router as results_router
 from app.calendar import router as calendar_router
 from app.calendar_feeds import router as calendar_feeds_router
+from app.calendar_refresh_errors import install_google_refresh_handlers
 from app.silesia import router as silesia_router
 from app.admin import router as admin_router
 from app.training import router as training_router
@@ -261,6 +262,7 @@ from app import loop_lag as _loop_lag
 app.add_middleware(_loop_lag.RequestNoteMiddleware)
 app.include_router(_loop_lag.make_router())
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+install_google_refresh_handlers(app)
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
