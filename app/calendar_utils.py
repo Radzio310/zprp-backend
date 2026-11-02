@@ -1,7 +1,15 @@
 # app/calendar_utils.py
+import os
+
 from google_auth_oauthlib.flow import Flow
 
 from app.calendar_secondary_rules import scopes_for_tier
+
+# Google potrafi oddać inne zakresy niż żądane (dawna zgoda z tego samego klienta,
+# np. drive.file Mentora, albo odznaczone pole na ekranie zgody), a oauthlib rzuca
+# wtedy „Scope has changed" i sędzia zostaje z surowym JSON-em. Zakres sprawdzamy
+# sami w callbacku, żeby zgoda bez kalendarza nie nadpisała działającego tokenu.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 def create_flow(settings, tier=None):
     """Flow OAuth. `tier` ("matches" | "district") wybiera zakresy kalendarzy

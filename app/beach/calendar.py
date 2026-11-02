@@ -26,6 +26,7 @@ from app.calendar_storage import (
     save_event_mapping,
     save_oauth_state,
 )
+from app.calendar_secondary_rules import lacks_events_scope
 from app.db import beach_app_settings, database
 from app.deps import beach_get_current_user_id, get_settings
 
@@ -473,7 +474,7 @@ async def get_auth_url(
     flow = _create_beach_flow(settings)
     auth_url, state = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
+        include_granted_scopes="false",
         prompt="consent",
     )
     await save_oauth_state(user_key, state)
@@ -497,6 +498,10 @@ async def oauth2callback(
     except Exception as exc:
         logger.exception("Beach Google OAuth token exchange failed")
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {exc}")
+
+    token = getattr(getattr(flow, "oauth2session", None), "token", None) or {}
+    if lacks_events_scope(token.get("scope")):
+        raise HTTPException(status_code=400, detail="Google nie przyznał dostępu do kalendarza")
 
     creds = flow.credentials
     existing = await get_calendar_tokens(user_key)

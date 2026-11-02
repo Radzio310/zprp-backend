@@ -193,15 +193,15 @@ async def test_auth_url_flag_off_is_the_old_flow(cal):
         "https://www.googleapis.com/auth/calendar.events",
         "https://www.googleapis.com/auth/calendar.readonly",
     ]
-    assert flow.auth_kwargs["include_granted_scopes"] == "true" and "state" not in flow.auth_kwargs
+    assert flow.auth_kwargs["include_granted_scopes"] == "false" and "state" not in flow.auth_kwargs
     assert out.status_code == 200
 
 
-@pytest.mark.parametrize("tier,granted", [(None, "false"), ("matches", "false"), ("district", "true")])
-async def test_auth_url_flag_on_picks_scopes_and_carries_tier_in_state(cal, tier, granted):
+@pytest.mark.parametrize("tier", [None, "matches", "district"])
+async def test_auth_url_flag_on_picks_scopes_and_carries_tier_in_state(cal, tier):
     await cal.m.get_auth_url(tier, settings(), U)
     flow = FakeFlow.made[-1]
-    assert flow.auth_kwargs["include_granted_scopes"] == granted
+    assert flow.auth_kwargs["include_granted_scopes"] == "false"
     assert flow.auth_kwargs["state"][:2] == ("d~" if tier == "district" else "m~")
     assert ("https://www.googleapis.com/auth/calendar.events" in flow.scopes) == (tier == "district")
     assert "https://www.googleapis.com/auth/calendar.app.created" in flow.scopes

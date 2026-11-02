@@ -222,6 +222,13 @@ def parse_tier(value: str | None) -> str:
     return tier
 
 
+def lacks_events_scope(raw: str | Iterable[str] | None) -> bool:
+    """Stara ścieżka zapisuje do kalendarza głównego. Brak informacji o zakresach
+    nie jest odmową: Google podaje je zawsze, gdy zgoda była niepełna."""
+    scopes = granted_scopes(raw)
+    return bool(scopes) and SCOPE_EVENTS not in scopes
+
+
 def scopes_for_tier(tier: str) -> list[str]:
     return list(DISTRICT_SCOPES if tier == "district" else MATCHES_SCOPES)
 

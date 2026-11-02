@@ -1,6 +1,5 @@
 import base64
 import hashlib
-import os
 import re
 import secrets
 import time
@@ -47,6 +46,7 @@ from app.calendar_secondary_rules import (
     SecondaryError,
     email_from_id_token,
     flag_enabled,
+    lacks_events_scope,
     make_state,
     missing_scopes,
     parse_tier,
@@ -204,10 +204,11 @@ async def get_auth_url(
         flow = create_flow(settings, level)
         verifier, challenge = _make_pkce_pair()
         # Poziom jedzie w state (state sprawdzamy w bazie, więc przedrostek jest
-        # wiarygodny). matches: tylko kalendarze BAZY; district: dokładany przyrostowo.
+        # wiarygodny). matches: tylko kalendarze BAZY; district prosi o komplet wprost,
+        # bo dawne zgody tego klienta dołożyłyby do tokenu kalendarza np. Dysk Mentora.
         auth_url, state = flow.authorization_url(
             access_type="offline",
-            include_granted_scopes="true" if level == "district" else "false",
+            include_granted_scopes="false",
             prompt="consent",
             state=make_state(level, secrets.token_urlsafe(32)),
             code_challenge=challenge,
@@ -221,7 +222,7 @@ async def get_auth_url(
     verifier, challenge = _make_pkce_pair()
     auth_url, state = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
+        include_granted_scopes="false",
         prompt="consent",
         code_challenge=challenge,
         code_challenge_method="S256",
@@ -254,6 +255,13 @@ async def oauth2callback(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {e}")
 
+    token = getattr(getattr(flow, "oauth2session", None), "token", None) or {}
+    if lacks_events_scope(token.get("scope")):
+        # Zgoda bez kalendarza nie nadpisuje działającego tokenu.
+        return RedirectResponse(
+            f"{settings.FRONTEND_DEEP_LINK}?connected=false&calendar_error=scope_missing"
+        )
+
     creds = flow.credentials
     refresh_token = creds.refresh_token or (await get_calendar_tokens(user_login))["refresh_token"]
     await save_calendar_tokens(
@@ -273,10 +281,6 @@ async def _secondary_callback(code: str, state: str, settings):
     if not user_login:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
-    # Przy poziomie district Google zwraca sumę zakresów (include_granted_scopes),
-    # a oauthlib rzuca wyjątek, gdy zakres w odpowiedzi różni się od żądanego.
-    # Przyznane zakresy i tak zapisujemy z odpowiedzi.
-    os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
     tier = tier_from_state(state) or "matches"
     verifier = _pop_pkce_verifier(state)
     flow = create_flow(settings, tier)
