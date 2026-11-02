@@ -226,6 +226,37 @@ def test_klip_znaki_istotny_i_do_omowienia(env, monkeypatch):
     assert len(sent) == 1 and sent[0][2] == clip["id"] and sent[0][1] == [MENTOR]
 
 
+def test_klip_sciezka_zoomu(env):
+    track = [{"s": 100, "cx": 0.5, "cy": 0.5, "zoom": 1}, {"s": 104.5, "cx": 0.2, "cy": 0.8, "zoom": 3.2}]
+
+    async def go():
+        L = env.library
+        pair = await env.actor(JUDGES[0])
+        plain = await L.create_clip(PAIR, clip_body(env), pair)
+        body = clip_body(env)
+        body.zoom_track = track
+        made = await L.create_clip(PAIR, body, pair)
+        kept = await L.update_clip(made["id"], L.ClipPatch(note="x"), pair)
+        trimmed = await L.update_clip(made["id"], L.ClipPatch(end_s=124), pair)
+        replaced = await L.update_clip(made["id"], L.ClipPatch(zoom_track=track[:1]), pair)
+        empty = await L.update_clip(made["id"], L.ClipPatch(zoom_track=[]), pair)
+        await L.update_clip(made["id"], L.ClipPatch(zoom_track=track), pair)
+        cleared = await L.update_clip(made["id"], L.ClipPatch(zoom_track=None), pair)
+        bad = []
+        for t in ([{"s": 5, "cx": 0.5, "cy": 0.5, "zoom": 1}, {"s": 5, "cx": 0.5, "cy": 0.5, "zoom": 1}],
+                  [{"s": 1, "cx": 1.5, "cy": 0.5, "zoom": 2}], [{"s": 1, "cx": 0.5, "cy": 0.5, "zoom": 7}],
+                  [{"s": 1, "cx": 0.5, "cy": 0.5, "zoom": 0.5}], [{"s": 1, "cx": 0.5}], ["x"],
+                  [{"s": i, "cx": 0.5, "cy": 0.5, "zoom": 1} for i in range(2001)]):
+            bad.append(await raises(L.update_clip(made["id"], L.ClipPatch(zoom_track=t), pair)))
+        return plain, made, kept, trimmed, replaced, empty, cleared, bad
+
+    plain, made, kept, trimmed, replaced, empty, cleared, bad = env.run(go)
+    assert plain["zoom_track"] is None
+    assert made["zoom_track"] == track and kept["zoom_track"] == track and trimmed["zoom_track"] == track
+    assert len(replaced["zoom_track"]) == 1 and empty["zoom_track"] is None and cleared["zoom_track"] is None
+    assert all(b[1] == "CLIP_ZOOM_INVALID" and b[0] == 422 for b in bad)
+
+
 def test_zestawienia_kolejnosc_i_wlasnosc(env):
     async def go():
         L = env.library

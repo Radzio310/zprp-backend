@@ -281,6 +281,8 @@ class ClipBody(BaseModel):
     half: Optional[int] = None
     #: Nagranie Bastion: true = zapisz też jako MP4 (zadanie w tej samej operacji); false/brak = klip wirtualny.
     mp4: bool = False
+    #: Ścieżka zoomu [{s, cx, cy, zoom}] albo null (walidacja: `rules.validate_zoom_track`, 422 CLIP_ZOOM_INVALID).
+    zoom_track: Optional[List[Any]] = None
 
 
 class ClipPatch(BaseModel):
@@ -293,6 +295,8 @@ class ClipPatch(BaseModel):
     to_discuss: Optional[bool] = None
     #: true = zamów MP4 (Bastion); zmiana zakresu klipu, który ma MP4, sama zakłada nowe zadanie.
     mp4: Optional[bool] = None
+    #: Brak pola = bez zmiany; null albo [] = kasuje ścieżkę zoomu.
+    zoom_track: Optional[List[Any]] = None
 
 
 async def _video_of(ctx: Dict[str, Any], match_id: str, video_id: str) -> Dict[str, Any]:
@@ -349,6 +353,10 @@ async def create_clip(pair_id: str, body: ClipBody, actor: Actor = Depends(mento
     except R.RuleError as exc:
         raise C.rule_error(exc) from exc
     source = body.source if body.source in R.CLIP_SOURCES else "manual"
+    try:
+        zoom = R.validate_zoom_track(body.zoom_track)
+    except R.RuleError as exc:
+        raise C.rule_error(exc) from exc
     stamp = C.now()
     row = {
         "id": R.new_id(), "pair_id": ctx["pair_id"], "match_id": card["match_id"], "video_id": video["id"],
@@ -359,6 +367,7 @@ async def create_clip(pair_id: str, body: ClipBody, actor: Actor = Depends(mento
         "match_ms": body.match_ms if body.match_ms is None or 0 <= body.match_ms <= 3 * 3600 * 1000 else None,
         "half": body.half if body.half in (1, 2) else None, "author_id": actor.judge_id,
         "acted_by": actor.acted_by, "created_at": stamp, "updated_at": stamp, "mp4_status": "none", "media_rev": 1,
+        "zoom_track_json": C.dumps(zoom) if zoom else None,
     }
     await database.execute(mentor_clips.insert().values(**row))
     await C.touch(ctx, actor.judge_id, "clip_created", "clips", card["match_id"], {"id": row["id"]})
@@ -399,6 +408,12 @@ async def update_clip(clip_id: str, body: ClipPatch, actor: Actor = Depends(ment
 
                 forget_object(row.get("mp4_key"))
                 values.update(mp4_status="none", mp4_key=None, mp4_size=None)
+    if "zoom_track" in patch:
+        try:
+            zoom = R.validate_zoom_track(patch["zoom_track"])
+        except R.RuleError as exc:
+            raise C.rule_error(exc) from exc
+        values["zoom_track_json"] = C.dumps(zoom) if zoom else None
     if "title" in patch:
         values["title"] = R.plain(patch["title"], R.MAX_CLIP_TITLE) or None
     if "note" in patch:

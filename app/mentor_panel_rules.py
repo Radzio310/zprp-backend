@@ -363,6 +363,44 @@ def validate_clip(start_s: Any, end_s: Any, video_duration: Any = None) -> Tuple
     return round(start, 2), round(end, 2)
 
 
+MAX_ZOOM_POINTS = 2000
+
+
+def validate_zoom_track(value: Any) -> Optional[List[Dict[str, float]]]:
+    """Ścieżka zoomu klipu: [{s, cx, cy, zoom}] rosnąco po `s` (bezwzględna sekunda nagrania). Pusta lista/None = None."""
+    if value is None:
+        return None
+
+    def bad(msg: str = "Ścieżka zoomu klipu jest niepoprawna.") -> RuleError:
+        return RuleError(422, "CLIP_ZOOM_INVALID", msg)
+
+    if not isinstance(value, list):
+        raise bad()
+    if not value:
+        return None
+    if len(value) > MAX_ZOOM_POINTS:
+        raise bad("Ścieżka zoomu ma za dużo punktów (najwyżej 2000).")
+    out: List[Dict[str, float]] = []
+    last = None
+    for p in value:
+        if not isinstance(p, dict):
+            raise bad()
+        nums = []
+        for key in ("s", "cx", "cy", "zoom"):
+            v = p.get(key)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or v in (float("inf"), float("-inf")):
+                raise bad()
+            nums.append(float(v))
+        s, cx, cy, zoom = nums
+        if s < 0 or s > MAX_VIDEO_S or not 0 <= cx <= 1 or not 0 <= cy <= 1 or not 1 <= zoom <= 6:
+            raise bad()
+        if last is not None and s <= last:
+            raise bad("Punkty zoomu muszą iść rosnąco po sekundzie filmu.")
+        last = s
+        out.append({"s": round(s, 2), "cx": round(cx, 4), "cy": round(cy, 4), "zoom": round(zoom, 3)})
+    return out
+
+
 def clip_cut_mode(start_s: float, end_s: float) -> str:
     return "reencode" if end_s - start_s <= PRECISE_CUT_MAX_S else "copy"
 

@@ -794,6 +794,7 @@ def clip_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dict[s
         "updated_at": row.get("updated_at"), "can_edit": may(ctx, "edit", owner=owner),
         "mp4_status": row.get("mp4_status") or "none",
         "important": bool(row.get("important")), "to_discuss": bool(row.get("to_discuss")),
+        "zoom_track": R.json_value(row.get("zoom_track_json"), []) or None,
         "public_url": R.public_url("clip", row.get("public_token")),
         # `thread` = najstarszy wątek (kształt sprzed 26.10 dla starszych buildów aplikacji),
         # `threads` = liczniki, nowości i szpilki wszystkich wątków klipu.

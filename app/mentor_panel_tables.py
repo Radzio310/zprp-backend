@@ -111,6 +111,8 @@ def define_tables(metadata):
         Column("card_key", String, nullable=True),
         Column("card_size", BigInteger, nullable=True),
         Column("card_sig", String, nullable=True),
+        #: Ścieżka zoomu (03.11.2026): JSON [{s, cx, cy, zoom}], `s` = bezwzględna sekunda nagrania; NULL = brak.
+        Column("zoom_track_json", Text, nullable=True),
     )
     Index("ix_mentor_clips_pair_match", clips.c.pair_id, clips.c.match_id)
     Index("ix_mentor_clips_pair_created", clips.c.pair_id, clips.c.created_at)
@@ -347,6 +349,7 @@ MIGRATIONS = (
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS card_key VARCHAR",
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS card_size BIGINT",
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS card_sig VARCHAR",
+    "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS zoom_track_json TEXT",
     "ALTER TABLE mentor_compilations ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_threads ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_comments ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
