@@ -63,6 +63,7 @@ def card_from_shared(row: Dict[str, Any], crew: List[Dict[str, Any]]) -> Dict[st
         # Znacznik pochodzenia na karcie (aplikacja i web pokazują „Mecz wspólny" / „Ręczny").
         "shared": True, "origin_kind": "shared", "shared_id": row["id"],
         "zprp_match_id": row.get("zprp_match_id"), "proel_key": row.get("proel_key"),
+        "match_kind": row.get("match_kind"), "age_group": row.get("age_group"),
         "key_stem": stem_of_row(row),
         "result_by": row.get("result_by"), "result_at": row.get("result_at"),
         "shared_rev": int(row.get("rev") or 1),
