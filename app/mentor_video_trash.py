@@ -230,6 +230,20 @@ async def trash_payload(ctx: Dict[str, Any], match_id: str) -> List[Dict[str, An
 
 
 async def purge_row(row: Dict[str, Any]) -> str:
+    result = await _purge_row(row)
+    now = await C.one(select(mentor_match_videos.c.deleted_at).where(mentor_match_videos.c.id == row["id"])) if row.get("mirror_upload_id") else None
+    if row.get("mirror_upload_id") and (now is None or now.get("deleted_at") is not None):  # przywrócone w międzyczasie = kopia zostaje
+        # Kopia filmu YouTube na serwerze odchodzi razem z nagraniem (nagrobek też jej nie potrzebuje: gotowe MP4 klipów zostają).
+        from app import mentor_youtube_copy as Y
+
+        try:
+            await Y.drop_mirror(row, reason="Nagranie usunięto na zawsze.")
+        except Exception:  # noqa: BLE001 - sprzątanie kopii nie blokuje kosza
+            logger.warning("mentor: usunięcie kopii YouTube nagrania %s nieudane", row.get("id"), exc_info=True)
+    return result
+
+
+async def _purge_row(row: Dict[str, Any]) -> str:
     """Zamyka kosz jednej pozycji: wiersz znika, chyba że trzyma klipy z MP4 (wtedy ukryty nagrobek).
     Wspólne dla sprzątania po 30 dniach i ręcznego „Usuń na zawsze”. Zwraca "deleted" albo "tombstone"."""
     # Jedna transakcja, tylko na pozycji, która nadal jest w koszu. Kasuje też komentarze schowane razem z nagraniem

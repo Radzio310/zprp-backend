@@ -171,8 +171,21 @@ def _auto_added(raw: Any) -> Optional[Dict[str, Any]]:
     return {"at": found.get("at"), "source": found.get("source")}
 
 
+def file_upload_id(video: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Plik nagrania w R2: własne nagranie (`upload_id`) albo kopia filmu YouTube na serwerze (`mirror_upload_id`)."""
+    if not video:
+        return None
+    if (video.get("kind") or "link") == "upload":
+        return video.get("upload_id") or None
+    return video.get("mirror_upload_id") or None
+
+
+def _upload_ids(rows: List[Dict[str, Any]]) -> List[str]:
+    return [i for r in rows for i in (r.get("upload_id"), r.get("mirror_upload_id")) if i]
+
+
 def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: Optional[Dict[str, Any]] = None,
-                ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                ctx: Optional[Dict[str, Any]] = None, mirror: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from app.mentor_evaluation_request_rules import video_provider, youtube_thumbnail
     from app import mentor_bastion_rules as bastion
     from app import mentor_veo_rules as veo
@@ -197,6 +210,8 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
         "veo_status": None, "veo_checked_at": None, "veo_message": None,
         #: Automat nagrań (30.10.2026): {at, source}, gdy nagranie dodał serwer sam; null przy dodanym ręcznie.
         "auto_added": _auto_added(row.get("auto_added_json")),
+        #: Kopia filmu YouTube na serwerze (02.11.2026) - `app/mentor_youtube_copy.py`; null = brak kopii.
+        "mirror": None, "can_copy": False,
     }
     if provider == veo.PROVIDER and kind != "upload":
         # Veo (31.10.2026): odtwarzanie prosto z MP4 na c.veocdn.com; stan z zapisu (`veo_json`), odświeżany w tle.
@@ -215,6 +230,11 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
         out.update(provider="upload", url=play, play_url=play, poster_url=poster, thumbnail_url=poster,
                    playable=bool(play), upload_status=status, title=row.get("title") or upload.get("filename") or "",
                    duration_s=upload.get("duration_s") or row.get("duration_s"))
+    if provider == "youtube" and kind != "upload":
+        from app import mentor_youtube_copy as Y
+
+        out["mirror"] = Y.mirror_of(mirror) if row.get("mirror_upload_id") else None
+        out["can_copy"] = Y.can_copy(row, provider) and (ctx is None or C.may(ctx, "video"))
     if ctx is not None:
         out["can_edit"] = C.may(ctx, "edit", owner=R.s(row.get("added_by")) == ctx["actor"].judge_id)
         out["can_delete"] = C.may(ctx, "video")  # kto może dodać nagranie, ten może je usunąć
@@ -227,8 +247,8 @@ async def video_list(ctx: Dict[str, Any], match_id: str) -> Tuple[List[Dict[str,
                          .order_by(mentor_match_videos.c.created_at.asc()))
     found = await _fresh_veo(found)
     names = await C.people({r.get("added_by") for r in found})
-    uploads = await _uploads_by_id([r.get("upload_id") for r in found])
-    return [video_shape(r, names, uploads.get(r.get("upload_id")), ctx) for r in found], found
+    uploads = await _uploads_by_id(_upload_ids(found))
+    return [video_shape(r, names, uploads.get(r.get("upload_id")), ctx, uploads.get(r.get("mirror_upload_id"))) for r in found], found
 
 
 async def _fresh_veo(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -244,8 +264,8 @@ async def _fresh_veo(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 async def public_video(row: Dict[str, Any]) -> Dict[str, Any]:
     row = (await _fresh_veo([row]))[0]
-    uploads = await _uploads_by_id([row.get("upload_id")])
-    shaped = video_shape(row, {}, uploads.get(row.get("upload_id")))
+    uploads = await _uploads_by_id(_upload_ids([row]))
+    shaped = video_shape(row, {}, uploads.get(row.get("upload_id")), None, uploads.get(row.get("mirror_upload_id")))
     shaped.pop("added_by", None)
     return shaped
 
@@ -254,8 +274,8 @@ async def _video_payload(ctx: Dict[str, Any], video_id: str) -> Dict[str, Any]:
     row = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == video_id))
     row = (await _fresh_veo([row]))[0]
     names = await C.people([row.get("added_by")])
-    uploads = await _uploads_by_id([row.get("upload_id")])
-    return video_shape(row, names, uploads.get(row.get("upload_id")), ctx)
+    uploads = await _uploads_by_id(_upload_ids([row]))
+    return video_shape(row, names, uploads.get(row.get("upload_id")), ctx, uploads.get(row.get("mirror_upload_id")))
 
 
 async def _pair_video(ctx: Dict[str, Any], match_id: str, video_id: str, include_trashed: bool = False) -> Dict[str, Any]:
@@ -512,6 +532,8 @@ async def upload_status(pair_id: str, match_id: str, upload_id: str, actor: Acto
 async def abort_upload(pair_id: str, match_id: str, upload_id: str, actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(pair_id, actor, action="video")
     row = await _own_upload(ctx, match_id, upload_id, actor)
+    if row.get("origin") == "youtube":
+        raise C.err(409, "USE_COPY_ROUTE", "To kopia filmu YouTube - usuń ją przyciskiem przy nagraniu (DELETE .../videos/{id}/copy).")
     if row["status"] == "uploading" and row.get("upload_id") and storage_ready():
         config = storage_config()
         try:
@@ -534,10 +556,12 @@ async def abort_upload(pair_id: str, match_id: str, upload_id: str, actor: Actor
 
 
 async def _clip_upload(clip: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Plik, z którego tniemy klip leżący na tym nagraniu: własne nagranie albo gotowa kopia filmu YouTube (te same sekundy)."""
     video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == clip["video_id"]))
-    if not video or video.get("kind") != "upload" or not video.get("upload_id"):
+    upload_id = file_upload_id(video)
+    if not upload_id:
         return None
-    return await C.one(select(mentor_uploads).where(mentor_uploads.c.id == video["upload_id"]))
+    return await C.one(select(mentor_uploads).where(mentor_uploads.c.id == upload_id))
 
 
 class Mp4Request(BaseModel):
@@ -549,7 +573,7 @@ async def queue_clip_file(ctx: Dict[str, Any], clip: Dict[str, Any], actor: Acto
     (wideo-link); None = klip leży na tym pliku. Zmiana źródła unieważnia gotowy plik i wariant z planszą."""
     if source:
         video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == source["video_id"]))
-        upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == video["upload_id"])) if video and video.get("upload_id") else None
+        upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == file_upload_id(video))) if file_upload_id(video) else None
     else:
         upload = await _clip_upload(clip)
     if not upload or upload.get("status") != "ready" or not upload.get("play_key"):
@@ -763,7 +787,7 @@ async def process_clip(clip: Dict[str, Any]) -> None:
     override = R.json_value(clip.get("mp4_source_json"), {})
     if override.get("video_id"):  # klip z wideo-linku, przeliczony na własny plik albo nagranie Veo
         video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == override["video_id"]))
-        upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == video["upload_id"])) if video and video.get("upload_id") else None
+        upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == file_upload_id(video))) if file_upload_id(video) else None
         start_s, end_s = float(override["start_s"]), float(override["end_s"])
     else:
         video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == clip["video_id"]))

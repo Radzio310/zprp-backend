@@ -113,6 +113,9 @@ def define_tables(metadata):
         Column("auto_added_json", Text, nullable=True),
         #: Veo (31.10.2026): stan nagrania {slug, status, play_url, checked_at, ...} - `app/mentor_veo_rules.py`.
         Column("veo_json", Text, nullable=True),
+        #: Kopia filmu YouTube na serwerze (02.11.2026): `mentor_uploads.id` kopii (`origin = 'youtube'`) - drugie źródło
+        #: TEGO SAMEGO nagrania (te same sekundy), `app/mentor_youtube_copy.py`.
+        Column("mirror_upload_id", String, nullable=True),
         UniqueConstraint("match_id", "normalized_url", name="uq_mentor_match_video_url"),
     )
     Index("uq_mentor_match_video_idem", videos.c.pair_key, videos.c.match_id, videos.c.idempotency_key, unique=True,
@@ -146,5 +149,6 @@ MIGRATIONS = (
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS trash_json text",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS auto_added_json text",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS veo_json text",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS mirror_upload_id varchar",
     VEO_PROVIDER_MIGRATION,
 )

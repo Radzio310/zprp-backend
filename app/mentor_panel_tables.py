@@ -208,6 +208,11 @@ def define_tables(metadata):
         Column("error", String, nullable=True),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("expires_at", DateTime(timezone=True), nullable=True),
+        #: Skąd plik (02.11.2026): NULL = wgrany przez przeglądarkę, `youtube` = kopia filmu YouTube robiona przez serwer
+        #: (`app/mentor_youtube_copy.py`; wtedy `source_url` = adres filmu, `video_id` puste, nagranie wskazuje kopię
+        #: przez `mentor_match_videos.mirror_upload_id`).
+        Column("origin", String, nullable=True),
+        Column("source_url", Text, nullable=True),
     )
     reports = Table(
         "mentor_reports",
@@ -350,6 +355,8 @@ MIGRATIONS = (
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS card_size BIGINT",
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS card_sig VARCHAR",
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS zoom_track_json TEXT",
+    "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS origin VARCHAR",
+    "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS source_url TEXT",
     "ALTER TABLE mentor_compilations ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_threads ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_comments ADD COLUMN IF NOT EXISTS acted_by VARCHAR",

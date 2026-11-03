@@ -81,7 +81,12 @@ def _label(video: Dict[str, Any], kind: str) -> str:
 
 def _video_view(video: Dict[str, Any], uploads: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     kind = _kind(video)
-    up = uploads.get(R.s(video.get("upload_id"))) if kind == "file" else None
+    if kind == "link" and video.get("mirror_upload_id"):
+        # Film YouTube z gotową kopią na serwerze to „własny plik” z tymi samymi sekundami: tniemy wprost, bez synchronizacji.
+        mirror = uploads.get(R.s(video.get("mirror_upload_id")))
+        if mirror and mirror.get("status") == "ready" and mirror.get("play_key"):
+            kind = "file"
+    up = uploads.get(R.s(M.file_upload_id(video))) if kind == "file" else None
     ready = bool(up and up.get("status") == "ready" and up.get("play_key")) if kind == "file" else True
     veo_status = None
     if kind == "veo":

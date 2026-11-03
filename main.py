@@ -421,6 +421,9 @@ app.include_router(mentor_drive_router)
 # Zrzuty klatek Mentora (02.11.2026): trasy /shots - `docs/mentor-panel.md`, sekcja 13.
 from app.mentor_shots import router as mentor_shots_router
 app.include_router(mentor_shots_router)
+# Kopia filmu YouTube na serwerze (02.11.2026): trasy /videos/{v}/copy - `docs/mentor-panel.md`, sekcja 14.
+from app.mentor_youtube_copy import router as mentor_youtube_copy_router
+app.include_router(mentor_youtube_copy_router)
 # Mecze ręczne wspólne (31.10.2026) i ręczne podpięcie ProEla w panelu pary - kontrakt `docs/mecze-wspolne-api.md`.
 from app.shared_matches import router as shared_matches_router
 from app.mentor_proel_link import router as mentor_proel_link_router
@@ -1678,6 +1681,9 @@ async def startup():
     from app.mentor_panel_media import run_media_worker, run_retention
     from app.mentor_panel_notify import run_email_digest
     asyncio.create_task(run_media_worker())
+    # Kopie filmów YouTube (1 naraz, osobno od ffmpeg klipów); wyłącznik MENTOR_YT_COPY=0.
+    from app.mentor_youtube_copy import run_copy_worker
+    asyncio.create_task(run_copy_worker())
     asyncio.create_task(run_retention())
     asyncio.create_task(run_email_digest())
     # Handball Bastion: trwały worker klipów MP4 (stan i dzierżawa w bazie, restart go wznawia). Tylko za BASTION_ENABLED.

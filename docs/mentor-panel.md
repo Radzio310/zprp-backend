@@ -19,7 +19,7 @@ Decyzje właściciela z 21.10.2026. Ten plik jest JEDYNYM kontraktem między
 | Zestawienia | Klipy łączone w nazwane zestawienia („kontrast” - dwie kolumny przeciwstawne, „podobne”, „wolne”), „Dodaj do zestawienia” z dowolną nazwą, odtwarzanie kolejką. |
 | Wątki | Przy meczu i przy klipie; odpowiedzi, @wzmianki, kotwica w sekundzie wideo, status pytanie/rozwiązane. Push (BAZA) + e-mail. Na żywo bez odświeżania. |
 | Źródła wideo | YouTube + Vimeo (pełne API) + **własne nagrania** (upload do Cloudflare R2). Facebook/Twitch tylko jako zwykły link zewnętrzny (bez synchronizacji). |
-| Klipy | **Wirtualne klipy** zawsze (zakres z oryginału, pętla). **MP4** tylko z własnych nagrań (cięcie ffmpeg na serwerze). YouTube przez konto Premium/yt-dlp: NIE (regulamin, blokada IP). |
+| Klipy | **Wirtualne klipy** zawsze (zakres z oryginału, pętla). **MP4** z własnych nagrań (cięcie ffmpeg na serwerze). YouTube: dawne „NIE (regulamin, blokada IP)” zastąpiła decyzja z 02.11.2026 - film YouTube można na żądanie przegrać na serwer jako kopię 1080p (sekcja 14), wtedy klipy tego filmu dostają MP4. |
 | Retencja | Pełne wgrane nagrania 12 mies. od meczu, klipy do ręcznego usunięcia. Publiczny link do klipu z meczu młodzieżowego - ostrzeżenie przed publikacją. |
 | Kategorie | Per para + domyślne (5 dzisiejszych) + globalne admina; nazwa, kolor z palety, ikona z biblioteki, opis; „Przywróć domyślne”; klip może mieć kilka kategorii. |
 | Uprawnienia klipów | Para i mentorzy tworzą klipy, znaczniki, kategorie, komentarze; edytują/usuwają tylko swoje (autor widoczny). Komisja: podgląd. |
@@ -719,3 +719,51 @@ Odczyt (`GET`, PNG): każdy z pary, mentorzy, komisja, administrator; zapis (`cr
 - Tabela `mentor_shots` powstaje z `metadata.create_all`, indeksy domyka idempotentne `MIGRATIONS` (`CREATE INDEX IF NOT EXISTS`, bezpieczne przy każdym starcie). Zmiany w istniejących tabelach: brak.
 - Obrazy w R2 pod `mentor/<para>/shots/<id>-<ms>.jpg` i `-thumb.jpg`; stary obiekt kasowany po udanej wymianie i po usunięciu zrzutu.
 - **Nie sprawdzono na prawdziwych źródłach**: lokalnie nie ma ffmpeg, a Docker i produkcja nie były uruchamiane. Wycinanie klatki z pliku i Veo przetestowano na atrapie `subprocess` (kontrola argumentów: `-ss` przed `-i`, `-frames:v 1`, opcje https) i na obrazach z Pillow; prawdziwego ffmpeg na prawdziwym MP4 nie uruchomiono. Klatka z Bastionu to istniejące `POST /frame` connectora (zrobione dla miniatur kaset: ffmpeg na playliście HLS, zapas to zrzut ekranu odtwarzacza w Chromium; connector zaokrągla zwracane `at_s` do 0,1 s i przycina do `długość - 1 s`), więc dokładność co do klatki NIE jest gwarantowana dla Bastionu, a z samym connectorem nie rozmawiano. Rysowanie PNG sprawdzono pikselami (kolory kształtów, przyciemnienie reflektora, powiększenie lupy, pasek) na rozmiarach 160 do 3000 px; wyglądu na prawdziwej klatce nie oceniano wzrokiem.
+
+## 14. Kopia filmu YouTube na serwerze (02.11.2026)
+
+Decyzje właściciela (02.11.2026): pobieranie robi **serwer** (yt-dlp), najpierw prosto, a dopiero po blokadzie YouTube przez **proxy** (`MENTOR_YT_PROXY`); kopia powstaje **na przycisk** przy filmie (nie automatycznie); jakość **do 1080p**; gdy kopia jest gotowa, odtwarzacz **domyślnie gra kopię**, a YouTube zostaje w przełączniku. Kod: `app/mentor_youtube_copy.py` (trasy, worker), `app/mentor_youtube_copy_rules.py` (reguły czyste), testy `tests/test_mentor_youtube_copy.py`.
+
+Regulamin YouTube zabrania pobierania bez zgody właściciela kanału. Kopia jest wewnętrzna (widzi ją tylko para, mentorzy, komisja i administrator, bez publicznego linku), a najbezpieczniej robić ją z transmisji kanałów, które się na to zgodziły (ZPRP, kluby).
+
+### 14.1 Model
+- Kopia to **drugie źródło tego samego nagrania**, nie osobne nagranie: `mentor_match_videos.mirror_upload_id` -> `mentor_uploads` z `origin = 'youtube'`, `source_url` = adres filmu, `video_id` puste. Ten sam film, więc te same sekundy: klipy, rysunki, zrzuty, wątki i synchronizacja działają na kopii bez przeliczania.
+- Stan w `mentor_uploads.status`: `downloading` (w kolejce albo w pracy) -> `ready` | `failed` | `removed` (usunięta ręcznie albo z nagraniem) | `expired` (retencja 12 miesięcy od meczu, jak wgrane nagrania).
+- Pliki w R2: `mentor/<para>/<mecz>/<upload>/play.mp4` (H.264/AAC, `faststart`) i `poster.jpg`.
+
+### 14.2 `Video.mirror` i `Video.can_copy`
+Każde nagranie ma dwa nowe pola (dla nie-YouTube zawsze `mirror: null`, `can_copy: false`):
+- `can_copy: bool` - film YouTube, wyłącznik włączony, R2 skonfigurowane, yt-dlp jest i pytający może dodawać nagrania (akcja `video`).
+- `mirror: null | {id, status: "working"|"ready"|"failed"|"expired", phase: null|"queued"|"connecting"|"downloading"|"finishing"|"converting"|"uploading", progress: 0..1|null, speed_bps, eta_s, downloaded_bytes, total_bytes, via_proxy, size, height, duration_s, error, play_url, poster_url, requested_by, created_at}`.
+  - `progress` to jeden pasek dla całości (pobieranie 2-86%, składanie 86-90%, wysyłka do R2 90-100%). `phase: "queued"` z `progress: null` = czeka na workera (np. po restarcie serwera albo za inną kopią).
+  - `play_url` / `poster_url` tylko dla `ready` (podpisane, 6 h, jak wgrane nagrania). `error` = polski komunikat dla `failed`/`expired`.
+
+### 14.3 Trasy
+- `POST /pairs/{p}/matches/{m}/videos/{v}/copy` (akcja `video`) -> `Video`. Idempotentne: trwająca albo gotowa kopia wraca bez zmian, po `failed`/`expired`/`removed` zaczyna od nowa. Odmowy: 422 `NOT_YOUTUBE`, 404 `COPY_DISABLED` (`MENTOR_YT_COPY=0`), 503 `COPY_NO_TOOL` (brak yt-dlp), 503 `STORAGE_OFF`, 404 `VIDEO_NOT_FOUND`, 403 jak przy dodawaniu nagrania.
+- `GET /pairs/{p}/matches/{m}/videos/{v}/copy` (odczyt) -> `{video_id, mirror}` - lekkie odpytywanie co 2-3 s, dopóki `mirror.status == "working"`.
+- `DELETE /pairs/{p}/matches/{m}/videos/{v}/copy` (akcja `video`) -> `{ok, removed, video}` - anuluje kopię w toku albo usuwa gotową (pliki z R2 znikają). Film YouTube, klipy i gotowe MP4 klipów zostają.
+- `DELETE .../uploads/{id}` dla kopii odpowiada 409 `USE_COPY_ROUTE` (kopia nie jest zwykłym wgrywaniem).
+- Zdarzenia `rev` (zakres `videos`): `copy_started`, `copy_ready`, `copy_failed`, `copy_removed`.
+
+### 14.4 Worker i pobieranie
+- Pętla `run_copy_worker()` (z `main.py`), **jedna kopia naraz**, osobno od kolejki ffmpeg klipów. Kolejność: najstarsze zamówienie.
+- yt-dlp w wątku, format `bv*[vcodec^=avc1][height<=1080]+ba[acodec^=mp4a]` (zapas: inny kodek do 1080p, potem pojedynczy plik). H.264/AAC jest tylko przepakowany (`-c copy -movflags +faststart`, sekundy pracy); inny kodek (VP9/AV1) przechodzi przez to samo kodowanie co wgrane nagrania.
+- Przed pobraniem odmowy bez ściągania gigabajtów: transmisja trwa (`LIVE`), zapowiedź (`UPCOMING`), świeży zapis jeszcze przetwarzany przez YouTube (`POST_LIVE`), ponad 5 h (`TOO_LONG`), ponad 12 GB (`TOO_BIG`). Błędy YouTube tłumaczone na polski: `PRIVATE`, `GONE`, `AGE`, `MEMBERS`, `BLOCKED`, `BLOCKED_PROXY`, `FAILED`.
+- Proxy: próba prosto z serwera; gdy YouTube odpowie blokadą (bot, 429, 403, token PO) albo ogólnym błędem, druga próba przez `MENTOR_YT_PROXY`. `MENTOR_YT_PROXY_ALWAYS=1` = od razu przez proxy. Bez proxy blokada kończy się `failed` z komunikatem.
+- Po restarcie kopia w toku zaczyna się od nowa (pliki robocze są tymczasowe).
+- MP4 klipów: film YouTube z gotową kopią jest dla planu pobierania „własnym plikiem” (`mentor_clip_download._video_view`), więc klip z tego filmu tnie się wprost z kopii (te same sekundy, bez synchronizacji), a klipy z innych nagrań meczu mogą się na kopię przeliczać jak na wgrany plik. Zrzuty klatek (sekcja 13) z filmu z kopią biorą obraz z kopii.
+- Kosz: przeniesienie filmu do kosza zostawia kopię (wraca z przywróceniem), „Usuń na zawsze” i sprzątanie po 30 dniach ją kasują.
+
+### 14.5 Zmienne środowiskowe (Railway)
+| Zmienna | Co robi |
+|---|---|
+| `MENTOR_YT_COPY` | `0` wyłącza funkcję (domyślnie włączona). |
+| `MENTOR_YT_PROXY` | Proxy domowe/rezydencjalne, np. `http://uzytkownik:haslo@host:port`. Używane dopiero po blokadzie. Koszt rzędu 1-3 GB na mecz 1080p. |
+| `MENTOR_YT_PROXY_ALWAYS` | `1` = zawsze przez proxy (gdy prosto z Railway YouTube blokuje za każdym razem). |
+| `MENTOR_YT_COOKIES` | Ciasteczka konta YouTube w formacie Netscape (wprost albo base64) - tylko dla filmów z ograniczeniem wiekowym; najlepiej osobne konto, bo YouTube może je zablokować. |
+| `MENTOR_MEDIA_TMP` | Katalog roboczy (wspólny z kolejką ffmpeg). Kopia 1080p meczu zajmuje chwilowo do ~2x rozmiaru filmu (ok. 3-6 GB). |
+
+### 14.6 Dane, migracja, nie sprawdzono
+- Migracje przy starcie (idempotentne): `mentor_match_videos.mirror_upload_id`, `mentor_uploads.origin`, `mentor_uploads.source_url`.
+- Zależność: `yt-dlp[default,deno]` w `requirements.txt` bez górnej granicy wersji (YouTube zmienia się co kilka tygodni; nowy build = świeże yt-dlp). `deno` (paczka PyPI) to silnik JS, którego yt-dlp potrzebuje do podpisów YouTube.
+- **Nie sprawdzono na prawdziwym YouTube**: środowisko, w którym powstał kod, nie miało dostępu do YouTube. Przebieg (kolejka, proxy po blokadzie, błąd i ponowienie, usunięcie, MP4 klipu z kopii, kosz) przetestowano na atrapach yt-dlp, ffmpeg i R2. Po wdrożeniu sprawdzić jedną kopię na produkcji; jeśli kończy się `BLOCKED`, ustawić `MENTOR_YT_PROXY`.

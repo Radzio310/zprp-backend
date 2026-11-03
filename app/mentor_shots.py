@@ -283,6 +283,12 @@ async def source_kind(video: Dict[str, Any]) -> str:
         return "veo"
     if J.bastion_item_of(video):
         return "bastion"
+    if R.s(video.get("provider")) == "youtube" and video.get("mirror_upload_id"):
+        # Gotowa kopia filmu na serwerze (02.11.2026) = te same sekundy w pliku R2: klatka jak z własnego nagrania.
+        mirror = await C.one(select(mentor_uploads.c.status, mentor_uploads.c.play_key)
+                             .where(mentor_uploads.c.id == video["mirror_upload_id"]))
+        if mirror and mirror.get("status") == "ready" and mirror.get("play_key"):
+            return "file"
     return "youtube" if R.s(video.get("provider")) == "youtube" else "link"
 
 
@@ -371,7 +377,9 @@ async def bastion_frame(video: Dict[str, Any], at_s: float, real_judge_id: str) 
 async def server_frame_bytes(video: Dict[str, Any], kind: str, at_s: float, real_judge_id: str) -> bytes:
     """Surowy obraz klatki z serwera. Rzuca `FrameError`."""
     if kind == "file":
-        upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == video["upload_id"]))
+        from app.mentor_panel_media import file_upload_id
+
+        upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == file_upload_id(video)))
         if not upload or upload.get("status") != "ready" or not upload.get("play_key"):
             raise FrameError("VIDEO_NOT_READY")
         from app import mentor_panel_media as M
