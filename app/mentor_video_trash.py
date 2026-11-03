@@ -22,6 +22,7 @@ from app import mentor_panel_core as C
 from app import mentor_panel_rules as R
 from app.db import (
     database,
+    mentor_uploads,
     mentor_clip_assets,
     mentor_clips,
     mentor_comments,
@@ -124,8 +125,9 @@ def orphan_count(found: Dict[str, Any]) -> int:
 
 
 def restorable(video: Dict[str, Any]) -> bool:
-    """Wgrane nagrania (plik w R2) kasujemy od razu - do kosza trafiają tylko linki."""
-    return (video.get("kind") or "link") != "upload"
+    """Wgrane nagrania (plik w R2) kasujemy od razu - do kosza trafiają linki i kopie filmów YouTube (03.11.2026:
+    gotowa kopia to osobne nagranie z koszem i przywracaniem; pliki znikają dopiero przy „Usuń na zawsze”)."""
+    return (video.get("kind") or "link") != "upload" or bool(video.get("copy_of"))
 
 
 async def impact(ctx: Dict[str, Any], video: Dict[str, Any]) -> Dict[str, Any]:
@@ -231,15 +233,26 @@ async def trash_payload(ctx: Dict[str, Any], match_id: str) -> List[Dict[str, An
 
 async def purge_row(row: Dict[str, Any]) -> str:
     result = await _purge_row(row)
-    now = await C.one(select(mentor_match_videos.c.deleted_at).where(mentor_match_videos.c.id == row["id"])) if row.get("mirror_upload_id") else None
-    if row.get("mirror_upload_id") and (now is None or now.get("deleted_at") is not None):  # przywrócone w międzyczasie = kopia zostaje
-        # Kopia filmu YouTube na serwerze odchodzi razem z nagraniem (nagrobek też jej nie potrzebuje: gotowe MP4 klipów zostają).
-        from app import mentor_youtube_copy as Y
+    watched = row.get("mirror_upload_id") or (row.get("copy_of") and row.get("upload_id"))
+    now = await C.one(select(mentor_match_videos.c.deleted_at).where(mentor_match_videos.c.id == row["id"])) if watched else None
+    if not watched or (now is not None and now.get("deleted_at") is None):  # przywrócone w międzyczasie = nic nie ruszamy
+        return result
+    from app import mentor_youtube_copy as Y
 
-        try:
+    try:
+        if row.get("mirror_upload_id"):
+            # Film YouTube na zawsze: kopia w toku (albo nieudana) odchodzi, gotowa kopia jest osobnym nagraniem i zostaje.
             await Y.drop_mirror(row, reason="Nagranie usunięto na zawsze.")
-        except Exception:  # noqa: BLE001 - sprzątanie kopii nie blokuje kosza
-            logger.warning("mentor: usunięcie kopii YouTube nagrania %s nieudane", row.get("id"), exc_info=True)
+        if row.get("copy_of") and row.get("upload_id"):
+            # Nagranie-kopia na zawsze: pliki w R2 znikają (gotowe MP4 klipów zostają), film YouTube może zamówić nową.
+            source = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == row["copy_of"]))
+            upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == row["upload_id"]))
+            if source and source.get("mirror_upload_id") == row["upload_id"]:
+                await Y.drop_mirror(source, upload, reason="Kopię usunięto na zawsze.", force=True)
+            elif upload:
+                await Y.drop_mirror(None, upload, reason="Kopię usunięto na zawsze.", force=True)
+    except Exception:  # noqa: BLE001 - sprzątanie kopii nie blokuje kosza
+        logger.warning("mentor: usunięcie kopii YouTube nagrania %s nieudane", row.get("id"), exc_info=True)
     return result
 
 

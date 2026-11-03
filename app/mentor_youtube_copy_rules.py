@@ -243,7 +243,22 @@ def mirror_shape(upload: Optional[Mapping[str, Any]], live: Optional[Mapping[str
         "poster_url": poster_url if state == "ready" else None,
         "requested_by": upload.get("uploader_id"),
         "created_at": upload.get("created_at"),
+        #: 03.11.2026: gotowa kopia to osobne nagranie meczu (`Video.copy_of` = ten film); tu jego id (może leżeć w koszu).
+        "video_id": upload.get("video_id") if state == "ready" else None,
     }
+
+
+def copy_title(title: Any, filename: Any = None, height: Any = None) -> str:
+    """Nazwa nagrania-kopii: „<nazwa filmu> · kopia 1080p”. Bez długich myślników, do 200 znaków."""
+    base = re.sub(r"\s+", " ", str(title or "")).strip()
+    if not base:
+        base = re.sub(r"\.mp4$", "", str(filename or ""), flags=re.I).strip() or "YouTube"
+    try:
+        h = int(height or 0)
+    except (TypeError, ValueError):
+        h = 0
+    tail = f" · kopia {h}p" if h > 0 else " · kopia"
+    return base[: 200 - len(tail)].rstrip() + tail
 
 
 def safe_filename(title: Any) -> str:

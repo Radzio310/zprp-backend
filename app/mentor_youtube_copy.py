@@ -3,7 +3,12 @@
   - `POST /mentor-panel/pairs/{p}/matches/{m}/videos/{v}/copy` - „Zrób kopię na serwer” (akcja `video`); ponowienie po
     błędzie tym samym wywołaniem. Odpowiedź = nagranie (`Video` z polem `mirror`).
   - `GET .../videos/{v}/copy` - lekki stan kopii do odpytywania co 2-3 s (`{mirror}`).
-  - `DELETE .../videos/{v}/copy` - anuluj kopię w toku albo usuń gotową (pliki w R2 znikają, YouTube zostaje).
+  - `DELETE .../videos/{v}/copy` - anuluj kopię w toku (albo zamknij błąd); gotowa kopia idzie do kosza jak każde nagranie.
+
+Od 03.11.2026 gotowa kopia to OSOBNE nagranie meczu (`kind = 'upload'`, `copy_of` = film YouTube, synchronizacja
+skopiowana z filmu), usuwalne do kosza, z przywracaniem i zmianą nazwy jak wgrany plik. Film YouTube trzyma dalej
+`mirror_upload_id` (pasek w toku, błąd, brak dublowania). Stare kopie (sprzed 03.11, bez nagrania) dostają nagranie
+przy odczycie listy (`attach_copy`) i raz przy starcie workera (`adopt_orphans`) - bez kasowania plików.
 
 Worker: jedna kopia naraz, osobno od kolejki ffmpeg klipów (wielominutowe pobieranie nie blokuje MP4 klipów).
 yt-dlp i ffmpeg pracują w wątku; stan na żywo (etap, postęp, prędkość) trzyma pamięć procesu, trwały stan
@@ -112,6 +117,64 @@ async def _mirror_row(video: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return await C.one(select(mentor_uploads).where(mentor_uploads.c.id == video["mirror_upload_id"]))
 
 
+async def _copy_video(upload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Nagranie-kopia gotowej kopii (także w koszu albo jako nagrobek); None = jeszcze go nie ma."""
+    if not upload.get("video_id"):
+        return None
+    return await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == upload["video_id"]))
+
+
+async def attach_copy(upload: Dict[str, Any], source: Dict[str, Any]) -> Optional[str]:
+    """Gotowa kopia -> osobne nagranie meczu (raz; równoległe wywołania zatrzymuje unikalny adres `upload:<id>`).
+    Synchronizacja i długość z filmu YouTube (ten sam film = te same sekundy). Zwraca id nagrania-kopii."""
+    if upload.get("status") != "ready" or not upload.get("play_key"):
+        return None
+    if upload.get("video_id"):
+        return upload["video_id"]
+    marker = f"upload:{upload['id']}"
+
+    async def existing() -> Optional[Dict[str, Any]]:
+        return await C.one(select(mentor_match_videos.c.id).where(mentor_match_videos.c.match_id == R.s(source["match_id"]))
+                           .where(mentor_match_videos.c.normalized_url == marker))
+
+    found = await existing()
+    video_id = found["id"] if found else R.new_id()
+    if not found:
+        stamp = C.now()
+        try:
+            await database.execute(mentor_match_videos.insert().values(
+                id=video_id, match_id=source["match_id"], pair_key=source["pair_key"], url=marker, normalized_url=marker,
+                provider="upload", kind="upload", upload_id=upload["id"], added_by=upload.get("uploader_id") or source.get("added_by"),
+                created_at=stamp, updated_at=stamp, copy_of=source["id"], sync_json=source.get("sync_json"),
+                duration_s=int(upload["duration_s"]) if upload.get("duration_s") else source.get("duration_s"),
+                title=Y.copy_title(source.get("title"), upload.get("filename"), upload.get("height"))))
+        except Exception:  # noqa: BLE001 - równoległe dołączenie: drugi zapis odbija się od unikalnego adresu
+            again = await existing()
+            if not again:
+                raise
+            video_id = again["id"]
+    await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == upload["id"]).values(video_id=video_id))
+    upload["video_id"] = video_id
+    return video_id
+
+
+async def adopt_orphans() -> int:
+    """Stare kopie (gotowe, bez nagrania) -> osobne nagrania. Idempotentne, bez kasowania czegokolwiek."""
+    done = 0
+    rows = await C.rows(select(mentor_uploads).where(mentor_uploads.c.origin == ORIGIN).where(mentor_uploads.c.status == "ready")
+                        .where(mentor_uploads.c.video_id.is_(None)))
+    for up in rows:
+        source = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.mirror_upload_id == up["id"]))
+        if not source:
+            continue
+        try:
+            if await attach_copy(dict(up), source):
+                done += 1
+        except Exception:  # noqa: BLE001
+            logger.warning("mentor: dołączenie starej kopii %s nieudane", up.get("id"), exc_info=True)
+    return done
+
+
 @router.post("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}/copy")
 async def start_copy(pair_id: str, match_id: str, video_id: str, actor: Actor = Depends(mentor_actor)):
     """Zakłada kopię (albo zwraca trwającą/gotową; po błędzie zaczyna od nowa). Idempotentne."""
@@ -123,14 +186,33 @@ async def start_copy(pair_id: str, match_id: str, video_id: str, actor: Actor = 
         raise C.err(503, "COPY_NO_TOOL", Y.MESSAGES["NO_TOOL"])
     M._storage_or_503()
     current = await _mirror_row(video)
-    if current and current.get("status") in ("downloading", "ready"):
+    if current and current.get("status") == "downloading":
         return await M._video_payload(ctx, video_id)
+    if current and current.get("status") == "ready" and current.get("play_key"):
+        # Kopia już jest: nie dublujemy. Bez nagrania (stara) - dostaje je; w koszu - wraca z kosza.
+        current = dict(current)
+        copy = await _copy_video(current)
+        if copy is None:
+            await attach_copy(current, video)
+            return await M._video_payload(ctx, video_id)
+        from app import mentor_video_trash as T
+
+        if copy.get("deleted_at") is None:
+            return await M._video_payload(ctx, video_id)
+        if T.in_trash(copy):
+            await T.restore(copy)
+            await C.touch(ctx, actor.judge_id, "video_restored", "videos", video["match_id"], {"id": copy["id"]})
+            return await M._video_payload(ctx, video_id)
+        # Nagrobek (nagranie-kopię usunięto na zawsze, zostały tylko klipy z MP4): nowa kopia od zera.
+        await drop_mirror(video, current, reason="Kopię usunięto na zawsze.", force=True)
+        current = None
     stamp = C.now()
-    if current and current.get("status") in ("failed", "expired", "removed"):
+    if current and current.get("status") in ("failed", "expired", "removed", "ready"):
         _failed_here.discard(current["id"])
         _cancelled.discard(current["id"])
         await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == current["id"]).values(
-            status="downloading", error=None, uploader_id=actor.judge_id, created_at=stamp, play_key=None, poster_key=None))
+            status="downloading", error=None, uploader_id=actor.judge_id, created_at=stamp, play_key=None, poster_key=None,
+            video_id=None))
         upload_id = current["id"]
     else:
         card = await C.match_card(ctx, match_id)
@@ -158,23 +240,41 @@ async def copy_status(pair_id: str, match_id: str, video_id: str, actor: Actor =
 
 @router.delete("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}/copy")
 async def remove_copy(pair_id: str, match_id: str, video_id: str, actor: Actor = Depends(mentor_actor)):
-    """Anuluje kopię w toku albo usuwa gotową. Nagranie YouTube, klipy i gotowe MP4 klipów zostają."""
+    """Anuluje kopię w toku albo zamyka błąd. Gotowa kopia (osobne nagranie) idzie do kosza jak każde nagranie
+    (`trashed: true`, `copy_video_id`). Film YouTube, klipy i gotowe MP4 klipów zostają."""
     ctx = await C.pair_context(pair_id, actor, action="video")
     video = await M._pair_video(ctx, match_id, video_id)
     current = await _mirror_row(video)
     if current is None:
-        return {"ok": True, "removed": False, "video": await M._video_payload(ctx, video_id)}
+        return {"ok": True, "removed": False, "trashed": False, "video": await M._video_payload(ctx, video_id)}
+    if current.get("status") == "ready" and current.get("play_key"):
+        current = dict(current)
+        if not current.get("video_id"):
+            await attach_copy(current, video)
+        copy = await _copy_video(current)
+        if copy and copy.get("deleted_at") is None:
+            from app import mentor_video_trash as T
+
+            await T.move_to_trash(ctx, copy, actor.judge_id)
+            await C.touch(ctx, actor.judge_id, "video_trashed", "videos", video["match_id"], {"id": copy["id"]})
+        return {"ok": True, "removed": True, "trashed": True, "copy_video_id": current.get("video_id"),
+                "video": await M._video_payload(ctx, video_id)}
     await drop_mirror(video, current, reason="Kopię usunięto.")
     await C.touch(ctx, actor.judge_id, "copy_removed", "videos", video["match_id"], {"id": video_id})
-    return {"ok": True, "removed": True, "video": await M._video_payload(ctx, video_id)}
+    return {"ok": True, "removed": True, "trashed": False, "video": await M._video_payload(ctx, video_id)}
 
 
-async def drop_mirror(video: Dict[str, Any], upload: Optional[Dict[str, Any]] = None, reason: str = "Kopię usunięto.") -> None:
-    """Zdejmuje kopię z nagrania: przerywa pracę, kasuje pliki w R2, wiersz kopii dostaje `removed`. Bezpieczne wielokrotnie."""
-    upload = upload or await _mirror_row(video)
-    await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == video["id"])
-                           .values(mirror_upload_id=None, updated_at=C.now()))
+async def drop_mirror(video: Optional[Dict[str, Any]], upload: Optional[Dict[str, Any]] = None, reason: str = "Kopię usunięto.",
+                      force: bool = False) -> None:
+    """Odpina kopię od filmu YouTube; kopię w toku (albo nieudaną) przerywa i sprząta. Gotowa kopia z własnym nagraniem
+    żyje dalej (usuwa się ją jak każde nagranie), chyba że `force` (jej nagranie usunięto na zawsze). Bezpieczne wielokrotnie."""
+    upload = upload or (await _mirror_row(video) if video else None)
+    if video:
+        await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == video["id"])
+                               .values(mirror_upload_id=None, updated_at=C.now()))
     if not upload:
+        return
+    if upload.get("video_id") and not force:
         return
     _cancelled.add(upload["id"])
     _live.pop(upload["id"], None)
@@ -420,6 +520,11 @@ async def process_copy(row: Dict[str, Any]) -> None:
         if not video.get("duration_s") and meta.get("duration_s"):
             await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == video["id"])
                                    .values(duration_s=int(meta["duration_s"]), updated_at=C.now()))
+        # Gotowa kopia wpada na pasek nagrań jako osobne nagranie (świeży odczyt filmu: synchronizacja mogła się zmienić).
+        fresh_video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == video["id"])) or video
+        fresh_upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == upload_id))
+        if fresh_upload:
+            await attach_copy(dict(fresh_upload), fresh_video)
         await C.touch(row["pair_id"], row["uploader_id"], "copy_ready", "videos", row["match_id"], {"id": video["id"]})
         logger.info("mentor: kopia YouTube %s gotowa (%s MB, %sp)", upload_id, size // (1024 * 1024), meta.get("height"))
     finally:
@@ -465,6 +570,12 @@ async def run_copy_worker() -> None:
     global _wake_event
     _wake_event = asyncio.Event()
     await asyncio.sleep(25)
+    try:
+        adopted = await adopt_orphans()
+        if adopted:
+            logger.info("mentor: %s starych kopii YouTube dostało własne nagranie", adopted)
+    except Exception:  # noqa: BLE001
+        logger.warning("mentor: przegląd starych kopii nieudany", exc_info=True)
     while True:
         try:
             busy = await process_next()

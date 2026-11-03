@@ -204,6 +204,12 @@ def test_kopia_od_zamowienia_do_gotowej_drugiej_opcji_odtwarzania(d):
     assert video["provider"] == "youtube" and "abcdefghijk" in video["url"]  # YouTube zostaje
     assert video["mirror"]["status"] == "ready" and video["mirror"]["play_url"] == f"https://r2/{up['play_key']}"
     assert video["mirror"]["poster_url"] and video["mirror"]["size"] == 2_000_000_000
+    # 03.11: gotowa kopia to osobne nagranie meczu, z synchronizacją filmu i nazwą „... · kopia 1080p”.
+    copy = next(v for v in listed if v.get("copy_of") == "yt")
+    assert video["mirror"]["video_id"] == copy["id"] == up["video_id"]
+    assert copy["kind"] == "upload" and copy["copy_of"] == "yt" and copy["playable"] is True
+    assert copy["title"] == "Transmisja · kopia 1080p" and copy["sync"]["match_start_s"] == 100
+    assert copy["can_delete"] is True and copy["mirror"] is None and sum(1 for v in listed if v.get("copy_of")) == 1
 
 
 def test_blokada_prosto_z_serwera_druga_proba_przez_proxy(d):
@@ -244,21 +250,120 @@ def test_blad_bez_proxy_czytelny_komunikat_i_ponowienie(d):
     assert done["mirror"]["status"] == "ready"
 
 
-def test_usuniecie_kopii_zostawia_youtube_i_kasuje_pliki(d):
+def test_anulowanie_kopii_w_toku_sprzata(d):
+    async def go():
+        await seed(d)
+        actor = await actor_for(d)
+        await d.copy.start_copy(PAIR, "m1", "yt", actor)
+        before = await video_row(d)
+        removed = await d.copy.remove_copy(PAIR, "m1", "yt", actor)
+        up = await upload_row(d, before["mirror_upload_id"])
+        worked = await d.copy.process_next()
+        return removed, up, await video_row(d), worked
+
+    removed, up, after, worked = d.run(go)
+    assert removed["removed"] is True and removed["trashed"] is False and removed["video"]["mirror"] is None
+    assert after["mirror_upload_id"] is None and up["status"] == "removed" and worked is False
+
+
+async def _copy_id(d, actor):
+    ctx = await d.core.pair_context(PAIR, actor)
+    listed, _ = await d.media.video_list(ctx, "m1")
+    return next(v["id"] for v in listed if v.get("copy_of") == "yt")
+
+
+def test_kopia_jak_kazde_nagranie_kosz_przywrocenie_nazwa_bez_dublowania(d):
     async def go():
         await seed(d)
         actor = await actor_for(d)
         await d.copy.start_copy(PAIR, "m1", "yt", actor)
         await d.copy.process_next()
-        before = await video_row(d)
-        removed = await d.copy.remove_copy(PAIR, "m1", "yt", actor)
-        up = await upload_row(d, before["mirror_upload_id"])
-        return before, removed, up, await video_row(d)
+        ctx = await d.core.pair_context(PAIR, actor)
+        copy_id = await _copy_id(d, actor)
+        renamed = await d.media.update_video(PAIR, "m1", copy_id, d.media.VideoPatch(title="Mecz z Zabrza (serwer)"), actor)
+        impact = await d.media.video_delete_impact(PAIR, "m1", copy_id, actor)
+        trashed = await d.media.delete_video(PAIR, "m1", copy_id, actor)
+        in_trash, _ = await d.media.video_list(ctx, "m1")
+        again = await d.copy.start_copy(PAIR, "m1", "yt", actor)  # kopia w koszu: wraca z kosza, nie powstaje druga
+        back, _ = await d.media.video_list(ctx, "m1")
+        await d.media.delete_video(PAIR, "m1", copy_id, actor)
+        restored = await d.media.restore_video(PAIR, "m1", copy_id, actor)
+        # Usunięcie filmu YouTube (kosz, potem na zawsze) nie rusza kopii.
+        await d.media.delete_video(PAIR, "m1", "yt", actor)
+        await d.media.purge_video(PAIR, "m1", "yt", actor)
+        alone, _ = await d.media.video_list(ctx, "m1")
+        up = await upload_row(d, (await video_row(d, copy_id))["upload_id"])
+        return copy_id, renamed, impact, trashed, in_trash, again, back, restored, alone, up
 
-    before, removed, up, after = d.run(go)
-    assert removed["removed"] is True and removed["video"]["mirror"] is None and removed["video"]["provider"] == "youtube"
-    assert after["mirror_upload_id"] is None and up["status"] == "removed" and up["play_key"] is None
-    assert any(k.endswith("/play.mp4") for k in d.forgotten)
+    copy_id, renamed, impact, trashed, in_trash, again, back, restored, alone, up = d.run(go)
+    assert renamed["title"] == "Mecz z Zabrza (serwer)"
+    assert impact["restorable"] is True and trashed["trashed"] is True
+    assert copy_id not in [v["id"] for v in in_trash] and "yt" in [v["id"] for v in in_trash]
+    assert again["mirror"]["video_id"] == copy_id and {"yt", copy_id} <= {v["id"] for v in back} and sum(1 for v in back if v.get("copy_of")) == 1
+    assert restored["video"]["id"] == copy_id and len(d.calls) == 1
+    mine = [v for v in alone if v["id"] in (copy_id, "yt")]
+    assert [v["id"] for v in mine] == [copy_id] and mine[0]["playable"] is True
+    assert up["status"] == "ready" and not any(k.endswith("/play.mp4") for k in d.forgotten)
+
+
+def test_usuniecie_kopii_na_zawsze_kasuje_pliki_i_pozwala_na_nowa(d):
+    async def go():
+        await seed(d)
+        actor = await actor_for(d)
+        await d.copy.start_copy(PAIR, "m1", "yt", actor)
+        await d.copy.process_next()
+        up_id = (await video_row(d))["mirror_upload_id"]
+        copy_id = (await upload_row(d, up_id))["video_id"]
+        trashed = await d.copy.remove_copy(PAIR, "m1", "yt", actor)  # stara trasa: gotowa kopia idzie do kosza
+        await d.media.purge_video(PAIR, "m1", copy_id, actor)
+        up = await upload_row(d, up_id)
+        yt = await video_row(d)
+        fresh = await d.copy.start_copy(PAIR, "m1", "yt", actor)
+        return trashed, up, yt, fresh
+
+    trashed, up, yt, fresh = d.run(go)
+    assert trashed["trashed"] is True and trashed["copy_video_id"]
+    assert up["status"] == "removed" and up["play_key"] is None and any(k.endswith("/play.mp4") for k in d.forgotten)
+    assert yt["mirror_upload_id"] is None and fresh["mirror"]["status"] == "working"
+
+
+def test_stara_kopia_dostaje_wlasne_nagranie_przy_odczycie(d):
+    async def go():
+        await seed(d)
+        now = datetime.now(timezone.utc)
+        await d.ins("mentor_uploads", id="old", pair_id=PAIR, match_id="m1", uploader_id=A, filename="Stary mecz.mp4", size=10,
+                    content_type="video/mp4", status="ready", created_at=now, origin="youtube", source_url=YT_URL,
+                    play_key="mentor/p/m1/old/play.mp4", height=720, duration_s=5400.0)
+        T = d.T["mentor_match_videos"]
+        await d.db.execute(T.update().where(T.c.id == "yt").values(mirror_upload_id="old"))
+        actor = await actor_for(d)
+        ctx = await d.core.pair_context(PAIR, actor)
+        first, _ = await d.media.video_list(ctx, "m1")
+        second, _ = await d.media.video_list(ctx, "m1")
+        orphans = await d.copy.adopt_orphans()
+        again = await d.copy.start_copy(PAIR, "m1", "yt", actor)
+        return first, second, orphans, again, await upload_row(d, "old")
+
+    first, second, orphans, again, up = d.run(go)
+    copy = next(v for v in first if v.get("copy_of") == "yt")
+    assert copy["title"] == "Transmisja · kopia 720p" and copy["copy_of"] == "yt" and up["video_id"] == copy["id"]
+    assert [v["id"] for v in second] == [v["id"] for v in first] and orphans == 0 and sum(1 for v in first if v.get("copy_of")) == 1
+    assert again["mirror"]["video_id"] == copy["id"] and d.calls == []
+
+
+def test_stare_kopie_przy_starcie_workera(d):
+    async def go():
+        await seed(d)
+        now = datetime.now(timezone.utc)
+        await d.ins("mentor_uploads", id="old", pair_id=PAIR, match_id="m1", uploader_id=A, filename="Stary mecz.mp4", size=10,
+                    content_type="video/mp4", status="ready", created_at=now, origin="youtube", source_url=YT_URL,
+                    play_key="mentor/p/m1/old/play.mp4")
+        T = d.T["mentor_match_videos"]
+        await d.db.execute(T.update().where(T.c.id == "yt").values(mirror_upload_id="old"))
+        return await d.copy.adopt_orphans(), await d.copy.adopt_orphans(), await upload_row(d, "old")
+
+    first, second, up = d.run(go)
+    assert first == 1 and second == 0 and up["video_id"] and up["play_key"]
 
 
 def test_odmowy_nie_youtube_i_wylacznik(d):
@@ -315,16 +420,15 @@ def test_mp4_klipu_z_filmu_youtube_tnie_wprost_z_kopii(d):
     assert cut[cut.index("-ss") + 1] == "1500.00" and any("play.mp4" in a for a in cut)  # te same sekundy, plik kopii
 
 
-def test_usuniecie_na_zawsze_z_kosza_zabiera_kopie(d):
+def test_usuniecie_na_zawsze_filmu_w_trakcie_kopii_przerywa_ja(d):
     async def go():
         await seed(d)
         actor = await actor_for(d)
         await d.copy.start_copy(PAIR, "m1", "yt", actor)
-        await d.copy.process_next()
         before = await video_row(d)
         await d.media.delete_video(PAIR, "m1", "yt", actor)
         await d.media.purge_video(PAIR, "m1", "yt", actor)
-        return before, await upload_row(d, before["mirror_upload_id"])
+        return await upload_row(d, before["mirror_upload_id"]), await d.copy.process_next()
 
-    before, up = d.run(go)
-    assert up["status"] == "removed" and any(k.endswith("/play.mp4") for k in d.forgotten)
+    up, worked = d.run(go)
+    assert up["status"] == "removed" and worked is False

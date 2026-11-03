@@ -212,6 +212,8 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
         "auto_added": _auto_added(row.get("auto_added_json")),
         #: Kopia filmu YouTube na serwerze (02.11.2026) - `app/mentor_youtube_copy.py`; null = brak kopii.
         "mirror": None, "can_copy": False,
+        #: 03.11.2026: nagranie jest gotową kopią filmu YouTube o tym id (osobne nagranie, `kind = 'upload'`); null = nie.
+        "copy_of": row.get("copy_of"),
     }
     if provider == veo.PROVIDER and kind != "upload":
         # Veo (31.10.2026): odtwarzanie prosto z MP4 na c.veocdn.com; stan z zapisu (`veo_json`), odświeżany w tle.
@@ -241,13 +243,26 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
     return out
 
 
-async def video_list(ctx: Dict[str, Any], match_id: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+async def video_list(ctx: Dict[str, Any], match_id: str, adopt: bool = True) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     found = await C.rows(select(mentor_match_videos).where(mentor_match_videos.c.match_id == R.s(match_id))
                          .where(mentor_match_videos.c.pair_key == ctx["pair_key"]).where(mentor_match_videos.c.deleted_at.is_(None))
                          .order_by(mentor_match_videos.c.created_at.asc()))
     found = await _fresh_veo(found)
     names = await C.people({r.get("added_by") for r in found})
     uploads = await _uploads_by_id(_upload_ids(found))
+    if adopt:
+        # Stara kopia YouTube (sprzed 03.11: gotowa, bez własnego nagrania) dostaje nagranie przy pierwszym odczycie.
+        stale = [(r, uploads[r["mirror_upload_id"]]) for r in found if r.get("mirror_upload_id") in uploads
+                 and uploads[r["mirror_upload_id"]].get("status") == "ready" and not uploads[r["mirror_upload_id"]].get("video_id")]
+        if stale:
+            from app import mentor_youtube_copy as Y
+
+            for row, up in stale:
+                try:
+                    await Y.attach_copy(dict(up), row)
+                except Exception:  # noqa: BLE001 - lista nagrań działa i bez tego
+                    logger.warning("mentor: dołączenie starej kopii %s nieudane", up.get("id"), exc_info=True)
+            return await video_list(ctx, match_id, adopt=False)
     return [video_shape(r, names, uploads.get(r.get("upload_id")), ctx, uploads.get(r.get("mirror_upload_id"))) for r in found], found
 
 
@@ -363,12 +378,12 @@ async def video_delete_impact(pair_id: str, match_id: str, video_id: str, actor:
 
 @router.delete("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}")
 async def delete_video(pair_id: str, match_id: str, video_id: str, actor: Actor = Depends(mentor_actor)):
-    """Link: do kosza na 30 dni (`POST .../restore`). Wgrany plik: kasowany od razu (bez kosza)."""
+    """Link i kopia filmu YouTube (`copy_of`): do kosza na 30 dni (`POST .../restore`). Wgrany plik: kasowany od razu."""
     from app import mentor_video_trash as T
 
     ctx = await C.pair_context(pair_id, actor, action="video")
     row = await _pair_video(ctx, match_id, video_id)
-    if row.get("kind") == "upload" and row.get("upload_id"):
+    if row.get("kind") == "upload" and row.get("upload_id") and not T.restorable(row):
         impact = await T.impact(ctx, row)  # przed skasowaniem: ile klipów zostanie bez źródła (bez kosza, bez cofania)
         upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == row["upload_id"]))
         if upload:

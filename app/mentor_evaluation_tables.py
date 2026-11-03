@@ -116,6 +116,9 @@ def define_tables(metadata):
         #: Kopia filmu YouTube na serwerze (02.11.2026): `mentor_uploads.id` kopii (`origin = 'youtube'`) - drugie źródło
         #: TEGO SAMEGO nagrania (te same sekundy), `app/mentor_youtube_copy.py`.
         Column("mirror_upload_id", String, nullable=True),
+        #: Gotowa kopia filmu YouTube (03.11.2026) jest OSOBNYM nagraniem (`kind = 'upload'`): tu id nagrania YouTube,
+        #: z którego powstała. Film YouTube trzyma dalej `mirror_upload_id` (pasek w toku, brak dublowania kopii).
+        Column("copy_of", String, nullable=True),
         UniqueConstraint("match_id", "normalized_url", name="uq_mentor_match_video_url"),
     )
     Index("uq_mentor_match_video_idem", videos.c.pair_key, videos.c.match_id, videos.c.idempotency_key, unique=True,
@@ -150,5 +153,6 @@ MIGRATIONS = (
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS auto_added_json text",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS veo_json text",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS mirror_upload_id varchar",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS copy_of varchar",
     VEO_PROVIDER_MIGRATION,
 )

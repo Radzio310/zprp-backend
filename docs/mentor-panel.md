@@ -722,26 +722,33 @@ Odczyt (`GET`, PNG): każdy z pary, mentorzy, komisja, administrator; zapis (`cr
 
 ## 14. Kopia filmu YouTube na serwerze (02.11.2026)
 
-Decyzje właściciela (02.11.2026): pobieranie robi **serwer** (yt-dlp), najpierw prosto, a dopiero po blokadzie YouTube przez **proxy** (`MENTOR_YT_PROXY`); kopia powstaje **na przycisk** przy filmie (nie automatycznie); jakość **do 1080p**; gdy kopia jest gotowa, odtwarzacz **domyślnie gra kopię**, a YouTube zostaje w przełączniku. Kod: `app/mentor_youtube_copy.py` (trasy, worker), `app/mentor_youtube_copy_rules.py` (reguły czyste), testy `tests/test_mentor_youtube_copy.py`.
+Decyzje właściciela (02.11.2026): pobieranie robi **serwer** (yt-dlp), najpierw prosto, a dopiero po blokadzie YouTube przez **proxy** (`MENTOR_YT_PROXY`); kopia powstaje **na przycisk** przy filmie (nie automatycznie); jakość **do 1080p**. Zmiana 03.11.2026: gotowa kopia to **osobne nagranie** na pasku nagrań (jak wgrany plik: kosz, przywracanie, zmiana nazwy), bez przełącznika YouTube / Serwer. Kod: `app/mentor_youtube_copy.py` (trasy, worker), `app/mentor_youtube_copy_rules.py` (reguły czyste), testy `tests/test_mentor_youtube_copy.py`.
 
 Regulamin YouTube zabrania pobierania bez zgody właściciela kanału. Kopia jest wewnętrzna (widzi ją tylko para, mentorzy, komisja i administrator, bez publicznego linku), a najbezpieczniej robić ją z transmisji kanałów, które się na to zgodziły (ZPRP, kluby).
 
 ### 14.1 Model
-- Kopia to **drugie źródło tego samego nagrania**, nie osobne nagranie: `mentor_match_videos.mirror_upload_id` -> `mentor_uploads` z `origin = 'youtube'`, `source_url` = adres filmu, `video_id` puste. Ten sam film, więc te same sekundy: klipy, rysunki, zrzuty, wątki i synchronizacja działają na kopii bez przeliczania.
+- Zamówienie: `mentor_match_videos.mirror_upload_id` (na filmie YouTube) -> `mentor_uploads` z `origin = 'youtube'`, `source_url` = adres filmu.
+- **Gotowa kopia = osobne nagranie (03.11.2026)**: nowy wiersz `mentor_match_videos` z `kind = 'upload'`, `upload_id` = kopia, `copy_of` = id filmu YouTube, `sync_json` i długość skopiowane z filmu (ten sam film = te same sekundy), nazwa `<nazwa filmu> · kopia 1080p`. `mentor_uploads.video_id` wskazuje to nagranie. Klipy, znaczniki, wątki i zrzuty zostają przy nagraniu, na którym powstały (nic się nie przenosi).
+- Kopia jest usuwalna jak link: `DELETE .../videos/{kopia}` -> kosz na 30 dni (`restorable: true`), `restore` przywraca, „Usuń na zawsze” i sprzątanie kasują pliki w R2 i odpinają kopię od filmu (można zamówić nową). Zmiana nazwy: `PATCH .../videos/{kopia} {title}`.
+- Niezależność: usunięcie filmu YouTube (kosz i na zawsze) nie rusza gotowej kopii; „na zawsze” przerywa tylko kopię w toku. Usunięcie kopii nie rusza filmu.
+- Bez dublowania: `POST .../copy` przy gotowej kopii zwraca film bez zmian; kopia w koszu wraca z kosza; dopiero po „Usuń na zawsze” powstaje nowa.
+- Stare kopie (sprzed 03.11, gotowe bez nagrania) dostają nagranie przy odczycie listy nagrań meczu (`video_list` -> `attach_copy`) i raz przy starcie workera (`adopt_orphans`). Idempotentne (unikalny adres `upload:<id>`), nic nie jest kasowane.
+- MP4 klipów i zrzuty z samego filmu YouTube dalej biorą obraz z gotowej kopii (te same sekundy), dopóki jej pliki istnieją.
 - Stan w `mentor_uploads.status`: `downloading` (w kolejce albo w pracy) -> `ready` | `failed` | `removed` (usunięta ręcznie albo z nagraniem) | `expired` (retencja 12 miesięcy od meczu, jak wgrane nagrania).
 - Pliki w R2: `mentor/<para>/<mecz>/<upload>/play.mp4` (H.264/AAC, `faststart`) i `poster.jpg`.
 
 ### 14.2 `Video.mirror` i `Video.can_copy`
 Każde nagranie ma dwa nowe pola (dla nie-YouTube zawsze `mirror: null`, `can_copy: false`):
 - `can_copy: bool` - film YouTube, wyłącznik włączony, R2 skonfigurowane, yt-dlp jest i pytający może dodawać nagrania (akcja `video`).
-- `mirror: null | {id, status: "working"|"ready"|"failed"|"expired", phase: null|"queued"|"connecting"|"downloading"|"finishing"|"converting"|"uploading", progress: 0..1|null, speed_bps, eta_s, downloaded_bytes, total_bytes, via_proxy, size, height, duration_s, error, play_url, poster_url, requested_by, created_at}`.
+- `mirror: null | {id, status: "working"|"ready"|"failed"|"expired", phase: null|"queued"|"connecting"|"downloading"|"finishing"|"converting"|"uploading", progress: 0..1|null, speed_bps, eta_s, downloaded_bytes, total_bytes, via_proxy, size, height, duration_s, error, play_url, poster_url, requested_by, created_at, video_id}` (`video_id` = nagranie-kopia przy `ready`, może leżeć w koszu).
+- `Video.copy_of: string | null` - nagranie jest gotową kopią filmu YouTube o tym id.
   - `progress` to jeden pasek dla całości (pobieranie 2-86%, składanie 86-90%, wysyłka do R2 90-100%). `phase: "queued"` z `progress: null` = czeka na workera (np. po restarcie serwera albo za inną kopią).
   - `play_url` / `poster_url` tylko dla `ready` (podpisane, 6 h, jak wgrane nagrania). `error` = polski komunikat dla `failed`/`expired`.
 
 ### 14.3 Trasy
 - `POST /pairs/{p}/matches/{m}/videos/{v}/copy` (akcja `video`) -> `Video`. Idempotentne: trwająca albo gotowa kopia wraca bez zmian, po `failed`/`expired`/`removed` zaczyna od nowa. Odmowy: 422 `NOT_YOUTUBE`, 404 `COPY_DISABLED` (`MENTOR_YT_COPY=0`), 503 `COPY_NO_TOOL` (brak yt-dlp), 503 `STORAGE_OFF`, 404 `VIDEO_NOT_FOUND`, 403 jak przy dodawaniu nagrania.
 - `GET /pairs/{p}/matches/{m}/videos/{v}/copy` (odczyt) -> `{video_id, mirror}` - lekkie odpytywanie co 2-3 s, dopóki `mirror.status == "working"`.
-- `DELETE /pairs/{p}/matches/{m}/videos/{v}/copy` (akcja `video`) -> `{ok, removed, video}` - anuluje kopię w toku albo usuwa gotową (pliki z R2 znikają). Film YouTube, klipy i gotowe MP4 klipów zostają.
+- `DELETE /pairs/{p}/matches/{m}/videos/{v}/copy` (akcja `video`) -> `{ok, removed, trashed, copy_video_id?, video}` - anuluje kopię w toku albo zamyka błąd (`trashed: false`); gotowa kopia idzie do kosza jak każde nagranie (`trashed: true`). Film YouTube, klipy i gotowe MP4 klipów zostają.
 - `DELETE .../uploads/{id}` dla kopii odpowiada 409 `USE_COPY_ROUTE` (kopia nie jest zwykłym wgrywaniem).
 - Zdarzenia `rev` (zakres `videos`): `copy_started`, `copy_ready`, `copy_failed`, `copy_removed`.
 
@@ -752,7 +759,7 @@ Każde nagranie ma dwa nowe pola (dla nie-YouTube zawsze `mirror: null`, `can_co
 - Proxy: próba prosto z serwera; gdy YouTube odpowie blokadą (bot, 429, 403, token PO) albo ogólnym błędem, druga próba przez `MENTOR_YT_PROXY`. `MENTOR_YT_PROXY_ALWAYS=1` = od razu przez proxy. Bez proxy blokada kończy się `failed` z komunikatem.
 - Po restarcie kopia w toku zaczyna się od nowa (pliki robocze są tymczasowe).
 - MP4 klipów: film YouTube z gotową kopią jest dla planu pobierania „własnym plikiem” (`mentor_clip_download._video_view`), więc klip z tego filmu tnie się wprost z kopii (te same sekundy, bez synchronizacji), a klipy z innych nagrań meczu mogą się na kopię przeliczać jak na wgrany plik. Zrzuty klatek (sekcja 13) z filmu z kopią biorą obraz z kopii.
-- Kosz: przeniesienie filmu do kosza zostawia kopię (wraca z przywróceniem), „Usuń na zawsze” i sprzątanie po 30 dniach ją kasują.
+- Kosz: zob. 14.1 (kopia ma własny kosz; film YouTube i kopia usuwają się niezależnie).
 
 ### 14.5 Zmienne środowiskowe (Railway)
 | Zmienna | Co robi |
