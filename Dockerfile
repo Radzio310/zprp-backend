@@ -1,5 +1,6 @@
 # 1. Wybieramy lekki obraz Pythona
-FROM python:3.10-slim
+# 3.11, nie 3.10: yt-dlp od 2026.10.26 (kopia filmu YouTube w Mentorze) wymaga Pythona >= 3.11.
+FROM python:3.11-slim
 
 # 2. Ustawiamy katalog roboczy wewnątrz kontenera
 WORKDIR /app
