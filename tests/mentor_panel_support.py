@@ -73,7 +73,8 @@ def _extra_tables(metadata):
                    Column("photo_url", String), Column("province", String), Column("last_login_at", DateTime(timezone=True)))
     offtimes = Table("partner_offtimes", metadata, Column("judge_id", String, primary_key=True), Column("full_name", String),
                      Column("partner_id", String), Column("data_json", JSON))
-    admins = Table("admin_settings", metadata, Column("id", Integer, primary_key=True), Column("allowed_admins", JSON))
+    admins = Table("admin_settings", metadata, Column("id", Integer, primary_key=True), Column("allowed_admins", JSON),
+                   Column("mentor_committee_toggle", Boolean, nullable=False, server_default=sqlalchemy.text("0")))
     return {"province_judges": judges, "province_matches": matches, "province_match_judges": match_judges,
             "zprp_archive_matches": archive, "delegate_evaluations": delegate, "saved_matches": saved,
             "delegate_evaluation_sharing": sharing, "login_records": logins, "partner_offtimes": offtimes,

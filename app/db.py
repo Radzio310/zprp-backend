@@ -340,6 +340,9 @@ admin_settings = Table(
     # Build deweloperski stoi obok sklepowego i ma osobny token FCM. Domyślnie
     # nie dublujemy na nim zewnętrznych powiadomień produkcyjnych.
     Column("allow_dev_pushes", Boolean, nullable=False, server_default=text("false")),
+    # Decyzja 03.11.2026: panel Mentor pary włącza tylko admin. Komisja okręgu
+    # dostaje to prawo wyłącznie, gdy admin włączy ten globalny przełącznik.
+    Column("mentor_committee_toggle", Boolean, nullable=False, server_default=text("false")),
 )
 
 # 10b) Wydarzenie szkoleniowe (kursokonferencja)
@@ -4959,6 +4962,7 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS deleted_at timestamptz"))
     _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS deleted_by varchar"))
     _conn.execute(text("ALTER TABLE admin_settings ADD COLUMN IF NOT EXISTS allow_dev_pushes boolean NOT NULL DEFAULT false"))
+    _conn.execute(text("ALTER TABLE admin_settings ADD COLUMN IF NOT EXISTS mentor_committee_toggle boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE route_atlas ADD COLUMN IF NOT EXISTS default_km double precision"))
     _conn.execute(text("ALTER TABLE route_atlas ADD COLUMN IF NOT EXISTS default_polyline text"))
     _conn.execute(text("ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS app_id varchar"))

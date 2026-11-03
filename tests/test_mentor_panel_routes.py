@@ -42,6 +42,8 @@ def test_role_i_uprawnienia(env):
         committee = await env.actor(COMMITTEE)
         out["committee_clip"] = await raises(env.library.create_clip(PAIR, clip_body(env), committee))
         out["pair_toggle"] = await raises(P.toggle_panel(PAIR, P.PanelBody(enabled=False), await env.actor(JUDGES[0])))
+        out["committee_toggle_default"] = await raises(P.toggle_panel(PAIR, P.PanelBody(enabled=False), committee))
+        await P.put_committee_toggle(P.CommitteeToggleBody(enabled=True), await env.actor(ADMIN))
         state = await P.toggle_panel(PAIR, P.PanelBody(enabled=False), committee)
         out["disabled_pair"] = await raises(P.dashboard(PAIR, await env.actor(JUDGES[1])))
         out["disabled_admin"] = (await P.dashboard(PAIR, await env.actor(ADMIN)))["enabled"]
@@ -57,16 +59,49 @@ def test_role_i_uprawnienia(env):
     assert out[JUDGES[0]] == ("pair", True, False)
     assert out[MENTOR] == ("mentor", True, False)
     assert out[ADMIN] == ("admin", True, True)
-    assert out[COMMITTEE] == ("committee", False, True)
+    assert out[COMMITTEE] == ("committee", False, False)  # domyślnie komisja nie włącza panelu
     assert out["stranger"] == (403, "NO_ACCESS")
     assert out["committee_clip"] == (403, "READ_ONLY")
     assert out["pair_toggle"] == (403, "NO_TOGGLE")
+    assert out["committee_toggle_default"] == (403, "COMMITTEE_TOGGLE_OFF")
     assert out["state"]["enabled"] is False and out["state"]["rev"] == 1
     assert out["disabled_pair"] == (403, "PANEL_DISABLED")
     assert out["disabled_admin"] is False
     assert out["list"] == [(PAIR, False, "pair")]
     assert out["list_stranger"] == []
     assert out["m2028_committee"] == (403, "NO_ACCESS")
+
+
+def test_przelacznik_komisji_globalny(env):
+    async def go():
+        P = env.panel
+        out = {}
+        admin, committee = await env.actor(ADMIN), await env.actor(COMMITTEE)
+        out["get_default"] = await P.get_committee_toggle(admin)
+        out["get_committee"] = await raises(P.get_committee_toggle(committee))
+        out["put_committee"] = await raises(P.put_committee_toggle(P.CommitteeToggleBody(enabled=True), committee))
+        out["put_pair"] = await raises(P.put_committee_toggle(P.CommitteeToggleBody(enabled=True), await env.actor(JUDGES[0])))
+        out["admin_off"] = (await P.toggle_panel(PAIR, P.PanelBody(enabled=False), admin))["enabled"]
+        out["committee_off"] = await raises(P.toggle_panel(PAIR, P.PanelBody(enabled=True), committee))
+        out["put_admin"] = await P.put_committee_toggle(P.CommitteeToggleBody(enabled=True), admin)
+        out["committee_on"] = (await P.toggle_panel(PAIR, P.PanelBody(enabled=True), committee))["enabled"]
+        out["committee_can"] = (await P.dashboard(PAIR, committee))["can"]["toggle"]
+        out["pair_never"] = await raises(P.toggle_panel(PAIR, P.PanelBody(enabled=False), await env.actor(JUDGES[0])))
+        out["mentor_never"] = await raises(P.toggle_panel(PAIR, P.PanelBody(enabled=False), await env.actor(MENTOR)))
+        await P.put_committee_toggle(P.CommitteeToggleBody(enabled=False), admin)
+        out["back_off"] = await raises(P.toggle_panel(PAIR, P.PanelBody(enabled=False), committee))
+        return out
+
+    out = env.run(go)
+    assert out["get_default"] == {"committee_can_toggle": False}
+    assert out["get_committee"] == (403, "ADMIN_ONLY") and out["put_committee"] == (403, "ADMIN_ONLY")
+    assert out["put_pair"] == (403, "ADMIN_ONLY")
+    assert out["admin_off"] is False
+    assert out["committee_off"] == (403, "COMMITTEE_TOGGLE_OFF")
+    assert out["put_admin"] == {"committee_can_toggle": True}
+    assert out["committee_on"] is True and out["committee_can"] is True
+    assert out["pair_never"] == (403, "NO_TOGGLE") and out["mentor_never"] == (403, "NO_TOGGLE")
+    assert out["back_off"] == (403, "COMMITTEE_TOGGLE_OFF")
 
 
 def test_mecze_z_trzech_zrodel_bez_duplikatow(env):

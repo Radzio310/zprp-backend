@@ -21,6 +21,7 @@ from sqlalchemy import and_, func, or_, select, text, update
 from app import mentor_panel_rules as R
 from app.mentoring_rules import state_ref
 from app.db import (
+    admin_settings,
     database,
     delegate_evaluations,
     mentor_audit,
@@ -224,6 +225,25 @@ async def ensure_panel(pair_id: str) -> Dict[str, Any]:
         "pair_id": pair_id, "enabled": False, "rev": 0}
 
 
+async def committee_toggle_enabled() -> bool:
+    """Globalny przełącznik admina: czy komisja okręgu może włączać panel pary.
+    Domyślnie false; awaria odczytu = false (bezpieczny brak prawa)."""
+    try:
+        row = await database.fetch_one(select(admin_settings.c.mentor_committee_toggle).where(admin_settings.c.id == 1))
+        return bool(row and row["mentor_committee_toggle"])
+    except Exception:  # noqa: BLE001
+        logger.warning("committee_toggle_enabled: odczyt nieudany", exc_info=True)
+        return False
+
+
+async def set_committee_toggle(value: bool) -> None:
+    existing = await database.fetch_one(select(admin_settings.c.id).where(admin_settings.c.id == 1))
+    if existing:
+        await database.execute(update(admin_settings).where(admin_settings.c.id == 1).values(mentor_committee_toggle=bool(value)))
+    else:
+        await database.execute(admin_settings.insert().values(id=1, allowed_admins=[], mentor_committee_toggle=bool(value)))
+
+
 async def pair_context(pair_id: str, actor: MentorActor, *, action: str = "view") -> Dict[str, Any]:
     """Para + rola pytającego + stan panelu; odmowa jako `HTTPException` z kodem."""
     pair = await one(select(mentoring_pairs).where(mentoring_pairs.c.id == str(pair_id)))
@@ -239,7 +259,10 @@ async def pair_context(pair_id: str, actor: MentorActor, *, action: str = "view"
     if role in (None, "admin") or action == "toggle":
         config = await mentoring_config(pair["province"])
         role = role or R.role_in_pair(rule_actor, pair, links, config)
-    manages = actor.is_admin or (config is not None and R.committee_scope(rule_actor, pair, config))
+    manages = actor.is_admin
+    if not manages and config is not None and R.committee_scope(rule_actor, pair, config):
+        # Włączanie panelu: komisja tylko przy globalnym przełączniku admina.
+        manages = await committee_toggle_enabled()
     if actor.acted_by:
         if role != "mentor" or actor.judge_id not in {R.s(link["mentor_id"]) for link in links if link.get("ended_at") is None}:
             raise err(403, "ACT_AS_NOT_MENTOR",

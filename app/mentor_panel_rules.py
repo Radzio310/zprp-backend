@@ -127,14 +127,15 @@ def can(action: str, role: Optional[str], *, is_admin: bool = False, enabled: bo
     - para i mentorzy: podgląd i zapisy tylko przy WŁĄCZONYM panelu; edycja i
       usuwanie wyłącznie własnych rzeczy,
     - komisja: podgląd i arkusze (przy włączonym panelu), bez zapisów,
-    - włączanie panelu: administrator albo komisja okręgu (`manages`).
+    - włączanie panelu: administrator; komisja okręgu tylko gdy `manages`
+      (ustawia je wołający: zakres okręgu ORAZ globalny przełącznik admina).
     """
     if action not in ACTIONS:
         return False
     if is_admin:
         return True
     if action == "toggle":
-        return bool(manages)
+        return bool(manages) and role == "committee"
     if role not in ("pair", "mentor", "committee") or not enabled:
         return False
     if action in ("view", "sheets"):
@@ -153,10 +154,13 @@ def require(action: str, role: Optional[str], **kwargs: Any) -> None:
         raise RuleError(403, "PANEL_DISABLED", "Panel Mentor tej pary nie jest jeszcze włączony.")
     if action == "edit":
         raise RuleError(403, "NOT_OWNER", "Możesz zmieniać i usuwać tylko to, co sam dodałeś.")
+    if action == "toggle":
+        if role == "committee":
+            raise RuleError(403, "COMMITTEE_TOGGLE_OFF",
+                            "Panel Mentor włącza i wyłącza administrator. Komisja okręgu dostanie to prawo, gdy administrator je włączy w ustawieniach.")
+        raise RuleError(403, "NO_TOGGLE", "Panel Mentor włącza i wyłącza administrator.")
     if role == "committee":
         raise RuleError(403, "READ_ONLY", "Komisja ogląda panel pary bez prawa zmian.")
-    if action == "toggle":
-        raise RuleError(403, "NO_TOGGLE", "Panel włącza administrator albo komisja okręgu pary.")
     raise RuleError(403, "NO_ACCESS", "Nie masz dostępu do panelu tej pary.")
 
 

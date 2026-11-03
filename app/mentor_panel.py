@@ -175,9 +175,30 @@ def panel_state(panel: Dict[str, Any]) -> Dict[str, Any]:
             "enabled_at": panel.get("enabled_at"), "rev": int(panel.get("rev") or 0)}
 
 
+class CommitteeToggleBody(BaseModel):
+    enabled: bool
+
+
+@router.get("/settings/committee-toggle")
+async def get_committee_toggle(actor: Actor = Depends(mentor_actor)):
+    """Globalny przełącznik „Komisja okręgu może włączać panel Mentor" - tylko administrator."""
+    if not actor.is_admin:
+        raise C.err(403, "ADMIN_ONLY", "To ustawienie zmienia tylko administrator.")
+    return {"committee_can_toggle": await C.committee_toggle_enabled()}
+
+
+@router.put("/settings/committee-toggle")
+async def put_committee_toggle(body: CommitteeToggleBody, actor: Actor = Depends(mentor_actor)):
+    if not actor.is_admin:
+        raise C.err(403, "ADMIN_ONLY", "To ustawienie zmienia tylko administrator.")
+    await C.set_committee_toggle(body.enabled)
+    return {"committee_can_toggle": await C.committee_toggle_enabled()}
+
+
 @router.patch("/pairs/{pair_id}/panel")
 async def toggle_panel(pair_id: str, body: PanelBody, actor: Actor = Depends(mentor_actor)):
-    """Admin (wszystkie pary) i komisja okręgu (pary okręgowe swojego okręgu)."""
+    """Admin (wszystkie pary). Komisja okręgu (pary okręgowe swojego okręgu) tylko, gdy admin
+    włączył globalny przełącznik; inaczej 403 `COMMITTEE_TOGGLE_OFF`."""
     ctx = await C.pair_context(pair_id, actor, action="toggle")
     stamp = C.now()
     values: Dict[str, Any] = {"enabled": body.enabled, "updated_at": stamp}

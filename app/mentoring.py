@@ -269,8 +269,15 @@ async def management(province: str = "", actor: Actor = Depends(market_actor)):
         enabled = {}
     for item in pair_items + cross_items:
         item["panel_enabled"] = bool(enabled.get(item["id"]))
+    try:
+        from app.mentor_panel_core import committee_toggle_enabled
+
+        committee_toggle = await committee_toggle_enabled()
+    except Exception:  # noqa: BLE001
+        committee_toggle = False
     return {"config": await configuration(province), "province": province,
         "can_manage": manage, "is_admin": bool(actor.is_admin),
+        "panel_toggle_by_committee": committee_toggle,
         "people": people + cross_people,
         "occupied": [r["judge_id"] for r in occupied if actor.is_admin or r["judge_id"] in known],
         "pairs": pair_items,
