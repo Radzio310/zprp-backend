@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import database, province_judges, province_settlement_judges
 from app.deps import get_jwt_payload
+from app.province_judge_status import inactive_by_judge
 from app.province_panel_access import PANEL_PROVINCE_JUDGES
 from app.province_panel_guard import ensure_panel_write
 from app.settlement_province import display, spellings
@@ -56,8 +57,12 @@ def _photo_or_none(photo_url: Any | None) -> str | None:
     return s if s else None
 
 
-def _row_to_item(row) -> ProvinceJudgeItem:
+def _row_to_item(row, inactive: dict | None = None) -> ProvinceJudgeItem:
     d = dict(row)
+    if inactive is not None:
+        from app.province_judge_status import is_inactive_in
+
+        d["inactive"] = is_inactive_in(inactive, d.get("judge_id"), d.get("province"))
     if d.get("photo_url") is None:
         d["photo_url"] = ""
     if d.get("badges") is None:
@@ -191,7 +196,8 @@ async def upsert_province_judge(
 async def list_province_judges():
     q = select(province_judges).order_by(province_judges.c.province.asc(), province_judges.c.full_name.asc())
     rows = await database.fetch_all(q)
-    return ListProvinceJudgesResponse(records=[_row_to_item(r) for r in rows])
+    gone = await inactive_by_judge()
+    return ListProvinceJudgesResponse(records=[_row_to_item(r, gone) for r in rows])
 
 
 @router.get("/province/{province}", response_model=ListProvinceJudgesResponse, summary="Lista sędziów dla wybranego województwa")
@@ -204,7 +210,8 @@ async def list_province_judges_by_province(province: str):
         .order_by(province_judges.c.full_name.asc())
     )
     rows = await database.fetch_all(q)
-    return ListProvinceJudgesResponse(records=[_row_to_item(r) for r in rows])
+    gone = await inactive_by_judge()
+    return ListProvinceJudgesResponse(records=[_row_to_item(r, gone) for r in rows])
 
 
 @router.get("/{judge_id}", response_model=ProvinceJudgeItem, summary="Pobierz sędziego po judge_id (province_judges)")
@@ -214,7 +221,7 @@ async def get_province_judge(judge_id: str):
     )
     if not row:
         raise HTTPException(status_code=404, detail="Nie znaleziono sędziego")
-    return _row_to_item(row)
+    return _row_to_item(row, await inactive_by_judge())
 
 
 @router.patch("/{judge_id}", response_model=ProvinceJudgeItem, summary="Częściowa edycja sędziego (province_judges)")

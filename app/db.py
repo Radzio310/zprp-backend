@@ -663,6 +663,36 @@ province_judges = Table(
   ),
 )
 
+# (13.1b) Sędzia NIEAKTYWNY w okręgu (baza.zprp.pl) - trwały do odwołania.
+# Wiersz istnieje = nieaktywny; przywrócenie kasuje wiersz, a ślad zostaje w logu.
+province_judge_inactive = Table(
+  "province_judge_inactive",
+  metadata,
+  Column("judge_id", String, primary_key=True),
+  Column("province_key", String, nullable=False, index=True),  # klucz bez ogonków ("SLASKIE")
+  Column("name", String, nullable=False, server_default=""),
+  Column("since", DateTime(timezone=True), nullable=False, server_default=func.now()),
+  Column("by_id", String, nullable=True),
+  Column("by_name", String, nullable=True),
+  Column("note", String, nullable=True),
+)
+
+# Historia zmian statusu (kto, kiedy, notatka); wpis source='seed' to znacznik stanu początkowego.
+province_judge_status_log = Table(
+  "province_judge_status_log",
+  metadata,
+  Column("id", Integer, primary_key=True, autoincrement=True),
+  Column("province_key", String, nullable=False, index=True),
+  Column("judge_id", String, nullable=False, index=True),
+  Column("name", String, nullable=False, server_default=""),
+  Column("inactive", Boolean, nullable=False),
+  Column("at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+  Column("by_id", String, nullable=True),
+  Column("by_name", String, nullable=True),
+  Column("note", String, nullable=True),
+  Column("source", String, nullable=False, server_default="manual"),
+)
+
 # 13.2) Badge sędziów okręgowych
 badges = Table(
     "badges",

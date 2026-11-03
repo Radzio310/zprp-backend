@@ -222,7 +222,6 @@ async def judges(
 
     from app.assignment_board_rules import display_name
     from app.assignment_people import effective_assign_role, role_refusal, zprp_role_label
-    from app.official_roster import is_active
 
     rows: list[dict] = []
     for judge_id, judge in roster.judges.items():
@@ -262,11 +261,12 @@ async def judges(
                 if partner_id
                 else None,
                 # Obsada 2.0 (24.09.2026): nagłówek w zapisie ZPRP, aktywność
-                # w sezonie (`official_roster`; okręg bez listy = wszyscy),
+                # w okręgu (`roster.inactive`, stan z bazy),
                 # para płasko ze źródłem („own" wygrywa z „zprp") i mentorzy
                 # przypisani PARZE tego sędziego.
                 "display_name": display_name(judge.name),
-                "active": is_active(key, _now(), judge.name),
+                "active": judge_id not in roster.inactive,
+                "inactive": judge_id in roster.inactive,
                 "partner_id": partner_id or None,
                 "partner_name": (partner.name if partner else "") or None,
                 "partner_source": roster.pair_source.get(judge_id) if partner_id else None,

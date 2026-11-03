@@ -128,6 +128,7 @@ from app.district_alerts import (
 )
 from app.province_clubs_sync import run_clubs_sync_scheduler
 from app.province_events import router as province_events_router
+from app.province_judge_status import router as province_judge_status_router
 from app.exams import router as exams_router
 from app.exam_live import router as exam_live_router
 from app.exam_web import router as exam_web_router
@@ -484,6 +485,7 @@ app.include_router(province_assignment_board_router)
 app.include_router(province_archive_router)
 app.include_router(province_insights_router)
 app.include_router(province_events_router)
+app.include_router(province_judge_status_router)
 app.include_router(exams_router)
 app.include_router(exam_live_router)
 app.include_router(exam_web_router)
@@ -1192,6 +1194,13 @@ async def startup():
         asyncio.ensure_future(warm_search())
     except Exception:
         logger.exception("Rozgrzewka wyszukiwarki nie wystartowała")
+
+    try:
+        from app.province_judge_status import ensure_seed as _judge_status_seed
+
+        await _judge_status_seed()
+    except Exception:
+        logger.exception("Stan początkowy nieaktywnych sędziów nie przeszedł")
 
     try:
         if await ensure_pod_reka_defaults():

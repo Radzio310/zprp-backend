@@ -39,7 +39,7 @@ from sqlalchemy import and_, delete, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import event_poster_file as posters
-from app import official_roster as roster
+from app import province_judge_status as judge_status
 from app.event_links import LINK_BASE
 from app import province_event_rules as R
 from app.db import (
@@ -66,6 +66,9 @@ from app.schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/province-events", tags=["Province Events"])
+
+#: Stare aplikacje czytają `inactive_seasons`; nieaktywny dostaje komplet sezonów.
+LEGACY_ALL_SEASONS = tuple(range(2015, 2041))
 
 PDF_DIR = os.path.join(tempfile.gettempdir(), "province_event_pdf")
 #: Plakaty do pobrania leżą godzinę - systemowe pobieranie potrafi zapytać drugi raz.
@@ -172,7 +175,7 @@ def _invited(judges: List[Dict[str, Any]], event: Mapping[str, Any]) -> List[str
     return R.invited_ids(
         judges,
         _data(event.get("data_json")),
-        inactive=roster.inactive_ids(event.get("province"), event.get("event_date"), judges),
+        inactive={_s(j.get("judge_id")) for j in judges if j.get("inactive")},
     )
 
 
@@ -203,6 +206,9 @@ async def _judges(province: str) -> List[Dict[str, Any]]:
         if _s(judge.get("judge_id")) in young_ids:
             badges.append(R.YOUNG_DISTRICT_BADGE)
         judge["badges"] = list(dict.fromkeys(badges))
+    gone = await judge_status.inactive_ids(province)
+    for judge in judges:
+        judge["inactive"] = _s(judge.get("judge_id")) in gone
     return judges
 
 
@@ -346,8 +352,10 @@ def _judge_public(judge: Mapping[str, Any], province: str) -> Dict[str, Any]:
         "name": _s(judge.get("full_name")),
         "photo_url": _s(judge.get("photo_url")) or None,
         "badges": badge_names(judge.get("badges")),
-        # Sezony z listą aktywnych (baza.zprp.pl), w których tej osoby na niej nie ma.
-        "inactive_seasons": roster.inactive_seasons(province, judge.get("full_name")),
+        # Status nieaktywnego w okręgu (jeden stan na serwerze, trwały do odwołania).
+        "inactive": bool(judge.get("inactive")),
+        # Stare wersje aplikacji liczą nieaktywnych po sezonach: nieaktywny = wszystkie.
+        "inactive_seasons": list(LEGACY_ALL_SEASONS) if judge.get("inactive") else [],
     }
 
 

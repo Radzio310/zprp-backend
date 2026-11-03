@@ -462,6 +462,7 @@ class ProvinceJudgeItem(BaseModel):
     photo_url: str  # ✅ NOWE
     badges: Any
     updated_at: datetime
+    inactive: bool = False  # status "nieaktywny w okręgu" (province_judge_inactive)
 
 
 class ListProvinceJudgesResponse(BaseModel):

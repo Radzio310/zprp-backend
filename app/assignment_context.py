@@ -77,7 +77,7 @@ class Roster:
 
     __slots__ = (
         "judges", "offtimes", "cities", "pauses", "pairs", "blocks", "settings",
-        "grades", "clubs", "pair_source", "mentor_pairs", "zprp_roles",
+        "grades", "clubs", "pair_source", "mentor_pairs", "zprp_roles", "inactive",
     )
 
     def __init__(self) -> None:
@@ -98,6 +98,8 @@ class Roster:
         #: Role z listy ZPRP po numerze sędziego ("sedzia", "delegat",
         #: "stolikowy"); brak wpisu = nie wiemy (`assignment_roles`).
         self.zprp_roles: dict[str, list[str]] = {}
+        #: Numery sędziów oznaczonych jako nieaktywni w okręgu (`province_judge_status`).
+        self.inactive: set[str] = set()
 
     def mentors_of(self, judge_id: str) -> list[str]:
         """Mentorzy przypisani PARZE tego sędziego - bez pary nie ma mentorów."""
@@ -168,7 +170,10 @@ async def load_roster(province: str) -> Roster:
 
     from app.settlement_province import canonical as _canonical
 
+    from app.province_judge_status import inactive_ids as _inactive_ids
+
     roster = Roster()
+    roster.inactive = await _inactive_ids(province)
     names = spellings(province)
     canonical_key = _canonical(province)
 
@@ -660,20 +665,14 @@ def build_context(
 
 def inactive_judges(province: str, when: Any, roster: Roster) -> set[str]:
     """
-    Sędziowie z rejestru okręgu, których nie ma na liście aktywnych
-    z baza.zprp.pl w sezonie `when` (`app/official_roster.py`). Okręg albo
-    sezon bez listy - pusty zbiór, czyli wszyscy jak dawniej.
+    Sędziowie z rejestru okręgu oznaczeni jako nieaktywni (`roster.inactive`,
+    stan z bazy - `app/province_judge_status.py`). `province` i `when` zostają
+    w podpisie dla wołających; status jest trwały do odwołania.
 
     Decyzja użytkownika z 23.09.2026: automat obsad bierze pod uwagę TYLKO
     aktywnych sędziów województwa.
     """
-    from app.official_roster import inactive_ids
-
-    return inactive_ids(
-        province,
-        when,
-        [{"judge_id": jid, "full_name": judge.name} for jid, judge in roster.judges.items()],
-    )
+    return {jid for jid in roster.judges if jid in roster.inactive}
 
 
 def distance_pairs(needs: Sequence[MatchNeed], roster: Roster) -> list[tuple[str, str]]:
