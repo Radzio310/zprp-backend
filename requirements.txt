@@ -1,8 +1,12 @@
+# Górne granice niżej trzymają wersje z ostatniego działającego obrazu na Pythonie 3.10. Na 3.11 pip
+# wybrałby nowe wydania główne (pandas 3, PyMuPDF 2, numpy 2.4, starlette 1.10, websockets 17), nietestowane z tym kodem.
 fastapi
+starlette<1.8
 uvicorn
-websockets>=12.0
+websockets>=12.0,<17
 httpx
-pandas
+pandas<3
+numpy<2.3
 python-dotenv
 pyjwt
 pydantic-settings
@@ -23,7 +27,7 @@ psycopg2-binary
 python-multipart
 bcrypt
 lxml
-pymupdf
+pymupdf<2
 openai>=1.40.0
 openpyxl
 xlrd>=2.0.1
