@@ -50,7 +50,7 @@ Schemat jak reszta repo: `define_tables(metadata)` + rejestracja w `app/db.py`
 - `mentor_compilations`: `id`, `pair_id`, `name` (≤60), `description` (≤500), `mode` (`contrast|similar|free`),
   `created_by`, `created_at`, `updated_at`, `public_token`, `published_at`.
 - `mentor_compilation_items`: PK (`compilation_id`, `clip_id`), `position` int, `column` (`a|b`, dla `contrast`), `note` (≤280), `label` (≤40, od 24.10.2026).
-- `mentor_threads`: `id`, `pair_id`, `target_kind` (`match|clip|compilation|pair`), `target_id`, `match_id` (gdy dotyczy),
+- `mentor_threads`: `id`, `pair_id`, `target_kind` (`match|clip|shot|event|compilation|pair`), `target_id`, `match_id` (gdy dotyczy),
   `title` (≤120), `kind` (`question|note|task`), `status` (`open|resolved`), `created_by`, `created_at`, `updated_at`, `last_comment_at`.
 - `mentor_comments`: `id`, `thread_id`, `author_id`, `body` (≤4000), `video_id`, `video_s` (kotwica), `drawing_json`
   (strzałki/kółka na stopklatce, ≤20 kształtów), `mentions` JSON[], `created_at`, `edited_at`, `deleted_at`.
@@ -191,6 +191,11 @@ Każdy zapis podbija `mentor_panels.rev` i zwraca świeży obiekt (klient podmie
   - wątek klipu bez tytułu: pierwszy = „Rozmowa”, kolejne = początek treści; stary płaski wątek dostał „Rozmowa” migracją;
   - `Clip.threads = {total, open, comments, unread, last_at, pins:[{thread_id, title, status, video_id, video_s, clip_s, in_range, author:{judge_id, initials}, unread}]}`; `Clip.thread` (pierwszy wątek) zostaje dla starszych buildów;
   - push wątku klipu: `clipId`, `threadId`, `clipS`, `videoS` (sekunda kotwicy: komentarza, a bez niej wątku), link web `/mentor/{pair}/klipy?klip={id}&watek={threadId}`.
+- Wątki przy zdarzeniu ProEla (04.11.2026, `target_kind=event`), wiele na zdarzenie, te same funkcje co wątki meczu:
+  - `target_id` = `key` zdarzenia z `MatchRoom.timeline.events` (`typ:drużyna:zawodnik:ms`, jak `source_key` klipu ze zdarzenia; unikalny w meczu), w ciele OBOWIĄZKOWO `match_id`; opcjonalnie `event: {type?, label?, half?, score?}` (migawka z osi klienta). Typ, drużyna, zawodnik i chwila zawsze z klucza (`R.event_snapshot`); nieznany typ albo niezgodny `event.type` -> 422 `EVENT_KEY`, brak `match_id` -> 422 `THREAD_TARGET`;
+  - kotwica = start akcji: klient wysyła `video_id` + `video_s` = sekunda zdarzenia minus wyprzedzenie (ta sama, od której startuje klip ze zdarzenia); bez tytułu tytuł = początek treści;
+  - `Thread` zdarzenia ma dodatkowo `event: {key, type, kind, label, clock, half, team, player, score, match_ms}` (kolumna `mentor_threads.event_json`, migawka z chwili założenia) i `anchor: {comment_id, video_id, video_s} | null`;
+  - push: `eventKey`, `videoS`, link web `/mentor/{pair}/mecz/{match}?zakladka=watki&watek={threadId}`. Migracja: `ALTER TABLE mentor_threads ADD COLUMN IF NOT EXISTS event_json TEXT`.
 
 ### 4.9 Arkusze
 - `GET /pairs/{pairId}/sheets?season=` → `{delegate: DelegateSheet[], mentor: MentorSheet[], trends: {sections:[{key, label, points:[{date, value, source}]}], priorities:[{text, count, last}], delegate_vs_mentor:[{match_id, delegate, mentor}]}}`.

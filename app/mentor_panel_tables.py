@@ -160,6 +160,8 @@ def define_tables(metadata):
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("last_comment_at", DateTime(timezone=True), nullable=True),
+        # Wątek zdarzenia ProEla (`target_kind=event`): migawka zdarzenia do karty (04.11.2026).
+        Column("event_json", Text, nullable=True),
     )
     Index("ix_mentor_threads_target", threads.c.pair_id, threads.c.target_kind, threads.c.target_id)
     comments = Table(
@@ -359,6 +361,7 @@ MIGRATIONS = (
     "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS source_url TEXT",
     "ALTER TABLE mentor_compilations ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_threads ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
+    "ALTER TABLE mentor_threads ADD COLUMN IF NOT EXISTS event_json TEXT",
     "ALTER TABLE mentor_comments ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_audit ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_compilation_items ADD COLUMN IF NOT EXISTS label VARCHAR",

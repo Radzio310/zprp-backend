@@ -818,6 +818,10 @@ class ThreadBody(BaseModel):
     clip_s: Optional[float] = None
     drawing: Optional[Any] = None
     mentions: List[str] = Field(default_factory=list, max_length=20)
+    #: Wątek zdarzenia ProEla (`target_kind=event`, 04.11.2026): `target_id` = klucz zdarzenia
+    #: z osi meczu, `match_id` = mecz, `event` = migawka z osi (etykieta, zegar, połowa, wynik).
+    match_id: Optional[str] = Field(default=None, max_length=80)
+    event: Optional[Dict[str, Any]] = None
 
 
 class CommentBody(BaseModel):
@@ -842,10 +846,15 @@ class ThreadPatch(BaseModel):
     title: Optional[str] = Field(default=None, max_length=400)
 
 
-async def _thread_target(ctx: Dict[str, Any], kind: str, target_id: str) -> Optional[str]:
+async def _thread_target(ctx: Dict[str, Any], kind: str, target_id: str, match_id: Optional[str] = None) -> Optional[str]:
     """Sprawdza cel wątku i zwraca mecz, którego dotyczy."""
     if kind == "match":
         return (await C.match_card(ctx, target_id))["match_id"]
+    if kind == "event":
+        # Klucz zdarzenia jest unikalny tylko w meczu, więc mecz przychodzi obok.
+        if not R.s(match_id):
+            raise C.err(422, "THREAD_TARGET", "Wątek zdarzenia wskazuje mecz.")
+        return (await C.match_card(ctx, R.s(match_id)))["match_id"]
     if kind == "clip":
         clip = await C.one(select(mentor_clips).where(mentor_clips.c.id == target_id))
         if not clip or clip["pair_id"] != ctx["pair_id"] or clip.get("deleted_at") is not None:
@@ -867,7 +876,7 @@ async def _thread_target(ctx: Dict[str, Any], kind: str, target_id: str) -> Opti
         if target_id != ctx["pair_id"]:
             raise C.err(422, "THREAD_TARGET", "Wątek pary wskazuje tę parę.")
         return None
-    raise C.err(422, "THREAD_TARGET", "Wątek dotyczy meczu, klipu, zrzutu, zestawienia albo pary.")
+    raise C.err(422, "THREAD_TARGET", "Wątek dotyczy meczu, zdarzenia, klipu, zrzutu, zestawienia albo pary.")
 
 
 def _comment_values(ctx: Dict[str, Any], body: Any, *, partial: bool = False,
@@ -948,6 +957,13 @@ async def _notify_comment(ctx: Dict[str, Any], actor: Actor, thread: Dict[str, A
         local = R.clip_local_s(clip, anchor.get("video_id"), anchor.get("video_s")) if anchor and clip else None
         if local is not None:
             extra["clipS"] = f"{max(0.0, local):.2f}"
+            extra["videoS"] = f"{float(anchor['video_s']):.2f}"
+    elif thread.get("target_kind") == "event" and thread.get("match_id"):
+        # Zdarzenie ProEla: web otwiera pokój meczu z tym wątkiem, aplikacja - sekundę startu akcji.
+        link = f"{C.WEB_BASE}/{ctx['pair_id']}/mecz/{thread['match_id']}?zakladka=watki&watek={thread['id']}"
+        extra["eventKey"] = R.s(thread["target_id"])
+        anchor = R.first_anchor(comments)
+        if anchor:
             extra["videoS"] = f"{float(anchor['video_s']):.2f}"
     elif thread.get("target_kind") == "shot":
         # Zrzut klatki: web otwiera Bibliotekę ze zrzutem i wątkiem, aplikacja - zrzut (`shotId`).
@@ -1040,7 +1056,13 @@ async def create_thread(pair_id: str, body: ThreadBody, actor: Actor = Depends(m
     ctx = await C.pair_context(pair_id, actor, action="create")
     if body.kind not in R.THREAD_KINDS:
         raise C.err(422, "THREAD_KIND", "Rodzaj wątku: pytanie, notatka albo zadanie.")
-    match_id = await _thread_target(ctx, body.target_kind, body.target_id)
+    match_id = await _thread_target(ctx, body.target_kind, body.target_id, body.match_id)
+    event = None
+    if body.target_kind == "event":
+        try:
+            event = R.event_snapshot(body.target_id, body.event)
+        except R.RuleError as exc:
+            raise C.rule_error(exc) from exc
     clip = await _clip_of_target(body.target_kind, body.target_id)
     comment = _comment_values(ctx, CommentBody(body=body.body, video_id=body.video_id, video_s=body.video_s, clip_s=body.clip_s,
                                                drawing=body.drawing, mentions=body.mentions), clip=clip)
@@ -1049,11 +1071,14 @@ async def create_thread(pair_id: str, body: ThreadBody, actor: Actor = Depends(m
         existing = await C.rows(select(mentor_threads.c.id).where(mentor_threads.c.pair_id == ctx["pair_id"])
                                 .where(mentor_threads.c.target_kind == "clip").where(mentor_threads.c.target_id == body.target_id))
         title = R.auto_thread_title(body.body, len(existing))
+    if event is not None and not title:
+        # Zdarzenie opisuje karta wątku; tytułem jest początek treści.
+        title = R.auto_thread_title(body.body, 1)
     stamp = C.now()
     thread = {"id": R.new_id(), "pair_id": ctx["pair_id"], "target_kind": body.target_kind, "target_id": body.target_id,
               "match_id": match_id, "title": title, "kind": body.kind, "status": "open",
               "created_by": actor.judge_id, "acted_by": actor.acted_by, "created_at": stamp, "updated_at": stamp,
-              "last_comment_at": stamp}
+              "last_comment_at": stamp, **({"event_json": C.dumps(event)} if event else {})}
     await database.execute(mentor_threads.insert().values(**thread))
     first_id = R.new_id()
     await database.execute(mentor_comments.insert().values(id=first_id, thread_id=thread["id"], author_id=actor.judge_id,

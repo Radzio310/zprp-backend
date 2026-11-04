@@ -981,6 +981,12 @@ async def threads_payload(ctx: Dict[str, Any], thread_rows: List[Dict[str, Any]]
         }
         if t.get("target_kind") == "shot":
             shaped["shot"] = shots.get(R.s(t.get("target_id")))
+        if t.get("target_kind") == "event":
+            # Migawka z chwili założenia (karta wątku bez czytania protokołu) + kotwica = start akcji.
+            shaped["event"] = R.json_value(t.get("event_json"), {}) or {"key": t.get("target_id")}
+            anchor = R.first_anchor(items)
+            shaped["anchor"] = {"comment_id": anchor["id"], "video_id": anchor.get("video_id"),
+                                "video_s": anchor.get("video_s")} if anchor else None
         if t.get("target_kind") == "clip":
             anchor = R.first_anchor(items)
             shaped["clip"] = clip_slim(clip)

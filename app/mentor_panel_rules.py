@@ -634,12 +634,53 @@ def playlist_items(items: Sequence[Mapping[str, Any]], mode: str) -> List[Dict[s
 
 # ─── Wątki ──────────────────────────────────────────────────────────────────
 
-THREAD_TARGETS = ("match", "clip", "shot", "compilation", "pair")
+THREAD_TARGETS = ("match", "clip", "shot", "compilation", "pair", "event")
 THREAD_KINDS = ("question", "note", "task")
 THREAD_STATUSES = ("open", "resolved")
 MAX_BODY = 4000
 MAX_SHAPES = 20
 SHAPE_KINDS = ("arrow", "circle", "line", "rect", "free")
+
+# ─── Wątek zdarzenia ProEla (04.11.2026) ────────────────────────────────────
+# Klucz zdarzenia to `key` z osi meczu (`mentor_video_rules.timeline_from_blob`):
+# `typ:drużyna:zawodnik:ms` - ten sam, który klip ze zdarzenia nosi w `source_key`.
+# Stabilny w obrębie meczu (zapis ProEla się nie przenumerowuje), więc wątek
+# trzyma go razem z `match_id`, a obok migawkę zdarzenia do karty wątku.
+
+EVENT_KEY = re.compile(r"^([A-Za-z0-9]{1,40}):([A-Za-z]{0,10}):([^:\s]{0,12}):(\d{1,9})$")
+EVENT_SNAPSHOT_KEYS = ("type", "kind", "label", "clock", "half", "team", "score", "match_ms")
+
+
+def event_snapshot(key: Any, given: Any = None) -> Dict[str, Any]:
+    """Migawka zdarzenia do zapisania przy wątku. Typ, drużyna i chwila zawsze z klucza.
+
+    Etykieta, zegar, połowa i wynik przychodzą od klienta (z osi, którą widzi), ale
+    tylko gdy zgadzają się z kluczem; brak etykiety = nazwa typu z osi.
+    """
+    from app.mentor_video_rules import EVENT_KINDS
+
+    text = s(key)
+    found = EVENT_KEY.match(text) if len(text) <= 80 else None
+    if not found or found.group(1) not in EVENT_KINDS:
+        raise RuleError(422, "EVENT_KEY", "Nie rozpoznaję tego zdarzenia z protokołu.")
+    etype, team, player, ms = found.group(1), found.group(2), found.group(3), int(found.group(4))
+    data = given if isinstance(given, Mapping) else {}
+    if data.get("type") not in (None, etype):
+        raise RuleError(422, "EVENT_KEY", "Opis zdarzenia nie pasuje do jego klucza.")
+    kind, title = EVENT_KINDS[etype]
+    sec = ms // 1000
+    half = data.get("half")
+    score = plain(data.get("score"), 12)
+    return {
+        "key": text, "type": etype, "kind": kind,
+        "label": plain(data.get("label"), 160) or title,
+        "clock": f"{sec // 60:02d}:{sec % 60:02d}",
+        "half": int(half) if half in (1, 2, "1", "2") else None,
+        "team": team if team in ("host", "guest") else None,
+        "player": player or None,
+        "score": score or None,
+        "match_ms": ms,
+    }
 
 # ─── Wątki przy klipie (26.10.2026) ─────────────────────────────────────────
 # Kotwica komentarza w wątku klipu jest ZAWSZE zapisana w czasie oryginalnego
