@@ -39,6 +39,10 @@ def define_tables(metadata):
         Column("seq", Integer, nullable=False),
         #: Pełny numer na papierze: „SL/2026_27/14" albo „SLP/2026_27/3".
         Column("number", String, nullable=False),
+        #: Wzór numeru (04.11.2026): "season" - SL/2026_27/14 (number_year =
+        #: sezon), "calendar" - 14/S/2026 (number_year = rok wydania). Każdy
+        #: wzór ma własny licznik.
+        Column("number_scheme", String, nullable=False, server_default=text("'season'")),
         #: Okres rozliczenia: miesiąc wypłaty i własny okres (pusty = miesiąc).
         Column("period_year", Integer, nullable=False),
         Column("period_month", Integer, nullable=False),
@@ -56,13 +60,16 @@ def define_tables(metadata):
         #: Kontekst szablonu w dniu wydania (bez logo) - ponowne pobranie
         #: drukuje dokładnie ten sam papier, choćby miesiąc się później zmienił.
         Column("context_json", Text, nullable=False, server_default=text("'{}'")),
+        #: Plik księgowej (04.11.2026): data wypłaty wybrana przy generowaniu.
+        Column("accounting_json", Text, nullable=False, server_default=text("'{}'")),
         Column("created_by", String, nullable=True),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
     Index(
-        "ux_province_settlement_register_number",
+        "ux_province_settlement_register_scheme_number",
         register.c.province,
         register.c.kind,
+        register.c.number_scheme,
         register.c.number_year,
         register.c.seq,
         unique=True,
@@ -110,7 +117,23 @@ def define_tables(metadata):
         #: UKRYTA, a włączona - na liście `outside_list` (domyślnie A).
         Column("show_outside", Boolean, nullable=False, server_default=text("false")),
         Column("outside_list", String, nullable=False, server_default=text("'A'")),
+        #: Ustawienia „Księgowość" (04.11.2026): formuła podatku, wzór numeru,
+        #: klauzula w stopce, stałe importu enova - `settlement_accounting_rules.clean_extra`.
+        Column("extra_json", Text, nullable=False, server_default=text("'{}'")),
         Column("updated_by", String, nullable=True),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
-    return register, settings, doc_settings
+    #: Słownik kodów osób w enova księgowej (04.11.2026): sędzia -> kod
+    #: („PYTLIKALEKSANDR"). Brak wpisu = kod z reguły, do potwierdzenia.
+    accounting_codes = Table(
+        "province_accounting_codes",
+        metadata,
+        Column("province", String, primary_key=True),
+        Column("judge_id", String, primary_key=True),
+        Column("code", String, nullable=False),
+        #: Nazwisko i imię w chwili zapisu - do podglądu, gdy sędzia zniknie z okręgu.
+        Column("name", String, nullable=True),
+        Column("updated_by", String, nullable=True),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    return register, settings, doc_settings, accounting_codes

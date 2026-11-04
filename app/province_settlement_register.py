@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, delete, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app import settlement_accounting_rules as A
 from app import settlement_register_rules as G
 from app.db import (
     database,
@@ -118,9 +119,14 @@ def _doc_json(row: Any) -> dict:
         "kind": row["kind"],
         "number": row["number"],
         "number_year": row["number_year"],
-        #: Sezon numeracji: „2026/27" (rok początku w `number_year`).
+        #: Wzór numeru (04.11.2026): sezonowy albo kalendarzowy.
+        "number_scheme": _scheme_of_row(row),
+        #: Sezon numeracji: „2026/27" (rok początku w `number_year`); przy
+        #: wzorze kalendarzowym `number_year` to rok wydania.
         "season": row["number_year"],
         "season_label": G.season_label(row["number_year"]),
+        "counter_label": G.counter_label(row["number_year"], _scheme_of_row(row)),
+        "accounting": _json(_row_get(row, "accounting_json"), {}),
         "seq": row["seq"],
         "period": {
             "year": row["period_year"],
@@ -175,38 +181,93 @@ async def season_of_period(key: str, year: int, month: int, period_id: Optional[
     return G.period_season(date_from, (item or {}).get("season")) or int(year)
 
 
-async def used_seqs(key: str, kind: str, number_year: int) -> list[int]:
+def _row_get(row: Any, name: str) -> Any:
+    try:
+        return row[name]
+    except (KeyError, IndexError):
+        return None
+
+
+def _scheme_of_row(row: Any) -> str:
+    return A.scheme_of(_row_get(row, "number_scheme"))
+
+
+def calendar_year() -> int:
+    """Rok wydania w Polsce - licznik wzoru kalendarzowego („14/S/2026")."""
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("Europe/Warsaw")).year
+
+
+async def numbering(key: str, kind: str) -> tuple[str, str]:
+    """(wzór numeru, wyróżnik rodzaju) z ustawień „Księgowość" okręgu."""
+    extra = (await doc_settings(key)).get("extra") or {}
+    scheme = A.scheme_of(extra.get("number_scheme"))
+    mark = A.mark_of((extra.get("number_marks") or {}).get(kind), kind)
+    return scheme, mark
+
+
+def counter_year(scheme: str, season: int) -> int:
+    """`number_year` licznika: sezon albo - przy wzorze kalendarzowym - rok wydania."""
+    return calendar_year() if scheme == G.SCHEME_CALENDAR else int(season)
+
+
+def _settings_kind(kind: str, scheme: str) -> str:
+    """„Kontynuacja numeracji" osobno dla każdego wzoru - wzór kalendarzowy pod „kind@calendar"."""
+    return kind if scheme == G.SCHEME_SEASON else f"{kind}@{scheme}"
+
+
+async def used_seqs(key: str, kind: str, number_year: int, scheme: str = G.SCHEME_SEASON) -> list[int]:
     rows = await database.fetch_all(
         select(T.c.seq).where(
-            and_(T.c.province == key, T.c.kind == kind, T.c.number_year == int(number_year))
+            and_(
+                T.c.province == key,
+                T.c.kind == kind,
+                T.c.number_year == int(number_year),
+                T.c.number_scheme == scheme,
+            )
         )
     )
     return [int(row["seq"]) for row in rows]
 
 
-async def start_after(key: str, kind: str, number_year: int) -> int:
+async def start_after(key: str, kind: str, number_year: int, scheme: str = G.SCHEME_SEASON) -> int:
     row = await database.fetch_one(
         select(ST.c.start_after).where(
-            and_(ST.c.province == key, ST.c.kind == kind, ST.c.number_year == int(number_year))
+            and_(
+                ST.c.province == key,
+                ST.c.kind == _settings_kind(kind, scheme),
+                ST.c.number_year == int(number_year),
+            )
         )
     )
     return int(row["start_after"]) if row else 0
 
 
 async def suggestion(key: str, kind: str, season: int) -> dict:
-    """Numer, który podpowiada ekran przed wydaniem - bez rezerwacji."""
-    used = await used_seqs(key, kind, season)
-    after = await start_after(key, kind, season)
+    """
+    Numer, który podpowiada ekran przed wydaniem - bez rezerwacji.
+
+    `season` to sezon OKRESU; przy wzorze kalendarzowym licznik idzie po roku
+    wydania i `season` w odpowiedzi to ten rok (do „kontynuacji numeracji").
+    """
+    scheme, mark = await numbering(key, kind)
+    year = counter_year(scheme, season)
+    used = await used_seqs(key, kind, year, scheme)
+    after = await start_after(key, kind, year, scheme)
     seq = G.suggest_seq(used, after)
     short = _short(key)
     return {
         "seq": seq,
-        "number": G.number_text(short, season, seq, kind),
-        "prefix": G.number_prefix(short, season, kind),
+        "number": G.number_text(short, year, seq, kind, scheme, mark),
+        "prefix": G.number_prefix(short, year, kind, scheme, mark),
+        "suffix": G.number_suffix(short, year, kind, scheme, mark),
         "last": max(used) if used else None,
         "start_after": after,
-        "season": season,
-        "season_label": G.season_label(season),
+        "season": year,
+        "season_label": G.season_label(year) if scheme == G.SCHEME_SEASON else str(year),
+        "counter_label": G.counter_label(year, scheme),
+        "scheme": scheme,
     }
 
 
@@ -223,6 +284,8 @@ async def insert_document(
     totals: dict,
     context: dict,
     created_by: Optional[str],
+    number_scheme: str = G.SCHEME_SEASON,
+    number_year: Optional[int] = None,
 ) -> int:
     """Wpis w rejestrze - wołać w transakcji z blokadą (`issue_lock`)."""
     from datetime import date
@@ -232,7 +295,8 @@ async def insert_document(
         .values(
             province=key,
             kind=kind,
-            number_year=int(period["season"]),
+            number_year=int(number_year if number_year is not None else period["season"]),
+            number_scheme=A.scheme_of(number_scheme),
             seq=int(seq),
             number=number,
             period_year=int(period["year"]),
@@ -268,10 +332,28 @@ async def list_register(
     kind: Optional[str] = Query(None),
 ):
     key = _require(province)
-    query = select(T).where(and_(T.c.province == key, T.c.number_year == int(season)))
+    from app.season_rules import season_start_year
+
+    query = select(T).where(
+        and_(
+            T.c.province == key,
+            T.c.number_year.in_([int(season), int(season) + 1]),
+        )
+    )
     if kind:
         query = query.where(T.c.kind == _kind(kind))
-    rows = await database.fetch_all(query.order_by(T.c.kind, T.c.seq.desc()))
+    rows = await database.fetch_all(query.order_by(T.c.kind, T.c.number_year.desc(), T.c.seq.desc()))
+    # Sezonowe - po numerze sezonu; kalendarzowe (04.11.2026) - po sezonie
+    # OKRESU, żeby rejestr sezonu pokazywał wszystko, co za ten sezon wydano.
+    rows = [
+        row
+        for row in rows
+        if (
+            int(row["number_year"]) == int(season)
+            if _scheme_of_row(row) == G.SCHEME_SEASON
+            else (season_start_year(row["date_from"]) if row["date_from"] else row["number_year"]) == int(season)
+        )
+    ]
     return {
         "province": key,
         "season": int(season),
@@ -379,9 +461,10 @@ async def save_settings(body: SettingsBody):
     if body.start_after < 0 or body.start_after > G.MAX_SEQ:
         raise HTTPException(400, f"Ostatni numer musi być między 0 a {G.MAX_SEQ}.")
     values = {"start_after": int(body.start_after), "updated_by": body.user, "updated_at": _now()}
+    scheme, _mark = await numbering(key, kind)
     await database.execute(
         pg_insert(ST)
-        .values(province=key, kind=kind, number_year=int(body.season), **values)
+        .values(province=key, kind=_settings_kind(kind, scheme), number_year=int(body.season), **values)
         .on_conflict_do_update(index_elements=[ST.c.province, ST.c.kind, ST.c.number_year], set_=values)
     )
     return {"ok": True, "next": await suggestion(key, kind, int(body.season))}
@@ -395,9 +478,12 @@ async def doc_settings(key: str) -> dict:
         logger.warning("[register] %s: ustawienia dokumentów: %s", key, exc)
         row = None
     if not row:
-        return dict(DOC_DEFAULTS)
+        return {**DOC_DEFAULTS, "extra": A.clean_extra({})}
     display = _s(row["period_display"])
     return {
+        # Ustawienia „Księgowość" (04.11.2026) - jeden słownik, żeby dokładanie
+        # pól nie wymagało kolumny na każde.
+        "extra": A.clean_extra(_json(_row_get(row, "extra_json"), {})),
         "show_matches": bool(row["show_matches"]),
         "show_subtitle": bool(row["show_subtitle"]),
         "period_display": display if display in PERIOD_DISPLAYS else "all",
@@ -458,3 +544,53 @@ async def save_doc_settings(body: DocSettingsBody):
     )
     return {"ok": True, "province": key, **await doc_settings(key)}
 
+
+
+class DocExtraBody(BaseModel):
+    """Ustawienia „Księgowość" - tylko pola podane w żądaniu się zmieniają."""
+
+    province: str
+    tax_formula: Optional[str] = None
+    number_scheme: Optional[str] = None
+    number_marks: Optional[dict] = None
+    show_consent: Optional[bool] = None
+    consent_text: Optional[str] = None
+    enova: Optional[dict] = None
+    user: Optional[str] = None
+
+
+@router.put("/doc-extra", summary="Zapisz ustawienia Księgowość (formuła, numeracja, klauzula, enova)")
+async def save_doc_extra(body: DocExtraBody):
+    key = _require(body.province)
+    current = (await doc_settings(key)).get("extra") or A.clean_extra({})
+    patch = body.model_dump(exclude_none=True, exclude={"province", "user"})
+    if "tax_formula" in patch and _s(patch["tax_formula"]).lower() not in A.FORMULAS:
+        raise HTTPException(400, "Nieznana formuła podatku.")
+    if "number_scheme" in patch and _s(patch["number_scheme"]).lower() not in A.SCHEMES:
+        raise HTTPException(400, "Nieznany wzór numeru.")
+    merged = dict(current)
+    for name, value in patch.items():
+        if name in ("number_marks", "enova") and isinstance(value, dict):
+            merged[name] = {**(current.get(name) or {}), **value}
+        else:
+            merged[name] = value
+    if "consent_text" in patch and not _s(patch["consent_text"]):
+        merged["consent_text"] = A.CONSENT_DEFAULT
+    extra = A.clean_extra(merged)
+    now = _now()
+    await database.execute(
+        pg_insert(DS)
+        .values(
+            province=key,
+            **{k: v for k, v in DOC_DEFAULTS.items()},
+            extra_json=dump(extra),
+            updated_by=body.user,
+            updated_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=[DS.c.province],
+            set_={"extra_json": dump(extra), "updated_by": body.user, "updated_at": now},
+        )
+    )
+    logger.info("[register] %s: ustawienia Księgowość zmienił %s: %s", key, body.user, sorted(patch))
+    return {"ok": True, "province": key, **await doc_settings(key)}

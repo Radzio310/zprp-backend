@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select, text
 
+from app import settlement_accounting_rules as A
 from app import settlement_rates as R
 from app import settlement_register_rules as G
 from app.deps import get_optional_jwt_payload
@@ -320,12 +321,16 @@ async def _issue(
                 + (f" ({', '.join(numbers)})" if numbers else "")
                 + " - nie ma czego wydać.",
             )
-        used = await REG.used_seqs(province, kind, period["season"])
-        seq = payload.seq or G.suggest_seq(used, await REG.start_after(province, kind, period["season"]))
+        # Wzór numeru z ustawień „Księgowość" (04.11.2026): sezonowy albo
+        # kalendarzowy - każdy z własnym licznikiem.
+        scheme, mark = await REG.numbering(province, kind)
+        number_year = REG.counter_year(scheme, period["season"])
+        used = await REG.used_seqs(province, kind, number_year, scheme)
+        seq = payload.seq or G.suggest_seq(used, await REG.start_after(province, kind, number_year, scheme))
         problem = G.seq_problem(seq, used)
         if problem:
             raise HTTPException(409, problem)
-        number = G.number_text(province_short(province), period["season"], int(seq), kind)
+        number = G.number_text(province_short(province), number_year, int(seq), kind, scheme, mark)
         context, totals = build(items, number, False)
         result = render_kind(province, kind, context)
         doc_id = await REG.insert_document(
@@ -340,12 +345,17 @@ async def _issue(
             totals=totals,
             context=context,
             created_by=payload.created_by,
+            number_scheme=scheme,
+            number_year=number_year,
         )
     return {
         "success": True,
         "official": True,
         "id": doc_id,
         "number": number,
+        # Numer kolejny wprost (04.11.2026): przy wzorze „10/S/2026" ostatni
+        # człon numeru to rok, a teczka list liczy z tego następny numer.
+        "seq": int(seq),
         "skipped": [
             {
                 "judge_id": i["judge_id"],
@@ -361,7 +371,12 @@ async def _issue(
 
 def _register_item(item: dict) -> dict:
     """Pozycja w rejestrze - tyle, ile trzeba do zajetosci i do podgladu."""
-    keep = ("judge_id", "name", "part", "part_of", "matches", "gross", "net", "payable", "amount", "km")
+    # KUP, podstawa i podatek (04.11.2026) - plik księgowej z rejestru pokazuje
+    # dokładnie to, co stało na papierze, część po części.
+    keep = (
+        "judge_id", "name", "part", "part_of", "matches", "gross", "costs", "taxable", "tax",
+        "net", "payable", "amount", "km",
+    )
     return {key: item.get(key) for key in keep if key in item}
 
 
@@ -506,8 +521,38 @@ def _zestawienie_candidates(
     return out
 
 
-@router.post("/zestawienie", summary="PDF: zestawienie ekwiwalentów sędziowskich (szkic albo oficjalne)")
-async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get_optional_jwt_payload)):
+def apply_formula(items: list[dict], formula: str) -> list[dict]:
+    """
+    Formuła podatku okręgu (04.11.2026, ustawienie „Księgowość"). „baza" -
+    kwoty z rozliczenia bez zmian (tak liczy ekran). „enova" i „arkusz" - KUP,
+    podstawa, podatek i do wypłaty na nowo z brutto KAŻDEJ części. Brutto
+    i kara zostają.
+    """
+    formula = A.formula_of(formula)
+    if formula == A.FORMULA_BAZA:
+        return items
+    out = []
+    for item in items:
+        parts = A.tax_parts(item.get("gross") or 0, formula)
+        out.append(
+            {
+                **item,
+                "costs": parts["costs"],
+                "taxable": parts["taxable"],
+                "tax": parts["tax"],
+                "net": parts["net"],
+                "payable": parts["net"],
+            }
+        )
+    return out
+
+
+async def zestawienie_job(payload: PdfRequest, jwt: Optional[dict]):
+    """
+    Wszystko, z czego powstaje zestawienie: okres, pozycje i `build` -
+    wspólne dla PDF-u i pliku księgowej (`province_settlement_accounting`),
+    żeby oba miały co do grosza te same wiersze.
+    """
     province = require_province(payload.province)
     if not await module_enabled(province, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
@@ -531,8 +576,11 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
     from app.province_settlement_register import doc_settings
 
     look = await doc_settings(province)
-    candidates = _zestawienie_candidates(
-        data["entries"], payload.parts, payload.letter, look.get("penalty_list") or "A"
+    extra = look.get("extra") or A.clean_extra({})
+    formula = A.formula_of(extra.get("tax_formula"))
+    candidates = apply_formula(
+        _zestawienie_candidates(data["entries"], payload.parts, payload.letter, look.get("penalty_list") or "A"),
+        formula,
     )
     list_letter = (payload.letter or "").strip().upper()
     absences_on = G.section_on(look.get("show_absences", True), look.get("absences_list"), list_letter)
@@ -624,6 +672,11 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
             ],
             "outside_totals": outside["totals"],
             "outside_clubs": outside["clubs"],
+            # Stopka (04.11.2026): klauzula zgody na samym dole - z ustawień.
+            "consent_text": extra.get("consent_text") if extra.get("show_consent", True) else "",
+            # Formuła podatku z dnia wydania - plik księgowej z rejestru liczy nią.
+            "tax_formula": formula,
+            "tax_formula_label": A.formula_label(formula),
         }
         register_totals = {
             **totals,
@@ -633,6 +686,12 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
         }
         return context, register_totals
 
+    return province, period, candidates, build, extra
+
+
+@router.post("/zestawienie", summary="PDF: zestawienie ekwiwalentów sędziowskich (szkic albo oficjalne)")
+async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get_optional_jwt_payload)):
+    province, period, candidates, build, _extra = await zestawienie_job(payload, jwt)
     return await _issue(province, G.ZESTAWIENIE, payload, period, candidates, build)
 
 

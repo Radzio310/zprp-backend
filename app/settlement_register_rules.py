@@ -65,14 +65,47 @@ def season_label(season: int) -> str:
     return f"{int(season)}/{(int(season) + 1) % 100:02d}"
 
 
-def number_prefix(short: str, season: int, kind: str = ZESTAWIENIE) -> str:
+#: Wzory numeru (04.11.2026, ustawienie okręgu „Księgowość"): sezonowy
+#: „SL/2026_27/14" albo kalendarzowy „14/S/2026", jak dotąd u księgowej.
+#: Kalendarzowy liczy się w ROKU WYDANIA, a `season` w funkcjach poniżej jest
+#: wtedy po prostu rokiem kalendarzowym (kolumna `number_year` w rejestrze).
+SCHEME_SEASON = "season"
+SCHEME_CALENDAR = "calendar"
+
+
+def number_prefix(
+    short: str, season: int, kind: str = ZESTAWIENIE, scheme: str = SCHEME_SEASON, mark: str = ""
+) -> str:
     """To, co stoi przed numerem kolejnym: „SL/2026_27/" - do pola edycji."""
+    if scheme == SCHEME_CALENDAR:
+        return ""
     return f"{short}{KIND_MARK.get(kind, '')}/{season_tag(season)}/"
 
 
-def number_text(short: str, season: int, seq: int, kind: str = ZESTAWIENIE) -> str:
-    """„SL/2026_27/14" (zestawienie), „SLP/2026_27/3" (przejazdy)."""
-    return f"{number_prefix(short, season, kind)}{int(seq)}"
+def number_suffix(
+    short: str, season: int, kind: str = ZESTAWIENIE, scheme: str = SCHEME_SEASON, mark: str = ""
+) -> str:
+    """To, co stoi ZA numerem kolejnym: „/S/2026" (wzór kalendarzowy) albo nic."""
+    if scheme == SCHEME_CALENDAR:
+        return f"/{mark or ('P' if kind == PRZEJAZDY else 'S')}/{int(season)}"
+    return ""
+
+
+def number_text(
+    short: str, season: int, seq: int, kind: str = ZESTAWIENIE, scheme: str = SCHEME_SEASON, mark: str = ""
+) -> str:
+    """„SL/2026_27/14" (zestawienie), „SLP/2026_27/3" (przejazdy), „14/S/2026"."""
+    return (
+        f"{number_prefix(short, season, kind, scheme, mark)}{int(seq)}"
+        f"{number_suffix(short, season, kind, scheme, mark)}"
+    )
+
+
+def counter_label(season: int, scheme: str = SCHEME_SEASON) -> str:
+    """Podpis licznika na ekranie: „sezon 2026/27" albo „rok 2026"."""
+    if scheme == SCHEME_CALENDAR:
+        return f"rok {int(season)}"
+    return f"sezon {season_label(season)}"
 
 
 def period_season(date_from: Optional[date], configured: Any = None) -> Optional[int]:
@@ -106,7 +139,7 @@ def seq_problem(seq: Any, used: Iterable[int]) -> Optional[str]:
     if value > MAX_SEQ:
         return f"Numer {value} jest podejrzanie duży - najwyżej {MAX_SEQ}."
     if value in {int(s) for s in used}:
-        return f"Numer {value} jest już w rejestrze w tym sezonie - wybierz inny albo usuń tamten dokument."
+        return f"Numer {value} jest już w rejestrze w tej numeracji - wybierz inny albo usuń tamten dokument."
     return None
 
 

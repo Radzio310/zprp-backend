@@ -5,8 +5,10 @@
    a druga 0 meczów i kwotę - na papierze dla Urzędu to wyglądało na błąd.
 
    Następca papierowego „ZESTAWIENIE 18/S/2025". Zachowany układ kolumn, który
-   księgowość czyta od lat, ale bez rubryki „Potwierdzenie odbioru" i bez
-   dopisku o zgodzie na przetwarzanie danych - dokument nie jest zgodą.
+   księgowość czyta od lat, ale bez rubryki „Potwierdzenie odbioru".
+   Klauzula zgody na przetwarzanie danych wróciła 04.11.2026 (prośba księgowej,
+   decyzja: „tylko klauzula na samym dole") - tekst i włącznik w Ustawieniach
+   → Księgowość (`consent_text`, pusty = bez klauzuli).
 
    Barwy z logo okręgu: granat #0B4F9E i złoto #F0A500. #}
 <!DOCTYPE html>
@@ -130,6 +132,12 @@
     font-size: 7.2pt; color: #8a93a6; line-height: 1.55;
   }
   .footnote b { color: #5a6478; }
+
+  /* Klauzula zgody - ostatnia linia dokumentu, drobnym drukiem. */
+  .consent {
+    margin-top: 5mm; font-size: 6.9pt; color: #7a8398; line-height: 1.45;
+    page-break-inside: avoid;
+  }
 
   .signs { width: 100%; border-collapse: collapse; margin-top: 12mm; }
   .signs td { width: 33.3%; text-align: center; padding: 0 4mm; vertical-align: bottom; }
@@ -298,6 +306,11 @@
   &nbsp;&middot;&nbsp; <b>*</b> Sędzia wypłacany w częściach: wiersz to jedna część jego ekwiwalentu za okres
   i odrębny rachunek (koszty 20% tylko przy części powyżej 200 zł, podatek zaokrąglany w każdej części).
   {%- endif %}
+  {%- if tax_formula == "arkusz" %}
+  &nbsp;&middot;&nbsp; Koszty uzyskania i podstawa liczone z groszami, podatek zaokrąglony do pełnych złotych.
+  {%- elif tax_formula == "enova" %}
+  &nbsp;&middot;&nbsp; Koszty uzyskania liczone z groszami, podstawa i podatek zaokrąglone do pełnych złotych.
+  {%- endif %}
   &nbsp;&middot;&nbsp; Kwoty przejazdów rozliczane są odrębnie, Listą kosztów przejazdów.
   {%- if bomb_rows %}
   &nbsp;&middot;&nbsp; <b>Nieobecności</b> zgłoszone w Rejestrze nieobecności zdejmują sędziego z wypłaty za dany mecz
@@ -332,6 +345,10 @@
   </table>
 </section>
 {% endif %}
+
+{%- if consent_text and rows %}
+<div class="consent">{{ consent_text }}</div>
+{%- endif %}
 
 </body>
 </html>

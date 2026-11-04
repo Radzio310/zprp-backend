@@ -4790,6 +4790,7 @@ from app.settlement_register_tables import define_tables as _define_register_tab
     province_settlement_register,
     province_settlement_register_settings,
     province_settlement_doc_settings,
+    province_accounting_codes,
 ) = _define_register_tables(metadata)
 
 # SMS z wynikiem meczu (08.10.2026): konfiguracja centralna i per okręg oraz
@@ -5288,6 +5289,19 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE province_settlement_doc_settings ADD COLUMN IF NOT EXISTS show_absences boolean NOT NULL DEFAULT true"))
     _conn.execute(text("ALTER TABLE province_settlement_doc_settings ADD COLUMN IF NOT EXISTS show_outside boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE province_settlement_doc_settings ADD COLUMN IF NOT EXISTS outside_list varchar NOT NULL DEFAULT 'A'"))
+    # Plik ksiegowej (04.11.2026): ustawienia "Ksiegowosc", wzor numeru i data
+    # wyplaty w rejestrze. Kazdy wzor numeru ma wlasny licznik, wiec stary
+    # indeks unikalnosci bez wzoru ustepuje nowemu.
+    _conn.execute(text("ALTER TABLE province_settlement_doc_settings ADD COLUMN IF NOT EXISTS extra_json text NOT NULL DEFAULT '{}'"))
+    _conn.execute(text("ALTER TABLE province_settlement_register ADD COLUMN IF NOT EXISTS number_scheme varchar NOT NULL DEFAULT 'season'"))
+    _conn.execute(text("ALTER TABLE province_settlement_register ADD COLUMN IF NOT EXISTS accounting_json text NOT NULL DEFAULT '{}'"))
+    _conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_province_settlement_register_scheme_number "
+            "ON province_settlement_register (province, kind, number_scheme, number_year, seq)"
+        )
+    )
+    _conn.execute(text("DROP INDEX IF EXISTS ux_province_settlement_register_number"))
     # Decyzja „Zostaw" przy podpowiedzi zdjęcia meczu (06.10.2026) - tabela
     # wyjątków istnieje na produkcji, więc `create_all` kolumny nie doda.
     _conn.execute(
