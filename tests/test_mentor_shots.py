@@ -903,3 +903,10 @@ def test_teczka_zrzut_bez_polaczenia_w_przetwarzaniu_i_usuniety(drive_env):
         assert (await denied(env.drive.save_shots(PAIR, env.drive.SaveShotsBody(shot_ids=[shot["id"]]), await env.actor(COMMITTEE))))[0] == 403
 
     env.run(go)
+
+
+def test_najcienszy_obrys_przechodzi_walidacje():
+    ok = SR.clean_shapes([ellipse(width=0.0015), ellipse(width=SR.MIN_WIDTH)])
+    assert ok[0]["width"] == 0.0015 and ok[1]["width"] == SR.MIN_WIDTH
+    with pytest.raises(Exception):
+        SR.clean_shapes([ellipse(width=SR.MIN_WIDTH / 2)])

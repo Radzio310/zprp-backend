@@ -19,7 +19,7 @@ FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_TEXT = os.path.join(FONT_DIR, "NotoSans-Regular.ttf")
 FONT_BANNER = os.path.join(FONT_DIR, "BarlowCondensed-Bold.ttf")
 SUPERSAMPLE_MAX_PIXELS = 2_600_000
-MIN_STROKE_PX = 2.0
+MIN_STROKE_PX = 1.3
 HALO = (0, 0, 0, 150)
 
 
