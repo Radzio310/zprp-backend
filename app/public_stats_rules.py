@@ -104,6 +104,10 @@ FIELDS = (
 #: liczbach: lista albo `None`, gdy jej źródło jeszcze nigdy się nie udało.
 LIST_FIELDS = ("panel_province_list",)
 
+#: Pola-mapy: klucz województwa (kanoniczny, bez ogonków) -> liczba. Same sumy,
+#: zero danych osobowych - karmią picker okręgu na stronie „Okręg”.
+MAP_FIELDS = ("judges_by_province", "active_by_province")
+
 
 def canonical_province(value: Any) -> str:
     """Województwo w kanonicznym zapisie albo "" dla śmieci.
@@ -134,7 +138,7 @@ def _aware(value: Any) -> Optional[datetime]:
     return value
 
 
-def summarize_judges(rows: Iterable[Mapping[str, Any]], now: datetime) -> Dict[str, int]:
+def summarize_judges(rows: Iterable[Mapping[str, Any]], now: datetime) -> Dict[str, Any]:
     """Sędziowie, aktywni w oknie i liczba okręgów - z wierszy `login_records`.
 
     Wiersz: `judge_id`, `province`, `last_login_at`, `last_open_at`.
@@ -144,6 +148,8 @@ def summarize_judges(rows: Iterable[Mapping[str, Any]], now: datetime) -> Dict[s
     seen: set = set()
     active = 0
     provinces: set = set()
+    by_province: Dict[str, int] = {}
+    active_by_province: Dict[str, int] = {}
     for row in rows:
         judge_id = str(row.get("judge_id") or "").strip()
         if not judge_id or judge_id in seen:
@@ -154,15 +160,21 @@ def summarize_judges(rows: Iterable[Mapping[str, Any]], now: datetime) -> Dict[s
             for s in (_aware(row.get("last_login_at")), _aware(row.get("last_open_at")))
             if s is not None
         ]
-        if stamps and max(stamps) >= cutoff:
+        is_active = bool(stamps) and max(stamps) >= cutoff
+        if is_active:
             active += 1
         province = canonical_province(row.get("province"))
         if province:
             provinces.add(province)
+            by_province[province] = by_province.get(province, 0) + 1
+            if is_active:
+                active_by_province[province] = active_by_province.get(province, 0) + 1
     return {
         "judges": len(seen),
         "active_judges_30d": active,
         "provinces": len(provinces),
+        "judges_by_province": dict(sorted(by_province.items())),
+        "active_by_province": dict(sorted(active_by_province.items())),
     }
 
 
@@ -276,7 +288,22 @@ def merge_sections(
     for field in LIST_FIELDS:
         value = _clean_list(fresh.get(field))
         out[field] = value if value is not None else _clean_list(prev.get(field))
+    for field in MAP_FIELDS:
+        value = _clean_map(fresh.get(field))
+        out[field] = value if value is not None else _clean_map(prev.get(field))
     return out
+
+
+def _clean_map(value: Any) -> Optional[Dict[str, int]]:
+    """Mapa województwo -> liczba: tylko znane klucze i liczby całkowite >= 0."""
+    if not isinstance(value, Mapping):
+        return None
+    out: Dict[str, int] = {}
+    for key, count in value.items():
+        province = canonical_province(key)
+        if province and isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            out[province] = count
+    return dict(sorted(out.items()))
 
 
 def build_payload(

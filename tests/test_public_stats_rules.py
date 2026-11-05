@@ -14,6 +14,7 @@ from app.public_stats_rules import (
     CACHE_TTL_S,
     FIELDS,
     LIST_FIELDS,
+    MAP_FIELDS,
     StatsCache,
     build_payload,
     canonical_province,
@@ -69,11 +70,13 @@ class TestSedziowie:
             {"judge_id": "", "province": "LUBUSKIE", "last_login_at": NOW, "last_open_at": None},
             {"judge_id": "101", "province": "LUBUSKIE", "last_login_at": NOW, "last_open_at": None},
         ]
-        assert summarize_judges(rows, NOW) == {
+        out = summarize_judges(rows, NOW)
+        assert {k: out[k] for k in ("judges", "active_judges_30d", "provinces")} == {
             "judges": 4,
             "active_judges_30d": 3,
             "provinces": 2,
         }
+        assert sum(out["judges_by_province"].values()) <= 4
 
     def test_naiwny_znacznik_czasu_traktowany_jak_utc(self):
         naive = (NOW - timedelta(days=1)).replace(tzinfo=None)
@@ -118,7 +121,7 @@ class TestSkladanieOdpowiedzi:
         assert merged["judges"] == 510
         assert merged["proel_matches"] == 40
         assert merged["proel_protocols"] is None
-        assert list(merged) == list(FIELDS) + list(LIST_FIELDS)
+        assert list(merged) == list(FIELDS) + list(LIST_FIELDS) + list(MAP_FIELDS)
         assert merged["panel_province_list"] is None
 
     def test_odpowiedz_ma_same_liczby_i_date(self):
@@ -127,7 +130,7 @@ class TestSkladanieOdpowiedzi:
         assert payload["stale"] is False
         for field in FIELDS:
             assert payload[field] is None or isinstance(payload[field], int)
-        assert set(payload) == set(FIELDS) | set(LIST_FIELDS) | {"updated_at", "stale"}
+        assert set(payload) == set(FIELDS) | set(LIST_FIELDS) | set(MAP_FIELDS) | {"updated_at", "stale"}
 
 
 class TestPamiecPodreczna:
@@ -240,3 +243,25 @@ class TestListaOkregowZPanelem:
     def test_odpowiedz_niesie_liste(self):
         payload = build_payload(summarize_panel(self.ROWS), None, NOW)
         assert payload["panel_province_list"] == ["DOLNOŚLĄSKIE", "LUBUSKIE", "ŁÓDZKIE", "ŚLĄSKIE"]
+
+
+class TestSedziowieWOkregach:
+    def test_liczy_raz_na_sedziego_i_po_kanonicznym_kluczu(self):
+        rows = [
+            {"judge_id": "1", "province": "ŚLĄSKIE", "last_login_at": NOW - timedelta(days=2)},
+            {"judge_id": "1", "province": "SLASKIE", "last_login_at": NOW},
+            {"judge_id": "2", "province": "slaskie", "last_login_at": NOW - timedelta(days=90)},
+            {"judge_id": "3", "province": "Dolnośląskie", "last_open_at": NOW},
+            {"judge_id": "4", "province": "POLSKA", "last_login_at": NOW},
+        ]
+        out = summarize_judges(rows, NOW)
+        assert out["judges_by_province"] == {"DOLNOSLASKIE": 1, "SLASKIE": 2}
+        assert out["active_by_province"] == {"DOLNOSLASKIE": 1, "SLASKIE": 1}
+
+    def test_mapa_bez_smieci_i_z_poprzedniej_odpowiedzi(self):
+        fresh = {"judges_by_province": {"ŚLĄSKIE": 7, "XYZ": 3, "OPOLSKIE": -1, "LUBUSKIE": True}}
+        merged = merge_sections(fresh, None)
+        assert merged["judges_by_province"] == {"SLASKIE": 7}
+        assert merged["active_by_province"] is None
+        again = merge_sections({}, {"active_by_province": {"SLASKIE": 4}})
+        assert again["active_by_province"] == {"SLASKIE": 4}

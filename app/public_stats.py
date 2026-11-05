@@ -48,7 +48,7 @@ _cache = StatsCache()
 _lock = asyncio.Lock()
 
 
-async def _judges_section() -> Dict[str, int]:
+async def _judges_section() -> Dict[str, Any]:
     from app.db import database, login_records
 
     rows = await database.fetch_all(
