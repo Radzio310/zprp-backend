@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from slowapi import Limiter, _rate_limit_exceeded_handler
+from jose import JWTError, jwt
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
@@ -25,7 +26,7 @@ import re
 import unicodedata
 from collections import Counter, defaultdict
 
-from app.deps import get_rsa_keys
+from app.deps import get_rsa_keys, get_settings
 from app.auth import router as auth_router
 from app.proxy import router as proxy_router
 from app.edit_judge import router as edit_router
@@ -237,6 +238,12 @@ from app.db import database, saved_matches, short_result_records, login_records,
 
 app = FastAPI(title="BAZA - API")
 
+# Bramka klucza klienta (app/client_key_guard.py): dodana PRZED CORS, więc CORS
+# ją owija - preflight i odpowiedź 401 mają nagłówki CORS. Bez CLIENT_KEYS
+# w env jest wyłączona (nic się nie zmienia).
+from app.client_key_guard import ClientKeyMiddleware, router as client_key_router
+app.add_middleware(ClientKeyMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -323,6 +330,7 @@ app.mount("/static", _CachedStaticFiles(directory=STATIC_DIR), name="static")
 
 
 app.include_router(auth_router)
+app.include_router(client_key_router)
 app.include_router(proxy_router)
 app.include_router(edit_router)
 # Przełącznik tokenu ProEl przy meczu. Stoi przy rodzinie akcji ZPRP
@@ -1878,6 +1886,16 @@ async def groq_key_endpoint(
     credentials: HTTPAuthorizationCredentials = Security(security)
 ):
     if not credentials or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Brak autoryzacji")
+    # Dawniej wystarczał DOWOLNY napis po „Bearer” (05.11.2026). Teraz token
+    # musi być podpisany przez ten serwer - aplikacja woła to tuż po logowaniu
+    # świeżym tokenem, więc nic się dla niej nie zmienia.
+    _settings = get_settings()
+    try:
+        _payload = jwt.decode(credentials.credentials, _settings.SECRET_KEY, algorithms=[_settings.ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Brak autoryzacji")
+    if not _payload.get("sub"):
         raise HTTPException(status_code=401, detail="Brak autoryzacji")
 
     groq_key = os.getenv("GROQ_API_KEY")
