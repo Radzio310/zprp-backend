@@ -126,6 +126,22 @@ async def conn_check(scope: str, judge_id: str | None = None, probe_bunny_item_i
     return JSONResponse(await svc.check(scope, judge_id, probe_bunny_item_id), headers={"Cache-Control": "no-store"})
 
 
+class ImportIn(BaseModel):
+    scope: str
+    judge_id: str | None = None
+    #: Ciasteczka portalu z okna logowania w aplikacji BAZA (WebView): name, value, domain, path, expires, httpOnly, secure.
+    cookies: list[dict]
+    probe_bunny_item_id: int | None = None
+
+
+@app.post("/connections/import", dependencies=[Depends(auth)])
+async def conn_import(body: ImportIn):
+    """Logowanie w oknie aplikacji: zapis sesji portalu z ciasteczek telefonu, tylko po udanej weryfikacji."""
+    _scope(body.scope, body.judge_id)
+    return JSONResponse(await svc.import_session(body.scope, body.judge_id, body.cookies, body.probe_bunny_item_id),
+                        headers={"Cache-Control": "no-store"})
+
+
 @app.delete("/connections", dependencies=[Depends(auth)])
 async def conn_delete(scope: str, judge_id: str | None = None):
     _scope(scope, judge_id)

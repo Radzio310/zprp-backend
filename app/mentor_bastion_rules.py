@@ -18,6 +18,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
 BASTION_HOST = "portal.handball-bastion.pl"
+#: Okno logowania w aplikacji przekazało ciasteczka, ale portal ich nie przyjął (nie dokończono logowania).
+MSG_IMPORT_NO_SESSION = "Logowanie w Bastionie nie zostało dokończone. Zaloguj się jeszcze raz w oknie."
 PROVIDER = "bastion"
 GAME_PATH = "/game"
 

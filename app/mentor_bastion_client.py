@@ -153,6 +153,13 @@ class ConnectorClient:
     async def cancel_attempt(self, attempt_id: str) -> Reply:
         return await self.request("POST", f"/attempts/{attempt_id}/cancel")
 
+    async def import_session(self, scope: str, judge_id: Optional[str], cookies: list, probe: Optional[int]) -> Reply:
+        """`POST /connections/import`: sesja z okna logowania w aplikacji (ciasteczka portalu z WebView)."""
+        body: Dict[str, Any] = {**_scope_params(scope, judge_id), "cookies": cookies}
+        if probe:
+            body["probe_bunny_item_id"] = int(probe)
+        return await self.request("POST", "/connections/import", json=body)
+
     async def connection_status(self, scope: str, judge_id: Optional[str]) -> Reply:
         return await self.request("GET", "/connections/status", params=_scope_params(scope, judge_id))
 

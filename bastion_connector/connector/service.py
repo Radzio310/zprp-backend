@@ -21,6 +21,7 @@ from .urlrules import is_blocked_navigation
 
 log = logging.getLogger("bastion.connector")
 VIEWPORT = {"width": 1100, "height": 700}
+DISCORD_HOST = "discord.com"
 MAX_TEXT = 2000
 TAKEOVER_CODE = 4409
 TAKEOVER_REASON = "Widok przejęła inna karta"
@@ -143,6 +144,7 @@ class Service:
         self.attempt_store = AttemptStore(settings.data_dir)
         self.ledger = clips.ClipLedger(settings.data_dir)
         self._clip_locks: dict[str, asyncio.Lock] = {}
+        self._renew_locks: dict[str, asyncio.Lock] = {}
 
     # ---------- infrastruktura ----------
     async def start(self) -> None:
@@ -206,7 +208,7 @@ class Service:
             raise ConnectorError("BASTION_STATE_INVALID", 500) from e
         return req, state, meta
 
-    async def game_context(self, scope: str, judge_id: str | None, item_id: int) -> tuple[GameResult, dict]:
+    async def game_context(self, scope: str, judge_id: str | None, item_id: int, _renewed: bool = False) -> tuple[GameResult, dict]:
         key = conn_key_for(scope, judge_id)
         req, state, meta = await self._with_state_request(key)
         try:
@@ -223,16 +225,27 @@ class Service:
                         self.store.touch_meta(key, validated_at=now_iso())
                 info["last_validated_at"] = now_iso()
             elif res.code == "BASTION_AUTH_REQUIRED":
-                self.store.touch_meta(key, last_error_code=res.code)  # nie kasujemy stanu po jednym 401
-            return res, info
+                self.store.touch_meta(key, last_error_code=res.code, auth_lost_at=now_iso())  # nie kasujemy stanu po jednym 401
         finally:
             await req.dispose()
+        if res.code == "BASTION_AUTH_REQUIRED" and not _renewed and await self.renew(key):
+            return await self.game_context(scope, judge_id, item_id, _renewed=True)
+        return res, info
 
     async def games_search(self, scope: str, judge_id: str | None, q: str, limit: int, offset: int,
                            season_id: int | None, video: str, referee: str = "", referee_param: str = "q", debug: bool = False,
-                           portal: dict | None = None) -> dict:
+                           portal: dict | None = None, _renewed: bool = False) -> dict:
         """Wyszukiwanie w Meczotece (GET /api/games) sesja tego polaczenia. Tylko odczyt."""
         key = conn_key_for(scope, judge_id)
+        if not _renewed and self.store.has_discord(key):
+            try:
+                return await self.games_search(scope, judge_id, q, limit, offset, season_id, video, referee, referee_param,
+                                               debug, portal, _renewed=True)
+            except ConnectorError as e:
+                if e.code != "BASTION_AUTH_REQUIRED" or not await self.renew(key):
+                    raise
+                return await self.games_search(scope, judge_id, q, limit, offset, season_id, video, referee, referee_param,
+                                               debug, portal, _renewed=True)
         req, state, meta = await self._with_state_request(key)
         try:
             code, http, body = await fetch_games(req, self.s.portal_base_url, q, limit, offset, season_id, video, referee, referee_param, portal)
@@ -577,6 +590,133 @@ class Service:
                 pass
         return out
 
+    # ---------- cicha odnowa sesji (decyzja wlasciciela 05.11.2026) ----------
+    async def renew(self, key: str) -> bool:
+        """Sesja Bastionu wygasla: zaloguj sie ponownie zapamietana sesja Discorda, bez czlowieka.
+        Kontekst z SAMYM stanem Discorda -> portal -> „Zaloguj przez Discord” -> (Discord pamieta zgode,
+        ewentualnie przycisk Autoryzuj) -> powrot na portal -> weryfikacja game-context -> nowa generacja.
+        Ta sama tozsamosc konta albo nic (cudze konto nigdy nie podmienia polaczenia). Jedna odnowa naraz
+        na polaczenie, po porazce przerwa `renew_cooldown_s`. Zwraca True tylko po udanej weryfikacji."""
+        if not self.s.auto_renew or not self.store.has_discord(key):
+            return False
+        lock = self._renew_locks.setdefault(key, asyncio.Lock())
+        if lock.locked():  # inna odnowa trwa: poczekaj na jej wynik
+            async with lock:
+                return self._renewed_recently(key)
+        async with lock:
+            loaded = self.store.load(key)
+            meta = loaded[1] if loaded else {}
+            last_fail = float(meta.get("renew_failed_ts") or 0)
+            if time.time() - last_fail < self.s.renew_cooldown_s:
+                return False
+            try:
+                discord = self.store.load_discord(key)
+            except crypto.CryptoError:
+                return False
+            ok, reason = await self._renew_run(key, discord or {}, meta)
+            if not ok:
+                self.store.touch_meta(key, renew_failed_ts=time.time(), renew_failed_reason=reason, renew_failed_at=now_iso())
+                log.info("cicha odnowa %s nieudana: %s", key, reason)
+            return ok
+
+    def _renewed_recently(self, key: str) -> bool:
+        loaded = self.store.load(key)
+        return bool(loaded and time.time() - float(loaded[1].get("renewed_ts") or 0) < 120)
+
+    async def _renew_run(self, key: str, discord: dict, meta: dict) -> tuple[bool, str]:
+        import re as _re
+
+        browser = await self._get_browser()
+        ctx = await browser.new_context(storage_state=discord, viewport=VIEWPORT, locale="pl-PL", timezone_id="Europe/Warsaw")
+        try:
+            await ctx.add_init_script(NO_WEBAUTHN_JS)
+            await ctx.route("**/*", lambda route: route.abort() if is_blocked_navigation(route.request.url) else route.continue_())
+            page = await ctx.new_page()
+            await page.goto(self.s.portal_base_url, wait_until="domcontentloaded", timeout=30000)
+            probe = self.s.probe_bunny_item_id
+            deadline = time.time() + 60
+            clicked_login = clicked_auth = False
+            while time.time() < deadline:
+                host = (urlsplit(page.url).hostname or "").lower()
+                if host == self.s.portal_host and probe:
+                    res = await fetch_game_context(ctx.request, self.s.portal_base_url, probe, self.s.embed_host_suffixes)
+                    if res.code in ("OK", "BASTION_RESOURCE_FORBIDDEN", "BASTION_EMBED_HOST_NOT_ALLOWED"):
+                        prev_id = meta.get("external_identity_id")
+                        cur_id = res.identity.get("id")
+                        if prev_id and cur_id and prev_id != cur_id:
+                            return False, "inne konto"
+                        full = await ctx.storage_state()
+                        state = filter_state_to_host(full, self.s.portal_host)
+                        fresh_discord = filter_state_to_host(full, DISCORD_HOST)
+                        async with self.store.lock(key):
+                            gen = int(meta.get("generation") or 0) + 1
+                            new_meta = {**meta, "generation": gen, "validated_at": now_iso(), "renewed_at": now_iso(),
+                                        "renewed_ts": time.time(), "renew_count": int(meta.get("renew_count") or 0) + 1,
+                                        "last_error_code": None, "renew_failed_ts": 0, "renew_failed_reason": None,
+                                        **self.merge_identity(meta, res.identity)}
+                            self.store.save(key, state, new_meta)
+                            if fresh_discord.get("cookies") or fresh_discord.get("origins"):
+                                self.store.save_discord(key, fresh_discord)
+                        log.info("cicha odnowa %s udana (generacja %s)", key, gen)
+                        return True, "ok"
+                    if not clicked_login:
+                        btn = page.get_by_role("button", name=_re.compile("discord", _re.I))
+                        link = page.get_by_role("link", name=_re.compile("discord", _re.I))
+                        target = btn if await btn.count() else link
+                        if await target.count():
+                            clicked_login = True
+                            await target.first.click(timeout=8000)
+                elif host.endswith(DISCORD_HOST):
+                    if "/login" in page.url:
+                        return False, "discord wymaga logowania"
+                    if not clicked_auth:
+                        auth = page.get_by_role("button", name=_re.compile("autoryzuj|authori[sz]e|zezwól|allow", _re.I))
+                        if await auth.count():
+                            clicked_auth = True
+                            await auth.first.click(timeout=8000)
+                await asyncio.sleep(1.5)
+            return False, "przekroczony czas"
+        except Exception as e:  # noqa: BLE001 - odnowa to proba, nie moze przewrocic odczytu
+            return False, type(e).__name__
+        finally:
+            await ctx.close()
+
+    async def import_session(self, scope: str, judge_id: str | None, cookies: list[dict], probe_item_id: int | None) -> dict:
+        """Logowanie w oknie aplikacji (WebView w BAZA, decyzja 05.11.2026): telefon przekazuje ciasteczka
+        portalu po zalogowaniu na prawdziwej stronie. Zapis tylko po udanej weryfikacji game-context i tylko
+        cookie hosta portalu (Discorda telefon nie przekazuje - tej sesji nie dotykamy)."""
+        key = conn_key_for(scope, judge_id)
+        probe = probe_item_id or self.s.probe_bunny_item_id
+        if not probe:
+            raise ConnectorError("PROBE_ITEM_REQUIRED", 400, "brak bunny_item_id do weryfikacji logowania")
+        clean = []
+        for c in cookies[:60]:
+            name, value, domain = str(c.get("name") or ""), str(c.get("value") or ""), str(c.get("domain") or self.s.portal_host)
+            if not name or len(name) > 256 or len(value) > 8192:
+                continue
+            clean.append({"name": name, "value": value, "domain": domain, "path": str(c.get("path") or "/"),
+                          "expires": float(c.get("expires") or -1), "httpOnly": bool(c.get("httpOnly", True)),
+                          "secure": bool(c.get("secure", True)), "sameSite": c.get("sameSite") if c.get("sameSite") in ("Lax", "Strict", "None") else "Lax"})
+        state = filter_state_to_host({"cookies": clean, "origins": []}, self.s.portal_host)
+        if not state["cookies"]:
+            raise ConnectorError("BASTION_IMPORT_EMPTY", 422, "brak ciasteczek portalu")
+        req = await self._pw.request.new_context(storage_state=state)
+        try:
+            res = await fetch_game_context(req, self.s.portal_base_url, probe, self.s.embed_host_suffixes)
+            if res.code not in ("OK", "BASTION_RESOURCE_FORBIDDEN", "BASTION_EMBED_HOST_NOT_ALLOWED"):
+                raise ConnectorError("BASTION_AUTH_REQUIRED", 409, "ciasteczka nie otwieraja sesji portalu")
+            fresh = filter_state_to_host(await req.storage_state(), self.s.portal_host)
+        finally:
+            await req.dispose()
+        async with self.store.lock(key):
+            prev = self.store.load(key)
+            gen = (prev[1].get("generation", 0) if prev else 0) + 1
+            meta = {"generation": gen, "connected_at": now_iso(), "validated_at": now_iso(), "verified_with": "game-context",
+                    "game_context_code": res.code, "via": "app",
+                    **self.merge_identity(prev[1] if prev else {}, res.identity)}
+            self.store.save(key, fresh, meta)
+        return {"connection": key, "generation": gen, **self._identity_view(meta), "auto_renew": self.store.has_discord(key)}
+
     def status(self, scope: str, judge_id: str | None) -> dict:
         key = conn_key_for(scope, judge_id)
         loaded = self.store.load(key)
@@ -586,7 +726,9 @@ class Service:
         return {"connection": key, "status": "stored", "generation": meta.get("generation"),
                 "connected_at": meta.get("connected_at"), "last_validated_at": meta.get("validated_at"),
                 "last_error_code": meta.get("last_error_code"), "expires_at": None,
-                **self._identity_view(meta), "cookies": cookie_summary(state)}
+                **self._identity_view(meta), "cookies": cookie_summary(state),
+                "auto_renew": self.s.auto_renew and self.store.has_discord(key), "renewed_at": meta.get("renewed_at"),
+                "renew_count": meta.get("renew_count") or 0, "auth_lost_at": meta.get("auth_lost_at")}
 
     def disconnect(self, scope: str, judge_id: str | None) -> bool:
         return self.store.delete(conn_key_for(scope, judge_id))
@@ -776,7 +918,9 @@ class Service:
         if res.code not in ("OK", "BASTION_RESOURCE_FORBIDDEN", "BASTION_EMBED_HOST_NOT_ALLOWED"):
             return
         a.status = "verifying"
-        state = filter_state_to_host(await a.context.storage_state(), self.s.portal_host)
+        full = await a.context.storage_state()
+        state = filter_state_to_host(full, self.s.portal_host)
+        discord = filter_state_to_host(full, DISCORD_HOST) if self.s.auto_renew else None
         async with self.store.lock(a.conn_key):
             prev = self.store.load(a.conn_key)
             gen = (prev[1].get("generation", 0) if prev else 0) + 1
@@ -784,6 +928,8 @@ class Service:
                     "verified_with": "game-context", "game_context_code": res.code,
                     **self.merge_identity(prev[1] if prev else {}, res.identity)}
             self.store.save(a.conn_key, state, meta)  # wymiana generacji dopiero po udanej weryfikacji
+            if discord and (discord.get("cookies") or discord.get("origins")):
+                self.store.save_discord(a.conn_key, discord)  # cicha odnowa, gdy sesja Bastionu wygasnie
         a.identity = self._identity_view(meta)
         await self._close_attempt(a, "succeeded")
 

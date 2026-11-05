@@ -183,6 +183,11 @@ Wynik pokazuje dla każdego parametru liczbę wyników, `row_keys` i sędziów z
 
 `GET /games/search` przyjmuje też `portal=k=v&k2=v2` (klucze tylko z `date_from|date_to|from|to|date_start|date_end|since|until|date`, wartości `RRRR-MM-DD`) - przekazywane do `/api/games` portalu wyłącznie do prób. `/playback` zwraca teraz `thumbnail_url` i `duration_s` (z obiektu `video` game-context: klucze `thumbnail_url|thumbnail|poster_url|poster|preview_url|cover_url|image_url|image`, tylko https z hostów Bunny) oraz `video_keys` (nazwy pól `video`). Próba dat: `python probe_meczoteka_referee.py "Imię Nazwisko" default 2026-10-10 2026-10-12` pokazuje `total` i zakres dat wierszy dla każdej pary parametrów wobec odpowiedzi bez parametrów.
 
+### Realny czas sesji (obserwacja 05.11.2026)
+Połączenie domyślne zalogowane 3.11 było rozłączone 5.11 (ciasteczko portalu: termin +7 dni). Odpowiedź: podtrzymanie co 3 h
+i cicha odnowa przez zapamiętaną sesję Discorda (`mentor-panel.md` 8.7a). Do sprawdzenia w logach: `auth_lost_at`
+względem `connected_at` i ostatniego podtrzymania - czy sesja gaśnie bez ruchu, czy po stałym czasie.
+
 ## 8. Ryzyka i otwarte kwestie
 
 - Trwałość sesji Bastionu nieznana; może wymagać cyklicznego logowania przez człowieka (MFA nie omijamy).

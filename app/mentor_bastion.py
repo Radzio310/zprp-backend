@@ -140,6 +140,12 @@ async def _set_connection(row: Dict[str, Any], **values: Any) -> Dict[str, Any]:
             await release_waiting_jobs(row["id"])  # to samo konto: zadania czekające na sesję wracają do kolejki
         except Exception:  # noqa: BLE001
             logger.warning("bastion: wznowienie zadan po odnowieniu sesji nieudane", exc_info=True)
+    if new == "reauth_required" and row.get("status") == "ready":
+        import asyncio
+
+        from app.mentor_bastion_watch import notify_disconnected
+
+        asyncio.ensure_future(notify_disconnected(row))  # push nie może opóźniać odpowiedzi
     if new in ("reauth_required", "revoked", "unconfigured") and row.get("status") not in (new, "unconfigured"):
         from app.mentor_bastion_jobs import hold_jobs_for_connection
 
@@ -364,6 +370,49 @@ async def _own_attempt(attempt_id: str, real: Actor) -> Dict[str, Any]:
     if row["initiator_judge_id"] != real.judge_id and not (row["scope"] == "default" and real.is_admin):
         raise berr(404, "BASTION_ATTEMPT_NOT_FOUND", "Nie ma takiej próby logowania.")
     return row
+
+
+class ImportBody(BaseModel):
+    scope: str = Field(pattern="^(default|personal)$")
+    #: Ciasteczka portalu z okna logowania w aplikacji (WebView): name, value, domain, path, expires, httpOnly, secure.
+    cookies: List[Dict[str, Any]] = Field(default_factory=list, max_length=60)
+
+
+@router.get("/bastion/app-login")
+async def app_login_info(response: Response, real: Actor = Depends(base_actor)):
+    """Okno logowania w aplikacji BAZA (decyzja 05.11.2026): gdzie otworzyć prawdziwą stronę portalu
+    i z jakiego hosta przekazać ciasteczka po zalogowaniu."""
+    response.headers["Cache-Control"] = "no-store"
+    flags = _flags()
+    _need_enabled(flags)
+    return {"portal_url": f"https://{BR.BASTION_HOST}/", "cookie_host": BR.BASTION_HOST, "is_admin": real.is_admin}
+
+
+@router.post("/bastion/import")
+async def import_app_session(body: ImportBody, response: Response, real: Actor = Depends(base_actor)):
+    """Sesja z okna logowania w aplikacji: connector zapisuje ją dopiero po udanej weryfikacji (game-context).
+    Połączenie domyślne tylko prawdziwy admin, osobiste - właściciel (zawsze prawdziwy aktor, nigdy act_as)."""
+    response.headers["Cache-Control"] = "no-store"
+    flags = _flags()
+    _need_enabled(flags, body.scope)
+    _manage_guard(body.scope, real)
+    client = _client()
+    owner = _scope_judge(body.scope, real)
+    reply = await _call(client.import_session(body.scope, owner, body.cookies, flags.probe_bunny_item_id))
+    if reply.status == 409:
+        raise berr(409, "BASTION_AUTH_REQUIRED", BR.MSG_IMPORT_NO_SESSION)
+    if reply.status == 422:
+        raise berr(422, "BASTION_IMPORT_EMPTY", BR.MSG_IMPORT_NO_SESSION)
+    if reply.status != 200:
+        logger.warning("bastion: connector odmówił importu sesji: %s %s", reply.status, reply.body.get("error"))
+        raise _unavailable()
+    try:
+        row = await sync_connection(client, body.scope, owner, fresh=True)
+    except CL.ConnectorUnavailable as exc:
+        raise _unavailable(exc.reason) from exc
+    if row and row.get("status") != "ready":
+        row = await _set_connection(row, status="ready", last_validated_at=C.now(), last_error_code=None, revoked_at=None)
+    return {"connection": connection_shape(body.scope, row, real, flags), "auto_renew": bool(reply.body.get("auto_renew"))}
 
 
 @router.post("/bastion/login-attempts")

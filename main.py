@@ -1720,6 +1720,9 @@ async def startup():
         asyncio.create_task(run_trybuna_feed_refresher())  # kanał obserwowanych liczony w tle co 30 min
         asyncio.create_task(run_trybuna_morning())  # "Dziś sędziuje" 8:00
         asyncio.create_task(run_thumb_worker())  # miniatury kaset (klatka przez connector, trzymana w magazynie BAZY)
+        # Podtrzymanie sesji Bastionu co 3 h + cicha odnowa w connectorze + push o rozłączeniu (05.11.2026).
+        from app.mentor_bastion_watch import run_bastion_keepalive
+        asyncio.create_task(run_bastion_keepalive())
     # Automat nagrań w dniu meczu (Bastion + YouTube; bez Bastionu szuka samego YouTube) - wyłącznik MENTOR_AUTO_FOUND=0.
     from app.mentor_auto_found import run_auto_found
     asyncio.create_task(run_auto_found())

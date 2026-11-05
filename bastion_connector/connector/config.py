@@ -29,6 +29,10 @@ class Settings:
     test_page: bool = False
     headful: bool = False
     chromium_path: str = ""
+    #: Cicha odnowa sesji Bastionu przez zapamietana (zaszyfrowana) sesje Discorda (decyzja 05.11.2026).
+    auto_renew: bool = True
+    #: Po nieudanej odnowie kolejna proba najwczesniej po tylu sekundach (Discord nie lubi serii logowan).
+    renew_cooldown_s: int = 1800
 
     @property
     def portal_host(self) -> str:
@@ -56,4 +60,6 @@ class Settings:
             test_page=flag("BASTION_TEST_PAGE"),
             headful=flag("BASTION_HEADFUL"),
             chromium_path=os.environ.get("BASTION_CHROMIUM_PATH", ""),
+            auto_renew=os.environ.get("BASTION_AUTO_RENEW", "1").lower() not in ("0", "false", "no"),
+            renew_cooldown_s=int(os.environ.get("BASTION_RENEW_COOLDOWN_SECONDS", "1800")),
         )

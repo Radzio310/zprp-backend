@@ -27,8 +27,9 @@ def conn_key_for(scope: str, judge_id: str | None) -> str:
 
 
 def filter_state_to_host(state: dict, host: str) -> dict:
-    """Zostawia tylko cookie stosujace sie do hosta portalu i localStorage jego originu (nie zapisujemy
-    szerszej sesji Discorda ubocznie, handoff 4.3)."""
+    """Zostawia tylko cookie stosujace sie do hosta i localStorage jego originu. Stan portalu nigdy nie
+    niesie sesji Discorda ubocznie (handoff 4.3); Discord, gdy wlaczona cicha odnowa, idzie osobnym
+    plikiem (`save_discord`, filtr po hoście discord.com)."""
     host = host.lower()
 
     def applies(domain: str) -> bool:
@@ -90,11 +91,44 @@ class StateStore:
         return data["state"], data["meta"]
 
     def delete(self, conn_key: str) -> bool:
+        self.delete_discord(conn_key)
         p = self._path(conn_key)
         if p.exists():
             p.unlink()
             return True
         return False
+
+    # ---------- stan Discorda do cichej odnowy (decyzja wlasciciela 05.11.2026) ----------
+    # Osobny plik <conn_key>.discord.enc, osobne AAD: stan portalu i stan Discorda nie mieszaja sie,
+    # a rozlaczenie kasuje oba. Trzymamy tylko cookie i localStorage originu discord.com.
+    def _aux_path(self, conn_key: str) -> Path:
+        return self._path(conn_key).with_suffix(".discord.enc")
+
+    def save_discord(self, conn_key: str, state: dict) -> None:
+        blob = json.dumps(state, separators=(",", ":")).encode()
+        enc = crypto.encrypt(self.keys[0], blob, f"{conn_key}:discord".encode())
+        p = self._aux_path(conn_key)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_bytes(enc)
+        os.replace(tmp, p)
+
+    def load_discord(self, conn_key: str) -> dict | None:
+        p = self._aux_path(conn_key)
+        if not p.exists():
+            return None
+        plain, idx = crypto.decrypt(self.keys, p.read_bytes(), f"{conn_key}:discord".encode())
+        state = json.loads(plain)
+        if idx > 0:
+            self.save_discord(conn_key, state)
+        return state
+
+    def has_discord(self, conn_key: str) -> bool:
+        return self._aux_path(conn_key).exists()
+
+    def delete_discord(self, conn_key: str) -> None:
+        p = self._aux_path(conn_key)
+        if p.exists():
+            p.unlink()
 
     def touch_meta(self, conn_key: str, **updates) -> None:
         cur = self.load(conn_key)
