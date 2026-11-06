@@ -677,3 +677,96 @@ async def promote_training(
     if req.dry_run:
         result["eligible"] = eligible
     return result
+
+
+# ─────────────── opcje administratora w podsumowaniu meczu ───────────────
+
+#: Co administrator może zrobić jednym ruchem z arkusza „Opcje administratora".
+ADMIN_OVERRIDE_ACTIONS = ("skip", "unskip", "approve_anyway")
+#: Rygle, które wolno pominąć (te same klucze, co `utils/postMatchAdminSkip.ts`).
+ADMIN_OVERRIDE_ITEMS = ("short", "full", "pdf", "signatures", "exams", "report")
+ADMIN_OVERRIDE_MIN_REASON = 5
+
+
+class AdminOverrideRequest(BaseModel):
+    key: str = ""
+    action: str = ""
+    items: List[str] = Field(default_factory=list)
+    reason: str = ""
+    pin: str = ""
+    #: Zdanie z aplikacji do dziennika („Pominięto: podpisy, badania").
+    summary: str = ""
+
+
+@router.post(
+    "/admin_override",
+    summary="Pominięcie rygla albo zatwierdzenie mimo braków (administrator, PIN)",
+)
+async def admin_override(
+    req: AdminOverrideRequest,
+    actor: Actor = Depends(proel_actor),
+) -> Dict[str, Any]:
+    """Serwer NIE zmienia protokołu - to robi telefon w blobie meczu.
+
+    Tu dzieją się trzy rzeczy, których telefon nie może zrobić sam: sprawdzenie,
+    że to administrator (bramka routera + `is_admin`), sprawdzenie PIN-u (ten
+    sam licznik pomyłek co przy usuwaniu hurtem) i wpis `admin.override` do
+    dziennika meczu z obowiązkowym powodem. Telefon wpisuje decyzję do bloba
+    dopiero po 200 z tej trasy.
+    """
+    await _require_admin(
+        actor, "Opcje administratora w meczu są dostępne tylko dla administratora."
+    )
+    key = (req.key or "").strip()
+    action = (req.action or "").strip()
+    reason = (req.reason or "").strip()
+    if not key or action not in ADMIN_OVERRIDE_ACTIONS:
+        raise HTTPException(
+            400, detail={"code": "BAD_REQUEST", "message": "Brak meczu albo akcji."}
+        )
+    items = [i for i in dict.fromkeys(req.items or []) if i in ADMIN_OVERRIDE_ITEMS]
+    if action != "approve_anyway" and not items:
+        raise HTTPException(
+            400, detail={"code": "EMPTY", "message": "Nie wskazano, co pominąć."}
+        )
+    if action != "unskip" and len(reason) < ADMIN_OVERRIDE_MIN_REASON:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "REASON_REQUIRED",
+                "message": "Podaj powód (co najmniej kilka słów) - trafi do dziennika meczu.",
+            },
+        )
+
+    who = actor.judge_id
+    if _pin_throttle.blocked(who):
+        raise HTTPException(
+            429,
+            detail={
+                "code": "PIN_LOCKED",
+                "message": promote_lock_message(_pin_throttle.seconds_left(who)),
+            },
+        )
+    from app.admin import pin_is_valid
+
+    if not await pin_is_valid(who, req.pin):
+        _pin_throttle.fail(who)
+        raise HTTPException(
+            403,
+            detail={"code": "PIN_INVALID", "message": PROMOTE_PIN_INVALID_MESSAGE},
+        )
+    _pin_throttle.reset(who)
+
+    await log_match_event(
+        match_number=key,
+        event="admin.override",
+        actor=actor,
+        details={
+            "admin": True,
+            "action": action,
+            "items": items,
+            "reason": reason[:500],
+            "summary": (req.summary or "").strip()[:200],
+        },
+    )
+    return {"ok": True, "action": action, "items": items}

@@ -70,6 +70,8 @@ EVENT_LABELS: Dict[str, str] = {
     "match.doc_conflict": "Odrzucony zapis (nowsza wersja na serwerze)",
     "match.overwritten_by_choice": "Nadpisanie wersji z serwera wyborem sędziego",
     "match.promoted": "Przeniesienie do oficjalnego zapisu",
+    # Opcje administratora z ekranu podsumowania (`POST /proel/archive/admin_override`).
+    "admin.override": "Opcje administratora",
     "field.changed": "Zmiana pól",
     "protocol.pdf_generated": "Wygenerowanie protokołu PDF",
     "zprp.summary_sent": "Wynik skrócony do ZPRP",
@@ -658,6 +660,12 @@ def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
     if ev == "evidence.released":
         reason = str(d.get("reason") or "").strip()
         lead = "Wersje znów wygasają jak zwykle, teczki zostają"
+        return f"{lead}. Powód: {reason}" if reason else lead
+
+    if ev == "admin.override":
+        reason = str(d.get("reason") or "").strip()
+        what = str(d.get("summary") or d.get("action") or "").strip()
+        lead = f"Administrator: {what}" if what else "Administrator zmienił wymagania protokołu"
         return f"{lead}. Powód: {reason}" if reason else lead
 
     if ev == "match.promoted":

@@ -4950,6 +4950,17 @@ def _hf_escape(text: str) -> str:
     return str(text or "").replace("&", "&&")
 
 
+def _admin_approval_note(data_json: Dict[str, Any]) -> str:
+    """Adnotacja, gdy administrator zamknął protokół mimo braków (opcje admina)."""
+    extras = ((data_json or {}).get("matchConfig") or {}).get("extras") or {}
+    skips = extras.get("adminSkippedPostMatchActions")
+    if isinstance(skips, list):
+        for item in skips:
+            if isinstance(item, dict) and item.get("key") == "approve":
+                return "Zatwierdzone przez administratora"
+    return ""
+
+
 def _apply_protocol_page_marks(
     wb,
     *,
@@ -4957,6 +4968,7 @@ def _apply_protocol_page_marks(
     generated_by: str,
     generated_at: str,
     audit_code: str = "",
+    admin_note: str = "",
 ) -> None:
     """
     Nakłada na WSZYSTKIE arkusze skoroszytu nagłówek z IdZawody i stopkę z
@@ -5011,6 +5023,14 @@ def _apply_protocol_page_marks(
             ws.oddHeader.left.size = 7
             ws.oddHeader.left.font = "Arial,Bold"
             ws.oddHeader.left.color = "000000"
+
+        # Adnotacja administratora (zatwierdzenie mimo braków) - środek nagłówka,
+        # w tym samym paśmie co kod dziennika, więc nie rusza układu kartki.
+        if admin_note:
+            ws.oddHeader.center.text = _hf_escape(admin_note)
+            ws.oddHeader.center.size = 7
+            ws.oddHeader.center.font = "Arial,Bold"
+            ws.oddHeader.center.color = "000000"
 
         ws.oddFooter.center.text = _hf_escape(footer)
         ws.oddFooter.center.size = 6
@@ -6308,6 +6328,7 @@ async def generate_protocol_pdf(
             generated_by=generated_by,
             generated_at=generated_at,
             audit_code=audit_code,
+            admin_note=_admin_approval_note(data_json),
         )
 
         wb.save(filled_xlsx)
