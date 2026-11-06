@@ -194,7 +194,8 @@ def test_transmisje_bez_godziny_nie_maja_okna_o_polnocy():
 # ---------------------------------------------------------------------------
 
 MODULES = ("app.zprp_public.store", "app.zprp_public.sync", "app.zprp_public.enrich", "app.zprp_public.api",
-           "app.zprp_public.portal", "app.zprp_public.extras", "app.zprp_public.live")
+           "app.zprp_public.portal", "app.zprp_public.extras", "app.zprp_public.live",
+           "app.zprp_public.friendly")
 
 
 @pytest.fixture

@@ -18,7 +18,8 @@ from app.zprp_public_tables import define_tables as define_public
 from app.national_distance_tables import define_tables as define_national
 
 MODULES = ("app.zprp_public.store", "app.zprp_public.sync", "app.zprp_public.enrich", "app.zprp_public.api",
-           "app.zprp_public.portal", "app.zprp_public.extras", "app.zprp_public.live")
+           "app.zprp_public.portal", "app.zprp_public.extras", "app.zprp_public.live",
+           "app.zprp_public.friendly")
 WARSAW = ZoneInfo("Europe/Warsaw")
 
 

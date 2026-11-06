@@ -289,7 +289,7 @@ def test_wynik_tylko_z_zakonczonego_protokolu():
 # ---------------------------------------------------------------------------
 
 MODULES = ("app.zprp_public.store", "app.zprp_public.sync", "app.zprp_public.enrich", "app.zprp_public.api",
-           "app.zprp_public.portal", "app.zprp_public.extras", "app.zprp_public.live", "app.zprp_public.proel_lineups")
+           "app.zprp_public.portal", "app.zprp_public.extras", "app.zprp_public.live", "app.zprp_public.friendly", "app.zprp_public.proel_lineups")
 
 
 def _proel_tables(metadata):

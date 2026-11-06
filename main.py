@@ -158,6 +158,7 @@ from app.zprp_public.api import (
 )
 from app.zprp_public.portal import router as handball_portal_router
 from app.zprp_public.live import router as handball_live_router
+from app.zprp_public.friendly import router as handball_friendly_router
 from app.zprp_public.extras import router as handball_round3_router
 from app.zprp_public.crest import router as handball_crest_router
 from app.zprp_public.stats import router as handball_stats_router, run_stats_scheduler
@@ -529,6 +530,7 @@ app.include_router(assignments_router, tags=["zprp"])
 app.include_router(handball_public_router)
 app.include_router(handball_portal_router)
 app.include_router(handball_live_router)
+app.include_router(handball_friendly_router)
 app.include_router(handball_round3_router)
 app.include_router(handball_crest_router)
 app.include_router(handball_stats_router)

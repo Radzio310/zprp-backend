@@ -30,6 +30,8 @@ from app.db import database, proel_match_state as S, saved_matches as T, zprp_pu
 from app.proel_match_key import zprp_id_of
 from app.proel_match_key import public_rows_clause
 from app.proel_training_key import TRAINING_KEY_LIKE
+from app.zprp_public import friendly as FR
+from app.zprp_public import friendly_rules as FRR
 from app.zprp_public import proel_live_rules as L
 from app.zprp_public.portal import _card_cols, _cards
 
@@ -108,7 +110,12 @@ async def _live_rows() -> List[Dict[str, Any]]:
         .where(or_(S.c.live_started_at.is_not(None), T.c.status.in_(("finished", "approved"))))
         .limit(120)
     )
-    return [dict(r._mapping) if hasattr(r, "_mapping") else dict(r) for r in rows]
+    out = [dict(r._mapping) if hasattr(r, "_mapping") else dict(r) for r in rows]
+    # Mecze towarzyskie (ProEl bez IdZawody): ta sama pula zapisów, ale poza `public_rows_clause`.
+    for r in await FR.eligible_rows(limit=80):
+        if (r.get("lease_until") and _aware(r["lease_until"]) > now) or (_aware(r.get("doc_at")) or now) > now - JUST_FINISHED:
+            out.append({**r, "match_number": r["match_number"], "zprp_match_id": None, "doc_zid": None, "friendly": True})
+    return out
 
 
 def _token(rows: List[Dict[str, Any]], extra: str = "") -> str:
@@ -182,6 +189,8 @@ async def _build_live(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             blobs[d["match_number"]] = _blob(d.get("data_json"))
     ids, codes = [], []
     for r, _ in wanted:
+        if r.get("friendly"):
+            continue
         b = blobs.get(r["match_number"]) or {}
         zid = str(r.get("doc_zid") or r.get("zprp_match_id") or zprp_id_of(b) or "").strip()
         r["_zid"] = zid
@@ -194,8 +203,15 @@ async def _build_live(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     live: List[dict] = []
     finished: List[dict] = []
     seen: set = set()
+    friendly_cards = {c["match_id"]: c for _r, c, _b in await FR.load_cards([r for r, _ in wanted if r.get("friendly")])}
     for r, phase in wanted:
         blob = blobs.get(r["match_number"]) or {}
+        if r.get("friendly"):
+            card = friendly_cards.get(FRR.friendly_id(r["match_number"]))
+            if card and card["match_id"] not in seen:
+                seen.add(card["match_id"])
+                (live if phase == "live" else finished).append(_live_item(card, r, blob, phase))
+            continue
         if not L.is_public_blob(blob):
             continue
         card = by_id.get(r["_zid"]) if r["_zid"] else by_code.get(str(r["match_number"]).strip())
@@ -291,12 +307,19 @@ async def match_timeline(
     since: str = Query("", max_length=64),
     wait: int = Query(0, ge=0, le=MAX_WAIT_S),
 ) -> Dict[str, Any]:
-    match = await database.fetch_one(
-        select(M.c.match_id, M.c.match_code, M.c.home_team_name, M.c.away_team_name).where(M.c.match_id == match_id)
-    )
-    if not match:
-        raise HTTPException(404, "Nie znaleziono meczu")
-    m = dict(match._mapping) if hasattr(match, "_mapping") else dict(match)
+    friendly_key = FRR.key_of_id(match_id)
+    if friendly_key:
+        # Mecz towarzyski: klucz ProEla siedzi w samym identyfikatorze, ZPRP go nie zna.
+        m = {"match_id": match_id, "match_code": friendly_key, "home_team_name": None, "away_team_name": None}
+        if match_id not in _timeline_built and not await FR.find(match_id):
+            raise HTTPException(404, "Nie znaleziono meczu")
+    else:
+        match = await database.fetch_one(
+            select(M.c.match_id, M.c.match_code, M.c.home_team_name, M.c.away_team_name).where(M.c.match_id == match_id)
+        )
+        if not match:
+            raise HTTPException(404, "Nie znaleziono meczu")
+        m = dict(match._mapping) if hasattr(match, "_mapping") else dict(match)
     code = str(m.get("match_code") or "").strip()
     memo = _match_memo.setdefault(match_id, _Memo(TICK_S))
     if len(_match_memo) > 500:
@@ -328,7 +351,7 @@ async def match_timeline(
             else:
                 phase = _phase({**row, "status": status}, now) or ("stale" if row.get("live_started_at") else "pre")
             cfg = blob["matchConfig"]
-            host_home = L.host_is_home(cfg, m.get("home_team_name"), m.get("away_team_name"))
+            host_home = True if friendly_key else L.host_is_home(cfg, m.get("home_team_name"), m.get("away_team_name"))
             tl = L.timeline(blob, host_home)
             body = {
                 "token": tok,

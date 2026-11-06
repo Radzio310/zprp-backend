@@ -26,7 +26,7 @@ from app.zprp_public_tables import define_tables as define_public
 
 UTC = timezone.utc
 MODULES = ("app.zprp_public.store", "app.zprp_public.sync", "app.zprp_public.enrich", "app.zprp_public.api",
-           "app.zprp_public.portal", "app.zprp_public.extras", "app.zprp_public.live", "app.zprp_public.proel_cards")
+           "app.zprp_public.portal", "app.zprp_public.extras", "app.zprp_public.live", "app.zprp_public.friendly", "app.zprp_public.proel_cards")
 NOW = datetime(2026, 10, 24, 20, 18, tzinfo=UTC)  # sobota 22:18 w Warszawie (CEST)
 LOCAL_NOW = datetime(2026, 10, 24, 22, 18)
 

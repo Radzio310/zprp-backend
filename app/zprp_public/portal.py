@@ -764,8 +764,11 @@ async def player_matches(player_id: str, season_id: str = "") -> dict[str, Any]:
 @router.post("/matches/{match_id}/refresh")
 async def match_refresh(match_id: str) -> dict[str, Any]:
     """Odświeża mecz z ZPRP (limit 1 na 2 min na mecz); błąd ZPRP nie psuje odpowiedzi."""
+    from app.zprp_public import friendly_rules as FRR
     from app.zprp_public.ondemand import refresh_match
 
+    if FRR.is_friendly_id(match_id):
+        return {"refreshed": False, "changed": False, "throttled": False, "friendly": True}
     exists = await database.fetch_one(select(M.c.match_id).where(M.c.match_id == match_id))
     if not exists:
         raise HTTPException(404, "Nie znaleziono meczu")
@@ -785,6 +788,10 @@ async def _venue_payload(m: dict) -> dict[str, Any]:
 
 @router.get("/matches/{match_id}/overview")
 async def match_overview(match_id: str) -> dict[str, Any]:
+    from app.zprp_public import friendly as FR, friendly_rules as FRR
+
+    if FRR.is_friendly_id(match_id):
+        return await FR.overview(match_id)
     match = await database.fetch_one(select(M).where(M.c.match_id == match_id))
     if not match:
         raise HTTPException(404, "Nie znaleziono meczu")

@@ -19,7 +19,7 @@ from app.zprp_public_stats_tables import define_tables as define_stats
 from app.zprp_public_tables import define_tables as define_public
 
 MODULES = ("app.zprp_public.store", "app.zprp_public.sync", "app.zprp_public.enrich", "app.zprp_public.api",
-           "app.zprp_public.portal", "app.zprp_public.extras", "app.zprp_public.live", "app.zprp_public.stats")
+           "app.zprp_public.portal", "app.zprp_public.extras", "app.zprp_public.live", "app.zprp_public.friendly", "app.zprp_public.stats")
 WARSAW = ZoneInfo("Europe/Warsaw")
 # Dziś 15:00 w Warszawie - mecze dnia są przed i po tej chwili, niezależnie od godziny uruchomienia testu.
 LOCAL_NOW = datetime.combine(datetime.now(WARSAW).date(), time(15, 0))

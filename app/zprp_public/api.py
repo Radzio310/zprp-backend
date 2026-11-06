@@ -667,6 +667,10 @@ async def list_matches(
 
 @router.get("/matches/{match_id}")
 async def match_details(match_id: str) -> dict[str, Any]:
+    from app.zprp_public import friendly as FR, friendly_rules as FRR
+
+    if FRR.is_friendly_id(match_id):
+        return FR.details(await FR.overview(match_id))
     match = await database.fetch_one(select(zprp_public_matches).where(zprp_public_matches.c.match_id == match_id))
     if not match:
         raise HTTPException(404, "Nie znaleziono meczu")
