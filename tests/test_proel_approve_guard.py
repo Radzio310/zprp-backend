@@ -516,3 +516,34 @@ def test_starsza_aplikacja_zostaje_przepuszczona():
     """Ten sam kompromis co przy blokadzie prowadzenia - patrz docstring."""
     code = _function_source("_require_approver")
     assert "legacy" in code
+
+
+def test_sedzia_z_obsady_ZPRP_przechodzi_po_numerze_mimo_innego_nazwiska():
+    """Regresja 06.11 (S/JmM/34): obsada w stanie z samych nazwisk, nazwisko
+    z profilu inne (inicjał) - rola po nazwisku odpada, po numerze z ZPRP jest."""
+    import asyncio
+
+    from app import official_role as OR
+
+    officials = {"referee1": {"name": "ZAJĄC Karol R."}, "referee2": {"name": "NOWAK Piotr"}}
+    actor = judge("3390", "Karol Zając")
+    assert not can_approve(actor, officials)  # sam stan: odmowa
+
+    match = {
+        "Id": "211665",
+        "NrSedzia_pierwszy": "03390",
+        "NrSedzia_pierwszy_nazwisko": "ZAJĄC Karol R.",
+        "NrSedzia_drugi": "222",
+        "NrSedzia_drugi_nazwisko": "NOWAK Piotr",
+    }
+    OR._CREW_CACHE["211665"] = (__import__("time").monotonic(), match)
+    try:
+        assert asyncio.run(OR.zprp_approver_by_number("211665", "3390"))
+        assert not asyncio.run(OR.zprp_approver_by_number("211665", "999"))
+        assert not asyncio.run(OR.zprp_approver_by_number("brak", "3390"))
+    finally:
+        OR._CREW_CACHE.pop("211665", None)
+
+
+def test_prawo_po_numerze_ZPRP_stoi_w_jednej_funkcji_dla_przycisku_i_zapisu():
+    assert "_zprp_crew_approves" in _function_source("_may_approve")

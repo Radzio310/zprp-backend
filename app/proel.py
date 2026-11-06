@@ -386,7 +386,30 @@ async def _may_approve(
     """
     if can_approve(actor, await _approval_officials(match_number, state)):
         return True
+    # Druga droga po NUMERZE z obsady ZPRP. Wiersz stanu zna obsadę z samych
+    # nazwisk, a nazwisko z profilu sędziego bywa zapisane inaczej (inicjał,
+    # drugie imię, ogonki) - sędzia z obsady słyszał wtedy NOT_AN_APPROVER, a
+    # drugi z tego samego meczu przechodził. Numer nie ma tego problemu.
+    if await _zprp_crew_approves(match_number, state, actor):
+        return True
     return await rights.granted(actor)
+
+
+async def _zprp_crew_approves(
+    match_number: str, state: Optional[Dict[str, Any]], actor: Actor
+) -> bool:
+    jid = str(getattr(actor, "judge_id", "") or "").strip()
+    if not jid or not jid.replace(" ", "").isdigit():
+        return False  # konto ProEl i urządzenie bez numeru: tylko obsada ze stanu
+    mid = str((state or {}).get("zprp_match_id") or "").strip()
+    if not mid.isdigit():
+        cfg = await _fetch_doc_config(match_number)
+        mid = str((cfg or {}).get("matchId") or "").strip() if isinstance(cfg, dict) else ""
+    if not mid.isdigit():
+        return False
+    from app.official_role import zprp_approver_by_number  # lazy
+
+    return await zprp_approver_by_number(mid, jid)
 
 
 def _reproject_blob(state: Optional[Dict[str, Any]], blob: Any) -> Any:

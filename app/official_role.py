@@ -192,6 +192,46 @@ def _roles_for(match: Dict[str, Any], judge_id: str) -> List[str]:
     return out
 
 
+# Krótka pamięć obsady z publicznego API: ta sama odpowiedź obsługuje trasę
+# stanu (odpytywaną co kilka sekund) i zapis zatwierdzenia.
+_CREW_CACHE: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
+_CREW_TTL_S = 90.0
+
+
+async def zprp_approver_by_number(match_id: Any, judge_id: Any) -> bool:
+    """Czy numer sędziego jest w obsadzie ZPRP tego meczu w roli zatwierdzającej.
+
+    DRUGA DROGA do tego samego prawa, rozstrzygana po NUMERZE. Wiersz stanu
+    ProEla zna obsadę zwykle z samych nazwisk (aplikacja nie wysyła numerów),
+    a nazwisko z profilu bywa zapisane inaczej niż w obsadzie (inicjał, drugie
+    imię, ogonki) - i sędzia z obsady słyszał „ta decyzja należy do kogo
+    innego". Awaria odczytu nie blokuje i nie przepuszcza: odpowiedź to `False`.
+    """
+    import time
+
+    mid = _clean(match_id)
+    if not mid.isdigit() or not _clean(judge_id):
+        return False
+    now = time.monotonic()
+    hit = _CREW_CACHE.get(mid)
+    if hit and now - hit[0] < _CREW_TTL_S:
+        match = hit[1]
+    else:
+        match = None
+        try:
+            async with AsyncClient(timeout=10.0) as public:
+                resp = await public.get(await details_url(mid))
+                resp.raise_for_status()
+                match = _match_from_details_payload(resp.json())
+        except Exception:  # noqa: BLE001 - brak odczytu to brak drugiej drogi
+            match = None
+        if match is not None:
+            _CREW_CACHE[mid] = (now, match)
+    if not match:
+        return False
+    return is_authorized(_roles_for(match, _clean(judge_id)), False)
+
+
 def _match_from_details_payload(payload: Any) -> Optional[Dict[str, Any]]:
     """Wyjmij pierwszy mecz z rzeczywistych wariantów publicznego API ZPRP.
 
