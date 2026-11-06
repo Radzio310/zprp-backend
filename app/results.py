@@ -59,6 +59,8 @@ import copy
 from openpyxl.drawing.image import Image
 
 logger = logging.getLogger(__name__)
+from app.proel_match_key import shared_key_of_blob  # noqa: E402
+from app.shared_match_pdf import store_pdf as store_shared_pdf  # noqa: E402
 router = APIRouter(tags=["Results"])
 
 class ShortResultRequest(BaseModel):
@@ -6375,6 +6377,17 @@ async def generate_protocol_pdf(
             app_version=x_app_version,
             ip=(request.client.host if request and request.client else None),
         )
+
+        # Mecz ręczny (klucz `M-`) nie ma ZPRP: PDF zostaje na naszym serwerze,
+        # a obsada pobiera go z meczu wspólnego. Szkoleniowych nie trzymamy.
+        _shared_key = shared_key_of_blob(data_json)
+        if _shared_key and not is_training:
+            with open(pdf_path, "rb") as _fh:
+                await store_shared_pdf(
+                    _shared_key, _fh.read(),
+                    filename=_safe_filename_from_match_number(core.get("matchNumber") or "mecz"),
+                    audit_code=audit_code, actor_name=actor_name, actor_judge_id=actor_judge_id,
+                )
 
         # przygotuj plik do pobrania po tokenie
         _cleanup_expired_downloads()

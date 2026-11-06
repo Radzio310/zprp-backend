@@ -4751,6 +4751,7 @@ from app.shared_match_tables import define_tables as _define_shared_match_tables
     shared_match_blocks,
     shared_match_log,
     mentor_proel_links,
+    shared_match_pdfs,
 ) = _define_shared_match_tables(metadata)
 
 # Dobowy licznik odczytów składów z protokołu - „Wczytaj składy" (02.11.2026, `app/lineup_read_tables.py`, `docs/mecze-wspolne-api.md`).

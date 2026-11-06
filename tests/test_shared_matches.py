@@ -658,3 +658,41 @@ def test_powiazanie_z_zprp_nie_dubluje_karty_a_dane_pary_nie_przepadaja(env):
     assert "m1" in ids and f"my:{clean_id}" not in ids  # główna jest karta ZPRP
     assert f"my:{kept_id}" in ids and "m2" not in ids  # dane pary pod `my:` zostają dostępne
     assert sum(1 for i in ids if i in ("m1", f"my:{clean_id}")) == 1
+
+
+# ─── PDF protokołu meczu ręcznego (06.11.2026) ──────────────────────────────
+
+
+def test_pdf_protokolu_meczu_recznego_widzi_obsada_a_obcy_nie(env):
+    from app.proel_match_key import shared_key_of_blob
+
+    pdf = importlib_import("app.shared_match_pdf")
+
+    async def go():
+        created = await make(env)
+        mid = created["match"]["id"]
+        key = f"M-{created['match']['key_stem']}/EHF/1"
+        member, stranger = await env.actor(B), await env.actor(STRANGER)
+        out = {"before": await env.shared.protocol_pdf_meta(mid, member)}
+        out["no_file"] = (await denied(env.shared.protocol_pdf_file(mid, member)))[:2]
+        assert await pdf.store_pdf(key, b"%PDF-1", filename="EHF_1.pdf", audit_code="BZ-1", actor_name="Jan")
+        assert await pdf.store_pdf(key, b"%PDF-2", filename="EHF_1.pdf", audit_code="BZ-2", actor_name="Jan")
+        out["meta"] = await env.shared.protocol_pdf_meta(mid, member)
+        out["file"] = (await env.shared.protocol_pdf_file(mid, member)).body
+        out["stranger"] = (await denied(env.shared.protocol_pdf_file(mid, stranger)))[:2]
+        return out
+
+    out = env.run(go)
+    assert out["before"] == {"exists": False}
+    assert out["no_file"] == (404, "PDF_NOT_FOUND")
+    assert out["meta"]["exists"] and out["meta"]["audit_code"] == "BZ-2" and out["meta"]["size"] == 6
+    assert out["file"] == b"%PDF-2" and out["stranger"] == (404, "MATCH_NOT_FOUND")
+    assert shared_key_of_blob({"matchConfig": {"proelKey": "M-ABCDEF12/EHF/1"}}) == "M-ABCDEF12/EHF/1"
+    assert shared_key_of_blob({"matchConfig": {"proelKey": "T-ABC/1"}}) == ""
+    assert shared_key_of_blob({"matchConfig": {"matchNumber": "EHF/1"}}) == ""
+
+
+def importlib_import(name):
+    import importlib
+
+    return importlib.import_module(name)

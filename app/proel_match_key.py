@@ -437,3 +437,10 @@ def public_rows_clause(match_number_col: Any, zprp_col: Any = None) -> Any:
     linked = and_(zprp_col.isnot(None), zprp_col != "") if zprp_col is not None else None
     allowed = or_(~private, linked) if linked is not None else ~private
     return and_(~match_number_col.ilike(TRAINING_KEY_LIKE), allowed)
+
+
+def shared_key_of_blob(data_json: Any) -> str:
+    """Klucz `M-...` z `matchConfig.proelKey` albo "" (mecz z ZPRP, szkoleniowy, brak)."""
+    cfg = (data_json or {}).get("matchConfig") if isinstance(data_json, dict) else None
+    key = str((cfg or {}).get("proelKey") or "").strip() if isinstance(cfg, dict) else ""
+    return key if key and is_shared_key(key) else ""

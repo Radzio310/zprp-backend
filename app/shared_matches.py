@@ -28,6 +28,7 @@ from app import mentor_panel_core as C
 from app import shared_match_link as LK
 from app import lineup_read_rules as LR
 from app import shared_match_notify as N
+from app import shared_match_pdf as PDF
 from app import shared_match_rules as SR
 from app.db import (
     database,
@@ -42,7 +43,7 @@ from app.db import (
     zprp_public_matches,
 )
 from app.mentor_panel_auth import base_actor
-from app.proel_match_key import is_shared_key, new_shared_stem, shared_stem_of_key, stem_of_row
+from app.proel_match_key import is_shared_key, new_shared_stem, shared_key_of, shared_stem_of_key, stem_of_row
 
 logger = logging.getLogger("app.shared_match")
 router = APIRouter(prefix="/shared-matches", tags=["Mecze wspólne"])
@@ -836,6 +837,29 @@ async def delete_match(match_id: str, base_rev: Optional[int] = Query(None), act
 
 
 # ─── Wynik skrócony ─────────────────────────────────────────────────────────
+
+
+def _pdf_key(row: Dict[str, Any]) -> str:
+    """Klucz protokołu `M-...` tego meczu (wskaźnik, a bez niego z tulei i numeru)."""
+    key = s(row.get("proel_key"))
+    return key if is_shared_key(key) else shared_key_of(stem_of_row(row), row.get("code"))
+
+
+@router.get("/{match_id}/protocol-pdf")
+async def protocol_pdf_meta(match_id: str, actor: Actor = Depends(base_actor)):
+    """Czy PDF protokołu tego meczu jest na serwerze. Każdy członek obsady; obcy: 404."""
+    row, _, _ = await _load(match_id, actor)
+    return await PDF.pdf_meta(_pdf_key(row)) or {"exists": False}
+
+
+@router.get("/{match_id}/protocol-pdf/file")
+async def protocol_pdf_file(match_id: str, actor: Actor = Depends(base_actor)):
+    """Ostatni PDF protokołu meczu ręcznego. Każdy członek obsady; obcy: 404."""
+    row, _, _ = await _load(match_id, actor)
+    stored = await PDF.pdf_bytes(_pdf_key(row))
+    if not stored:
+        raise C.err(404, "PDF_NOT_FOUND", "Protokół tego meczu nie został jeszcze wygenerowany.")
+    return PDF.pdf_response(stored)
 
 
 @router.put("/{match_id}/result")

@@ -17,6 +17,7 @@ from sqlalchemy import (
     DateTime,
     Index,
     Integer,
+    LargeBinary,
     String,
     Table,
     Text,
@@ -135,4 +136,19 @@ def define_tables(metadata):
         Column("linked_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
     Index("ix_mentor_proel_links_pair", links.c.pair_id)
-    return matches, members, blocks, log, links
+
+    #: PDF protokołu meczu RĘCZNEGO (`M-...`): bez ZPRP nie ma dokąd go wysłać, więc ostatni wygenerowany zostaje u nas
+    #: i pobierają go członkowie obsady. Jeden wiersz na klucz (nowy zastępuje stary); historię stanu trzyma `protocol_audit`.
+    pdfs = Table(
+        "shared_match_pdfs",
+        metadata,
+        Column("proel_key", String, primary_key=True),
+        Column("pdf", LargeBinary, nullable=False),
+        Column("filename", String, nullable=False),
+        Column("audit_code", String, nullable=True),
+        Column("actor_name", String, nullable=True),
+        Column("actor_judge_id", String, nullable=True),
+        Column("size", Integer, nullable=False, server_default=text("0")),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    return matches, members, blocks, log, links, pdfs
