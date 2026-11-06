@@ -5193,6 +5193,15 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS promoted_to varchar"))
     _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS promoted_at timestamptz"))
     _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS promoted_from_rev integer"))
+    # Odcisk policzony kiedyś z PEŁNEGO klucza (`M5346E331EHF1|…` zamiast
+    # `EHF1|…`) blokował każdy zapis meczu ręcznego i szkoleniowego jako
+    # `match.id_conflict`. Kasujemy tylko takie odciski; pusty wiersz przyjmie
+    # poprawny przy następnym zapisie (IDENTITY_ADOPT). Idempotentne.
+    _conn.execute(text(
+        "UPDATE proel_match_state SET local_key = NULL "
+        "WHERE match_number ~* '^[TM]-' AND local_key IS NOT NULL "
+        "AND local_key LIKE upper(regexp_replace(match_number, '[^A-Za-z0-9]', '', 'g')) || '|%'"
+    ))
     # Ostatnie zdarzenie wersji protokołu - kafel w panelu historii. Tabela
     # migawek powstała WCZEŚNIEJ niż te kolumny, więc `create_all` ich nie
     # dołożył, a każdy `SELECT` po niej kończył się błędem: panel mówił

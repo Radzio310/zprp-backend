@@ -222,6 +222,18 @@ def test_odcisk_rozroznia_dwa_mecze_pod_jednym_numerem():
     assert oficjalny != reczny
 
 
+def test_odcisk_z_klucza_wiersza_rowny_odciskowi_z_bloba():
+    # EHF/1 (06.11.2026): `/ensure` liczył odcisk z klucza `M-…/EHF/1`, blob
+    # z czystego `EHF/1` - 184 zapisy stolika odrzucone jako `match.id_conflict`.
+    blob = {"matchConfig": {"matchNumber": "EHF/1", "hostTeamName": "Polska", "guestTeamName": "Słowenia"}}
+    guard = {"hostTeamName": "Polska", "guestTeamName": "Słowenia"}
+    for key in ("M-5346E331/EHF/1", "T-K3N8P2WQ/EHF/1", "EHF/1"):
+        known = match_identity(None, local_key_from_guard(key, guard))
+        incoming = match_identity(None, local_key_from_blob(blob))
+        assert known == incoming != ""
+        assert identity_verdict(known, incoming) == IDENTITY_OK
+
+
 def test_bez_obu_druzyn_odcisku_nie_ma():
     # Pusty odcisk znaczy „nie wiem, który to mecz" i nigdy nikogo nie blokuje.
     # Sam numer nie identyfikuje niczego - o to rozbiła się pierwsza wersja.

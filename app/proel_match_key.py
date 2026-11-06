@@ -230,6 +230,16 @@ def _fold(value: Any) -> str:
     return "".join(ch for ch in text if ch.isalnum())
 
 
+_PREFIXED_KEY_RE = re.compile(r"^[TM]-[A-Z0-9]{6,16}/(.+)$", re.IGNORECASE)
+
+
+def _bare_number(value: Any) -> str:
+    """Numer meczu bez `T-…/` i `M-…/` (lustro `match_number_from_key`, bez importu w drugą stronę)."""
+    text = str(value or "").strip()
+    found = _PREFIXED_KEY_RE.match(text)
+    return found.group(1) if found else text
+
+
 def local_key_of(match_number: Any, host: Any, guest: Any) -> str:
     """Odcisk meczu bez identyfikatora ZPRP: numer plus obie drużyny.
 
@@ -238,7 +248,11 @@ def local_key_of(match_number: Any, host: Any, guest: Any) -> str:
     a odcisk zbudowany z połowy danych blokowałby mecze, o których nic nie wiemy.
     Pusty odcisk znaczy „nie wiem, który to mecz" i nigdy nikogo nie blokuje.
     """
-    number = _fold(match_number)
+    # Numer bez przedrostka klucza: `/ensure` i `/lease` dostają klucz wiersza
+    # (`M-<TULEJA>/EHF/1`, `T-<PODEJŚCIE>/SPM/1`), a blob niesie czysty numer.
+    # Bez zdjęcia przedrostka odciski meczu ręcznego i szkoleniowego nigdy się
+    # nie zgadzały i każdy zapis stolika wracał jako `match.id_conflict`.
+    number = _fold(_bare_number(match_number))
     a = _fold(host)
     b = _fold(guest)
     if not number or not a or not b:
