@@ -134,6 +134,12 @@ async def _sync_match(province, match_id, *, previous_state=None, enrich=True):
         now = datetime.now(timezone.utc)
         values = [{**item, "province": province, "active": True,
                    "last_seen_at": now, "updated_at": now} for item in rows]
+        # Already settled crew keeps the home city and km from the moment of
+        # settlement (06.11.2026, `settlement_home_lock`).
+        from app.settlement_home_lock import apply_locks, locked_homes
+
+        by_key = {(str(v["judge_id"]), str(v["match_key"])): v for v in values}
+        apply_locks(by_key, await locked_homes(province, by_key.keys()))
         await S._upsert_matches(values)
         for item in rows:
             # Moving between historical outside/district sources must not leave

@@ -871,6 +871,15 @@ async def _store_locked(province, batch, seen, now, scope, current, started_at):
             continue
         to_drop.append(key)
 
+    # Mecze juz rozliczone oficjalnym dokumentem trzymaja miasto zamieszkania
+    # i kilometry z chwili rozliczenia (06.11.2026, `settlement_home_lock`) -
+    # przeprowadzka sedziego zmienia tylko to, co jeszcze nierozliczone.
+    from app.settlement_home_lock import apply_locks, locked_homes
+
+    kept = apply_locks(batch, await locked_homes(province))
+    if kept:
+        logger.info("[settlement] %s: %d rozliczonych obsad zostaje przy dawnym dojezdzie", province, kept)
+
     # Zapis paczkami w JEDNEJ transakcji: kilka tysiecy wierszy to kilkanascie
     # zapytan zamiast kilku tysiecy, a przerwany przebieg nie zostawia pol-zapisu.
     await _upsert_matches(list(batch.values()))

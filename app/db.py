@@ -919,6 +919,10 @@ province_settlement_matches = Table(
     Column("distance_source", String, nullable=True),
     Column("approved", Boolean, nullable=True),
     Column("active", Boolean, nullable=False, server_default=text("true")),
+    # Home city frozen by an official settlement document (06.11.2026): once a
+    # match is on an issued document, refreshes keep home_city and distance.
+    Column("home_locked_doc", String, nullable=True),
+    Column("home_locked_at", DateTime(timezone=True), nullable=True),
     Column("first_seen_at", DateTime(timezone=True), server_default=func.now()),
     Column("last_seen_at", DateTime(timezone=True), server_default=func.now()),
     Column(
@@ -5325,6 +5329,9 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS stage varchar"))
     _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS stage_done integer"))
     _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS stage_total integer"))
+    # Home city frozen at the moment of settlement (06.11.2026).
+    _conn.execute(text("ALTER TABLE province_settlement_matches ADD COLUMN IF NOT EXISTS home_locked_doc varchar"))
+    _conn.execute(text("ALTER TABLE province_settlement_matches ADD COLUMN IF NOT EXISTS home_locked_at timestamptz"))
     _conn.execute(text("ALTER TABLE province_zprp_write_journal ADD COLUMN IF NOT EXISTS date_before varchar"))
     _conn.execute(text("ALTER TABLE province_zprp_write_journal ADD COLUMN IF NOT EXISTS date_after varchar"))
     # Mecze międzypaństwowe (02.11.2026): rodzaj meczu wspólny dla obsady i jednorazowe włączenie statystyk.

@@ -84,8 +84,9 @@ def world(monkeypatch):
     settlements = table("province_settlement_matches", [
         (key, String, key in {"province", "judge_id", "match_key"}) for key in
         ["province", "judge_id", "match_key", "season", "match_code", "role", "level", "origin", "city",
-         "hall", "home_city", "teams", "round_text", "series_text", "distance_source"]] +
+         "hall", "home_city", "teams", "round_text", "series_text", "distance_source", "home_locked_doc"]] +
         [("match_at", DateTime, False), ("last_seen_at", DateTime, False), ("updated_at", DateTime, False),
+         ("home_locked_at", DateTime, False),
          ("distance_km", Float, False), ("active", Boolean, False), ("approved", Boolean, False)])
     engine = create_engine("sqlite://")
     meta.create_all(engine)
@@ -110,7 +111,8 @@ def world(monkeypatch):
         "and_": __import__("sqlalchemy").and_, "VersionedDistanceIndex": VersionedDistanceIndex,
         "pretty_city": pretty_city, "looks_like_city": looks_like_city,
         "load_national_pairs": AsyncMock(return_value={}), "judge_cities": AsyncMock(return_value={}),
-        "_own_prefixes": AsyncMock(return_value=set())})
+        "_own_prefixes": AsyncMock(return_value=set()),
+        "logger": __import__("logging").getLogger("projection")})
     exec(compile(functions("_district_assignments", "_district_rows", "_store_locked"), "projection", "exec"), source.__dict__)
     async def upsert(rows):
         await upsert_batches(db, settlements, rows, ["province", "judge_id", "match_key"])
@@ -122,7 +124,8 @@ def world(monkeypatch):
     for number in ("1", "2", "3"):
         conn.execute(judges.insert().values(province="SLASKIE", judge_id=number, full_name=f"Judge {number}", home_city="Katowice"))
     conn.commit()
-    yield SimpleNamespace(live=live, db=db, matches=matches, settlements=settlements, source=source)
+    yield SimpleNamespace(live=live, db=db, matches=matches, settlements=settlements, source=source,
+                          judges=judges)
     conn.close()
     engine.dispose()
 
@@ -178,3 +181,52 @@ async def test_removal_before_first_full_run_leaves_receipt_and_readding_restore
     assert rows["1"]["active"] is True
     assert rows["3"]["active"] is False
     assert len([r for r in rows.values() if r["active"]]) == 2
+
+
+async def move_home(w, judge_id, city):
+    await w.db.execute(update(w.judges).where(w.judges.c.judge_id == judge_id).values(home_city=city))
+
+
+@pytest.mark.asyncio
+async def test_settled_match_keeps_home_city_after_judge_moves(world, monkeypatch):
+    """06.11.2026: moment rozliczenia zamraża miasto zamieszkania i dojazd."""
+    from app import settlement_home_lock as HL
+
+    w = world
+    await put_match(w, "42", state("1"))
+    await put_match(w, "43", state("1"))
+    await w.live._sync_match("SLASKIE", "42", enrich=False)
+    await w.live._sync_match("SLASKIE", "43", enrich=False)
+    # Mecz 42 rozliczony oficjalnym dokumentem, 43 jeszcze nie.
+    await HL.lock_homes("SLASKIE", {"1": ["d:42"]}, "7/S/2026", NOW)
+    await HL.lock_homes("SLASKIE", {"1": ["d:42"]}, "9/S/2026", NOW)  # pierwszy dokument wygrywa
+
+    await move_home(w, "1", "Gliwice")
+    # Gliwice-Katowice from the ZPRP table (the code is a central competition).
+    from app import national_lookup_rules as NL
+
+    real = NL.pick_distance
+    monkeypatch.setattr(NL, "pick_distance", lambda central, *, home, city, **kw:
+        (27.0, "zprp-table") if (home, city) == ("Gliwice", "Katowice") else real(central, home=home, city=city, **kw))
+    await w.live._sync_match("SLASKIE", "42", enrich=False)
+    await w.live._sync_match("SLASKIE", "43", enrich=False)
+    rows = {(r["judge_id"], r["match_key"]): r for r in await w.db.fetch_all(select(w.settlements))}
+    assert rows["1", "d:42"]["home_city"] == "Katowice"
+    assert rows["1", "d:42"]["distance_km"] == 0
+    assert rows["1", "d:42"]["home_locked_doc"] == "7/S/2026"
+    assert (rows["1", "d:43"]["home_city"], rows["1", "d:43"]["distance_km"]) == ("Gliwice", 27)
+    assert rows["1", "d:43"]["home_locked_doc"] is None
+
+    # Pełny przebieg z nowym miastem i nowymi kilometrami też nie rusza rozliczonego.
+    batch = {
+        key: {**dict(row), "home_city": "Gliwice", "distance_km": 27.0, "distance_source": "google"}
+        for key, row in rows.items()
+    }
+    for values in batch.values():
+        values.pop("home_locked_doc", None)
+        values.pop("home_locked_at", None)
+    await w.source._store_locked("SLASKIE", batch, set(batch), NOW, {"2026/2027"}, "2026/2027", None)
+    rows = {(r["judge_id"], r["match_key"]): r for r in await w.db.fetch_all(select(w.settlements))}
+    assert (rows["1", "d:42"]["home_city"], rows["1", "d:42"]["distance_km"]) == ("Katowice", 0)
+    assert rows["1", "d:42"]["home_locked_doc"] == "7/S/2026"
+    assert (rows["1", "d:43"]["home_city"], rows["1", "d:43"]["distance_km"]) == ("Gliwice", 27.0)

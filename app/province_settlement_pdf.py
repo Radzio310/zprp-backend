@@ -43,6 +43,7 @@ from app.province_settlements import (
 )
 from app.settlement_province import display
 from app.settlement_engine import display_judge_name
+from app.settlement_home_lock import lock_homes, lock_keys_of
 from app.settlement_pdf_groups import group_by_judge
 from app.settlement_money import money as round2
 from app.settlement_words import amount_in_words, money, number
@@ -348,6 +349,13 @@ async def _issue(
             number_scheme=scheme,
             number_year=number_year,
         )
+        # MOMENT ROZLICZENIA (06.11.2026): miasto zamieszkania i dojazd meczów
+        # z tego dokumentu zostają takie, jak teraz - przeprowadzka sędziego
+        # zmienia już tylko to, co jeszcze nierozliczone (`settlement_home_lock`).
+        keys_by_judge: dict[str, list[str]] = {}
+        for item in items:
+            keys_by_judge.setdefault(item["judge_id"], []).extend(item.get("lock_keys") or [])
+        await lock_homes(province, keys_by_judge, number)
     return {
         "success": True,
         "official": True,
@@ -456,6 +464,10 @@ def _zestawienie_candidates(
     out: list[dict] = []
     for e in entries:
         name = display_judge_name(e.judge_name)
+        # Mecze okresu do zamrożenia miasta zamieszkania przy oficjalnym
+        # wydaniu (06.11.2026) - całego okresu sędziego, także przy liście
+        # jednej części: okres ma jedno miasto. Do rejestru nie idą.
+        lock = lock_keys_of(e.matches)
         split_parts = list((e.split or {}).get("parts") or [])
         if not split_parts and only and only != WHOLE_POOL_LETTER:
             continue
@@ -480,6 +492,7 @@ def _zestawienie_candidates(
                     "penalty_gross": e.penalty_gross,
                     "gross_due": e.gross_due if e.gross_due is not None else e.gross,
                     "payable": e.net,
+                    "lock_keys": lock,
                 }
             )
             continue
@@ -516,6 +529,7 @@ def _zestawienie_candidates(
                     "penalty_gross": float(part.get("penalty_gross") or 0),
                     "gross_due": float(part.get("gross_due") or part["gross"]),
                     "payable": part["net"],
+                    "lock_keys": lock,
                 }
             )
     return out
@@ -722,6 +736,7 @@ async def przejazdy_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get_o
     look = await doc_settings(province)
 
     # Przejazdy ida cale - sedzia jest pozycja, bez czesci puli.
+    lock_by_judge = {e.judge_id: lock_keys_of(e.matches) for e in data["entries"]}
     candidates: list[dict] = []
     seen: set[str] = set()
     for item in travel:
@@ -736,6 +751,7 @@ async def przejazdy_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get_o
                 "part": G.WHOLE,
                 "amount": round2(sum(t.amount for t in mine)),
                 "km": sum(t.total_km for t in mine),
+                "lock_keys": lock_by_judge.get(item.judge_id) or [],
             }
         )
     if not candidates:

@@ -70,6 +70,9 @@ class Assignment:
     #: (`settlement_rates.province_pays_field`). Ustawia warstwa HTTP, bo lista
     #: powierzonych lig siedzi w ustawieniach okregu.
     province_field: bool = False
+    #: Numer oficjalnego dokumentu, ktory zamrozil miasto zamieszkania i dojazd
+    #: (`settlement_home_lock`, 06.11.2026). None - mecz jeszcze nierozliczony.
+    home_locked: Optional[str] = None
 
 
 def _zprp_reason(assignment: "Assignment") -> Optional[str]:
@@ -132,6 +135,8 @@ class SettledMatch:
     #: Podpowiedz „zdjac?" - z tych rozgrywek innego okregu zdejmowano juz mecze
     #: (`settlement_exclusion_rules.hint`). Sam mecz zostaje w rozliczeniu.
     exclude_hint: Optional[str] = None
+    #: Dokument, ktory zamrozil miasto zamieszkania i dojazd (`Assignment.home_locked`).
+    home_locked: Optional[str] = None
 
 
 @dataclass
@@ -380,6 +385,7 @@ def settle_match(
         city=assignment.city,
         hall=assignment.hall,
         home_city=assignment.home_city,
+        home_locked=assignment.home_locked,
         teams=assignment.teams,
         distance_km=distance,
         distance_source=assignment.distance_source,
@@ -418,6 +424,7 @@ def _settle_fixed(assignment: Assignment, when_date: Optional[date], now: dateti
         city=assignment.city,
         hall=assignment.hall,
         home_city=assignment.home_city,
+        home_locked=assignment.home_locked,
         teams=assignment.teams,
         distance_km=distance,
         distance_source=assignment.distance_source,

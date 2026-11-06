@@ -271,6 +271,7 @@ async def _assignments(
                 city=str(row["city"] or ""),
                 hall=str(row["hall"] or ""),
                 home_city=str(row["home_city"] or ""),
+                home_locked=(str(row["home_locked_doc"] or "") or None) if row["home_locked_at"] is not None else None,
                 teams=str(row["teams"] or ""),
                 round_text=row["round_text"],
                 series_text=row["series_text"],
@@ -773,6 +774,8 @@ def _match_json(match: E.SettledMatch) -> dict:
         "distance_km": match.distance_km,
         "distance_source": match.distance_source,
         "home_city": match.home_city,
+        # Dokument, który zamroził miasto zamieszkania i dojazd (06.11.2026).
+        "home_locked": match.home_locked,
         "km_rate": match.km_rate,
         "gross": match.gross,
         "travel": match.travel,
@@ -1620,22 +1623,29 @@ async def _forecast_assignments(
     if not picked:
         return []
 
-    homes = [item.home_city for item in mine if item.home_city]
-    home = max(set(homes), key=homes.count) if homes else ""
-    if not home:
-        row = await database.fetch_one(
-            select(province_settlement_judges.c.home_city).where(
-                and_(
-                    province_settlement_judges.c.province == key,
-                    province_settlement_judges.c.judge_id == str(judge_id),
-                )
+    # Miasto DZISIEJSZE (lista okręgu) przed najczęstszym z obsad: od 06.11.2026
+    # rozliczone mecze trzymają dawne miasto (`settlement_home_lock`), więc po
+    # przeprowadzce najczęstsze byłoby jeszcze stare, a przyszłe mecze liczą się
+    # już z nowego.
+    row = await database.fetch_one(
+        select(province_settlement_judges.c.home_city).where(
+            and_(
+                province_settlement_judges.c.province == key,
+                province_settlement_judges.c.judge_id == str(judge_id),
             )
         )
-        home = str(row["home_city"] or "") if row else ""
+    )
+    home = str(row["home_city"] or "").strip() if row else ""
+    if not home:
+        homes = [item.home_city for item in mine if item.home_city]
+        home = max(set(homes), key=homes.count) if homes else ""
+
+    from app.settlement_home_lock import fold_city
 
     known_km: dict[str, float] = {}
     for item in mine:
-        if item.distance_km is not None and item.city:
+        # Kilometry z historii tylko z tego samego miasta zamieszkania.
+        if item.distance_km is not None and item.city and fold_city(item.home_city) == fold_city(home):
             known_km.setdefault(normalize_city(item.city)[0], float(item.distance_km))
 
     distance_row = await database.fetch_one(
@@ -2045,6 +2055,10 @@ async def _judge_season(
         except Exception as exc:  # nazwisko to wygoda - nie zatrzymuje rozliczenia
             logger.info("[settlement] %s: nazwisko %s: %s", key, judge_id, exc)
 
+    from app import settlement_home_lock as HL
+
+    home_now = await HL.current_home(key, judge_id)
+
     # Okresy liczą się równolegle - czekanie na bazę (podziały, podpowiedzi)
     # nakłada się, zamiast iść okres po okresie (08.10.2026: ekran ma się
     # otwierać bez zacinki).
@@ -2123,6 +2137,10 @@ async def _judge_season(
                         row["played_net_share"] = got.get((row.get("match_key"), row.get("role")), row["net_share"])
                 bucket["played"] = {**_bucket_sums(done), "rounding": done_left}
             bucket["off"] = len(payload["zprp"])
+            # Z jakiego miasta liczono dojazdy okresu i czy to już rozliczone
+            # (06.11.2026, `settlement_home_lock`) - aplikacja tłumaczy tym
+            # sędziemu, czemu po przeprowadzce stary okres ma dawną trasę.
+            bucket["home"] = HL.home_story(entry.get("rows") or [], home_now)
             if detail:
                 bucket["detail"] = payload
         _add_sums(totals["district"], bucket["district"])
@@ -2148,6 +2166,9 @@ async def _judge_season(
         "include_future": include_future,
         "generated_at": now.isoformat(),
         "seasons": seasons,
+        # Miasto zamieszkania z dzisiejszej listy okręgu - z niego liczą się
+        # mecze jeszcze nierozliczone (06.11.2026).
+        "home_current": home_now or None,
         "buckets": buckets,
         "totals": totals,
         "forecast": len(extra or []),
