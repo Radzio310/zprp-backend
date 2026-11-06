@@ -314,10 +314,96 @@ async def carry_snapshots(old_key: str, new_key: str) -> int:
         return 0
 
 
-async def drop_snapshots(match_number: str) -> int:
-    """Skasuj migawki meczu - wołane razem z usunięciem samego meczu.
+async def park_snapshots(match_number: str, until: datetime) -> int:
+    """Usunięcie meczu do kosza: migawki zostają i żyją tyle, co wpis w koszu.
 
-    Usunięty mecz nie ma prawa wracać w panelu historii.
+    Incydent EHF/1 (06.11.2026): usunięcie meczu z panelu kasowało 164 wersje
+    historii, a przywrócenie z kosza oddawało pusty zapis bez historii. Migawki
+    (i ślad zegara) kasuje dopiero wygaśnięcie kosza (`drop_snapshots`), a tu
+    tylko wydłużamy im termin do końca kosza, żeby 7-dniowe sprzątanie nie
+    zjadło ich wcześniej. Migawki bez terminu (materiał dowodowy) zostają bez zmian.
+    """
+    try:
+        from app.db import database, proel_match_snapshots as T
+
+        key = str(match_number or "").strip()
+        if not key:
+            return 0
+        return int(
+            await database.execute(
+                T.update()
+                .where(T.c.match_number == key)
+                .where(T.c.expires_at.is_not(None))
+                .where(T.c.expires_at < until)
+                .values(expires_at=until)
+            )
+            or 0
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("wydluzenie terminu migawek nieudane (%s)", match_number, exc_info=True)
+        return 0
+
+
+def _blob_is_empty(blob: Any) -> bool:
+    """Zapis bez wyniku i bez przebiegu - taki, jaki zostaje po odrzuconym meczu."""
+    if not isinstance(blob, dict):
+        return True
+    protocol = blob.get("protocol")
+    if isinstance(protocol, list) and protocol:
+        return False
+    return not (_int(blob.get("scoreHost")) or _int(blob.get("scoreGuest")))
+
+
+async def fuller_history(match_number: str, blob: Any) -> Optional[Dict[str, Any]]:
+    """Najnowsza wersja z wynikiem lub przebiegiem, gdy zapis w koszu jest pusty.
+
+    `None`, gdy zapis ma treść albo historia nie ma nic pełniejszego. Wynik
+    wskazuje wpis, który admin przywraca trasą migawek - kosz sam niczego nie
+    podmienia.
+    """
+    try:
+        if not _blob_is_empty(blob):
+            return None
+        from app.db import database, proel_match_snapshots as T
+
+        key = str(match_number or "").strip()
+        if not key:
+            return None
+        row = await database.fetch_one(
+            select(
+                T.c.id, T.c.created_at, T.c.status, T.c.score_host, T.c.score_guest,
+                T.c.protocol_len, T.c.doc_rev,
+            )
+            .where(T.c.match_number == key)
+            .where(
+                (func.coalesce(T.c.protocol_len, 0) > 0)
+                | (func.coalesce(T.c.score_host, 0) > 0)
+                | (func.coalesce(T.c.score_guest, 0) > 0)
+            )
+            .order_by(T.c.created_at.desc(), T.c.id.desc())
+            .limit(1)
+        )
+        if row is None:
+            return None
+        created = row["created_at"]
+        return {
+            "snapshot_id": row["id"],
+            "created_at": created.isoformat() if isinstance(created, datetime) else created,
+            "status": row["status"],
+            "score_host": row["score_host"],
+            "score_guest": row["score_guest"],
+            "protocol_len": row["protocol_len"],
+            "doc_rev": row["doc_rev"],
+        }
+    except Exception:  # noqa: BLE001
+        logger.warning("sprawdzenie pelniejszej historii nieudane (%s)", match_number, exc_info=True)
+        return None
+
+
+async def drop_snapshots(match_number: str) -> int:
+    """Skasuj migawki meczu - tylko przy wygaśnięciu kosza i trwałym usunięciu.
+
+    NIE wołać przy zwykłym usunięciu meczu (`park_snapshots`).
     """
     try:
         from app.db import database, proel_match_snapshots as T

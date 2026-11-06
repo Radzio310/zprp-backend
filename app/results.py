@@ -30,6 +30,8 @@ from fastapi import (
 from app.proel_admin_guard import proel_admin_guard
 from app.proel_auth import proel_actor
 from app.proel_journal import log_match_event, soft_actor
+from app.proel_match_key import is_shared_key
+from app.proel_training_key import is_training_key
 from app.protocol_shootout import (
     recorded_shot_count as _recorded_shot_count,
     shootout_row_slots as _shootout_row_slots,
@@ -6388,8 +6390,14 @@ async def generate_protocol_pdf(
         # MECZU odpowiada na prostsze pytanie administratora: kto i kiedy
         # wygenerował PDF dla tego spotkania. Oba wpisy powstają dopiero po
         # udanej konwersji i ostemplowaniu gotowego pliku.
+        # Dziennik MECZU leży pod kluczem wiersza (`M-…/EHF/1`, `T-…/SSL/1`), nie
+        # pod numerem z wydruku: wpis pod gołym numerem wpadał do dziennika
+        # innego meczu o tym samym numerze albo ginął.
+        _journal_key = str((data_json.get("matchConfig") or {}).get("proelKey") or "").strip()
+        if not (_journal_key and (is_shared_key(_journal_key) or is_training_key(_journal_key))):
+            _journal_key = match_number
         await log_match_event(
-            match_number=match_number,
+            match_number=_journal_key,
             zprp_match_id=zprp_match_id,
             event="protocol.pdf_generated",
             actor=actor,

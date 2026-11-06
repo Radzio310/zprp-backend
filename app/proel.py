@@ -115,7 +115,7 @@ from app.proel_lease import (
     now_utc as _now,
     same_judge_lease as _same_judge_lease,
 )
-from app.proel_snapshots import carry_snapshots, drop_snapshots, record_snapshot
+from app.proel_snapshots import carry_snapshots, park_snapshots, record_snapshot
 from app.proel_evidence import carry_evidence
 from app.proel_evidence_rules import DELETE_REFUSED_MESSAGE as EVIDENCE_DELETE_REFUSED
 from app.proel_status import (
@@ -216,10 +216,33 @@ class _MatchIdConflict(Exception):
     i konflikt nie zostawiłby po sobie żadnego śladu.
     """
 
-    def __init__(self, known: str, incoming: str) -> None:
+    def __init__(
+        self,
+        known: str,
+        incoming: str,
+        *,
+        layer: str = "zprp_id",
+        known_local_key: str = "",
+        incoming_local_key: str = "",
+    ) -> None:
         super().__init__("match id mismatch")
+        # `known`/`incoming` zawsze coś mówią: przy odcisku lokalnym to
+        # tożsamość `local:<odcisk>` (incydent EHF/1: puste pola w zdarzeniu
+        # nie mówiły, która warstwa guardu odrzuciła zapis).
         self.known = known
         self.incoming = incoming
+        self.layer = layer
+        self.known_local_key = known_local_key
+        self.incoming_local_key = incoming_local_key
+
+    def details(self) -> Dict[str, Any]:
+        return {
+            "known": self.known,
+            "incoming": self.incoming,
+            "layer": self.layer,
+            "known_local_key": self.known_local_key,
+            "incoming_local_key": self.incoming_local_key,
+        }
 
 
 class _DocStale(Exception):
@@ -1837,13 +1860,19 @@ async def update_proel_match(
             # ręcznie ani szkoleniowy nie ma - dla nich było więc puste
             # i przepuszczało wszystko. Wiersz stanu zna dodatkowo odcisk
             # (numer + obie drużyny), więc tutaj rozpoznajemy również je.
-            if _identity_verdict(
-                _match_identity(
-                    (state or {}).get("zprp_match_id"), (state or {}).get("local_key")
-                ),
-                _match_identity(incoming_id, _local_key_from_blob(req.data_json)),
-            ) == _IDENTITY_CONFLICT:
-                raise _MatchIdConflict(known_id, incoming_id)
+            known_identity = _match_identity(
+                (state or {}).get("zprp_match_id"), (state or {}).get("local_key")
+            )
+            incoming_local = _local_key_from_blob(req.data_json)
+            incoming_identity = _match_identity(incoming_id, incoming_local)
+            if _identity_verdict(known_identity, incoming_identity) == _IDENTITY_CONFLICT:
+                raise _MatchIdConflict(
+                    known_id or known_identity,
+                    incoming_id or incoming_identity,
+                    layer="local_key",
+                    known_local_key=str((state or {}).get("local_key") or ""),
+                    incoming_local_key=incoming_local,
+                )
 
             # ── Wersja treści: czy telefon widział to, co tu leży ─────────────
             #
@@ -2121,8 +2150,8 @@ async def update_proel_match(
             match_number=match_number,
             event="match.id_conflict",
             actor=actor,
-            zprp_match_id=conflict.incoming,
-            details={"known": conflict.known, "incoming": conflict.incoming},
+            zprp_match_id=_zprp_id_of(req.data_json),
+            details=conflict.details(),
             app_version=x_app_version,
             ip=_client_ip(request, x_forwarded_for),
         )
@@ -2137,6 +2166,7 @@ async def update_proel_match(
                 ),
                 "known": conflict.known,
                 "incoming": conflict.incoming,
+                "layer": conflict.layer,
             },
         ) from conflict
 
@@ -2336,6 +2366,7 @@ async def archive_and_delete_match(
         )
         state_json = _state_snapshot(state_row) if state_row is not None else None
 
+        trash_until = datetime.now(timezone.utc) + timedelta(days=365)
         await database.execute(
             proel_deleted_matches.insert().values(
                 match_number=match_number,
@@ -2349,7 +2380,7 @@ async def archive_and_delete_match(
                 deleted_by_name=actor.name,
                 deleted_by_install=actor.installation_id,
                 deleted_by_verified=bool(actor.verified),
-                expires_at=datetime.now(timezone.utc) + timedelta(days=365),
+                expires_at=trash_until,
             )
         )
 
@@ -2362,9 +2393,11 @@ async def archive_and_delete_match(
             .where(saved_matches.c.match_number == match_number)
         )
 
-    # Migawki znikają razem z meczem. Usunięty zapis nie ma prawa wracać
-    # w panelu historii - to samo dotyczy kosza, który czyści się po roku.
-    await drop_snapshots(match_number)
+    # Migawki, ślad zegara i paczki dowodowe NIE znikają z meczem: leżą tak
+    # długo, jak wpis w koszu, i wracają przy przywróceniu (incydent EHF/1
+    # 06.11.2026: usunięcie kasowało 164 wersje, a przywrócenie oddawało pusty
+    # zapis). Kasuje je dopiero wygaśnięcie kosza (`proel_archive._purge_expired`).
+    await park_snapshots(match_number, trash_until)
 
     # Po transakcji: wiersz meczu znika, wpis w dzienniku zostaje. To jedyny
     # ślad, po którym da się później powiedzieć, kto skasował zapis - archiwum

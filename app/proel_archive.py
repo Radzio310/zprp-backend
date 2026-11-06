@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 
 from app.db import (
     database,
@@ -42,6 +42,7 @@ from app.proel_doc_version import HISTORY_RETENTION_DAYS
 from app.proel_evidence import active_holds_select
 from app.proel_evidence_rules import DELETE_REFUSED_MESSAGE as EVIDENCE_DELETE_REFUSED
 from app.proel_journal import log_match_event
+from app.proel_snapshots import drop_snapshots, fuller_history
 from app.proel_promote_rules import (
     FAILED_MESSAGE as PROMOTE_FAILED_MESSAGE,
     PIN_INVALID_MESSAGE as PROMOTE_PIN_INVALID_MESSAGE,
@@ -146,14 +147,34 @@ async def _purge_expired() -> int:
     warto po niej posprzątać, a rok to termin, nie sekunda.
     """
     try:
-        return await database.execute(
-            delete(proel_deleted_matches).where(
-                proel_deleted_matches.c.expires_at.is_not(None),
-                proel_deleted_matches.c.expires_at < datetime.now(timezone.utc),
-                # Materiał dowodowy (`app/proel_evidence.py`) nie wygasa nigdy.
-                proel_deleted_matches.c.match_number.not_in(active_holds_select()),
-            )
+        expired = and_(
+            proel_deleted_matches.c.expires_at.is_not(None),
+            proel_deleted_matches.c.expires_at < datetime.now(timezone.utc),
+            # Materiał dowodowy (`app/proel_evidence.py`) nie wygasa nigdy.
+            proel_deleted_matches.c.match_number.not_in(active_holds_select()),
         )
+        keys = sorted(
+            {
+                str(r["match_number"])
+                for r in await database.fetch_all(
+                    select(proel_deleted_matches.c.match_number).where(expired)
+                )
+            }
+        )
+        purged = await database.execute(delete(proel_deleted_matches).where(expired))
+        # Migawki i ślad zegara żyły tyle, co wpis w koszu (`park_snapshots`):
+        # z wygaśnięciem kosza znikają, chyba że klucz ma już żywy mecz albo
+        # inny wpis w koszu.
+        for key in keys:
+            alive = await database.fetch_one(
+                select(saved_matches.c.match_number).where(saved_matches.c.match_number == key)
+            )
+            other = await database.fetch_one(
+                select(proel_deleted_matches.c.id).where(proel_deleted_matches.c.match_number == key).limit(1)
+            )
+            if alive is None and other is None:
+                await drop_snapshots(key)
+        return purged
     except Exception:
         # Sprzątanie nie ma prawa uniemożliwić odczytu archiwum.
         logger.warning("ProEl archiwum: czyszczenie przeterminowanych nie powiodło się", exc_info=True)
@@ -319,6 +340,9 @@ async def get_deleted(
     # napisem (asyncpg bez kodeka jsonb), a panel oczekuje obiektu.
     out["data_json"] = _json_value(row["data_json"])
     out["state_json"] = _json_value(row["state_json"])
+    # Zapis w koszu pusty, a historia ma pełniejszą wersję: pokazujemy ją, nie
+    # podmieniamy (przywraca ją admin trasą migawek).
+    out["fuller_snapshot"] = await fuller_history(row["match_number"], out["data_json"])
     return out
 
 
@@ -434,7 +458,12 @@ async def restore_deleted(
         details={"archive_id": entry_id, "status": restored_status},
     )
 
-    return {"success": True, "match_number": match_number}
+    return {
+        "success": True,
+        "match_number": match_number,
+        # Pusty zapis z kosza + pełniejsza historia: admin ma o tym wiedzieć od razu.
+        "fuller_snapshot": await fuller_history(match_number, _json_value(row["data_json"])),
+    }
 
 
 # ─────────────────────────── grupowe usuwanie ───────────────────────────

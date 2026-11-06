@@ -21,6 +21,7 @@ from app.proel_exam_snapshot_rules import (
     valid_date_key,
 )
 from app.protocol_category import exam_requirement_for_code
+from app.proel_training_key import match_number_from_key
 from app.proel_match_key import (
     IDENTITY_CONFLICT,
     identity_verdict,
@@ -108,7 +109,7 @@ def _response(
         # Starsze buildy aplikacji nie znają `exam_confirmations` - dostają
         # karty już po scaleniu. Nowe scalają drugi raz (bez skutku) także
         # lokalne źródła, gdy migawki na serwerze nie ma.
-        requirement = exam_requirement_for_code(row.get("match_number"))
+        requirement = exam_requirement_for_code(match_number_from_key(row.get("match_number")))
         host = merge_exam_confirmations(host, "host", confirmations, requirement)
         guest = merge_exam_confirmations(guest, "guest", confirmations, requirement)
     return {

@@ -75,17 +75,20 @@ def test_migawka_niesie_tresc_PO_reprojekcji_overlaya():
 # ── mecz i jego historia trzymaja sie razem ──────────────────────
 
 
-def test_usuniecie_meczu_kasuje_migawki():
-    """Usuniety zapis nie ma prawa wracac w panelu historii.
+def test_usuniecie_meczu_zostawia_migawki_w_koszu():
+    """Usuniecie meczu NIE kasuje historii (incydent EHF/1, 06.11.2026).
 
-    Kasowanie siedzi w `archive_and_delete_match` - trasa admina jest tylko
-    jego opakowaniem, a ta funkcja robi cala robote (archiwum + wiersze).
+    Migawki leza tak dlugo jak wpis w koszu i wracaja przy przywroceniu; kasuje
+    je dopiero wygasniecie kosza (`proel_archive._purge_expired`).
     """
     body = function_source("app/proel.py", "archive_and_delete_match")
-    assert "drop_snapshots" in body
-    # Po skasowaniu wiersza meczu, nie przed - inaczej migawka mogla by
-    # zniknac przy transakcji, ktora sie nie powiodla.
-    assert body.index("delete(saved_matches)") < body.index("drop_snapshots")
+    assert "drop_snapshots" not in body
+    assert "park_snapshots" in body
+    # Po skasowaniu wiersza meczu, nie przed - inaczej termin migawek zmienilby
+    # sie przy transakcji, ktora sie nie powiodla.
+    assert body.index("delete(saved_matches)") < body.index("park_snapshots")
+    purge = function_source("app/proel_archive.py", "_purge_expired")
+    assert "drop_snapshots" in purge
 
 
 def test_awans_szkoleniowego_zabiera_historie_ze_soba():

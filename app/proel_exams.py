@@ -66,6 +66,7 @@ from app.proel_fields import (
     roster_marks,
 )
 from app.protocol_category import exam_requirement_for_code
+from app.proel_training_key import match_number_from_key
 from app.proel_journal import log_match_event
 from app.proel_match_key import local_key_from_blob, zprp_id_of
 
@@ -374,7 +375,9 @@ async def promote_manual_exams(match_number: str, *, force: bool = False) -> Dic
     promotions = promotions_for(
         candidates,
         roster_marks(payload),
-        exam_requirement_for_code(number),
+        # Klucz wiersza (`T-…/SSL/1`, `M-…/EHF/1`) niesie przedrostek; rozgrywki
+        # rozpoznaje się po samym numerze.
+        exam_requirement_for_code(match_number_from_key(number)),
     )
     if not promotions:
         return {"promoted": []}
