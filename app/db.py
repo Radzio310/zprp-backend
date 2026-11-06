@@ -934,6 +934,25 @@ province_settlement_matches = Table(
 )
 
 
+# Historia miejsca zamieszkania sędziego (06.11.2026, `settlement_home_rules`):
+# „do dnia X włącznie mieszkał w Y". Wpisuje okręg w panelu albo z wgranej listy
+# przejazdów. Mecze do X liczą dojazd z Y, późniejsze z miasta z ZPRP.
+province_settlement_home_history = Table(
+    "province_settlement_home_history",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("judge_id", String, nullable=False),
+    Column("city", String, nullable=False),
+    Column("valid_until", Date, nullable=False),
+    Column("source", String, nullable=False, server_default=text("'manual'")),
+    Column("source_ref", String, nullable=True),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+    UniqueConstraint("province", "judge_id", "valid_until", name="uq_settlement_home_history_day"),
+)
+
+
 # 18.1e) Przebiegi odświeżania - żeby było widać, kiedy dane ostatnio zeszły
 province_settlement_runs = Table(
     "province_settlement_runs",

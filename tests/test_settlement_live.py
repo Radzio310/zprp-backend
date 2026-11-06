@@ -79,6 +79,9 @@ def world(monkeypatch):
     table("province_judges", [("province", String, True), ("judge_id", String, True), ("full_name", String, False)])
     judges = table("province_settlement_judges", [("province", String, True), ("judge_id", String, True),
         ("full_name", String, False), ("home_city", String, False)])
+    home_history = Table("province_settlement_home_history", meta,
+        Column("id", __import__("sqlalchemy").Integer, primary_key=True), Column("province", String),
+        Column("judge_id", String), Column("city", String), Column("valid_until", __import__("sqlalchemy").Date))
     modules = table("province_modules", [("province", String, True), ("module", String, True), ("enabled", Boolean, False)])
     table("okreg_distances", [("province", String, True), ("content", JSON, False)])
     settlements = table("province_settlement_matches", [
@@ -125,7 +128,7 @@ def world(monkeypatch):
         conn.execute(judges.insert().values(province="SLASKIE", judge_id=number, full_name=f"Judge {number}", home_city="Katowice"))
     conn.commit()
     yield SimpleNamespace(live=live, db=db, matches=matches, settlements=settlements, source=source,
-                          judges=judges)
+                          judges=judges, home_history=home_history)
     conn.close()
     engine.dispose()
 
@@ -230,3 +233,67 @@ async def test_settled_match_keeps_home_city_after_judge_moves(world, monkeypatc
     assert (rows["1", "d:42"]["home_city"], rows["1", "d:42"]["distance_km"]) == ("Katowice", 0)
     assert rows["1", "d:42"]["home_locked_doc"] == "7/S/2026"
     assert (rows["1", "d:43"]["home_city"], rows["1", "d:43"]["distance_km"]) == ("Gliwice", 27.0)
+
+
+@pytest.mark.asyncio
+async def test_declared_home_history_beats_settlement_lock(world, monkeypatch):
+    """Wpis okręgu „do dnia X mieszkał w Y" wygrywa z blokadą i z miastem z ZPRP."""
+    from datetime import date
+
+    from app import national_lookup_rules as NL
+    from app import settlement_home_lock as HL
+
+    w = world
+    real = NL.pick_distance
+    monkeypatch.setattr(NL, "pick_distance", lambda central, *, home, city, **kw:
+        (31.0, "zprp-table") if (home, city) == ("Mikołów", "Katowice") else real(central, home=home, city=city, **kw))
+    await put_match(w, "42", state("1"))
+    await w.live._sync_match("SLASKIE", "42", enrich=False)
+    await HL.lock_homes("SLASKIE", {"1": ["d:42"]}, "7/S/2026", NOW)
+    await move_home(w, "1", "Orzesze")
+    await w.db.execute(w.home_history.insert().values(
+        province="SLASKIE", judge_id="1", city="Mikołów", valid_until=date(2026, 11, 1)))
+    await w.live._sync_match("SLASKIE", "42", enrich=False)
+    row = (await w.db.fetch_all(select(w.settlements).where(w.settlements.c.judge_id == "1")))[0]
+    assert (row["home_city"], row["distance_km"], row["home_locked_doc"]) == ("Mikołów", 31.0, "7/S/2026")
+
+
+@pytest.mark.asyncio
+async def test_recompute_judge_applies_history_and_keeps_other_settled_rows(world, monkeypatch):
+    """Zapis w panelu przelicza mecze od razu: wpis > blokada > miasto z ZPRP."""
+    from datetime import date
+
+    from app import national_lookup_rules as NL
+    from app import settlement_home_history as HH
+    from app import settlement_home_lock as HL
+
+    w = world
+    stub = ModuleType("app.national_distances")
+    stub.load_national_pairs = AsyncMock(return_value={})
+    monkeypatch.setitem(sys.modules, "app.national_distances", stub)
+    km = {("Mikołów", "Katowice"): 31.0, ("Orzesze", "Katowice"): 40.0}
+    real = NL.pick_distance
+    monkeypatch.setattr(NL, "pick_distance", lambda central, *, home, city, **kw:
+        (km[home, city], "zprp-table") if (home, city) in km else real(central, home=home, city=city, **kw))
+    await put_match(w, "42", state("1"))
+    await put_match(w, "43", state("1"))
+    await put_match(w, "44", state("1"))
+    for match_id in ("42", "43", "44"):
+        await w.live._sync_match("SLASKIE", match_id, enrich=False)
+    later = NOW + timedelta(days=5)
+    await w.db.execute(update(w.settlements).where(w.settlements.c.match_key == "d:44").values(match_at=later))
+    await w.db.execute(update(w.settlements).where(w.settlements.c.match_key == "d:43").values(match_at=later))
+    await HL.lock_homes("SLASKIE", {"1": ["d:42", "d:43"]}, "7/S/2026", NOW)
+    await move_home(w, "1", "Orzesze")
+    await w.db.execute(w.home_history.insert().values(
+        province="SLASKIE", judge_id="1", city="Mikołów", valid_until=date(2026, 11, 1)))
+
+    result = await HH.recompute_judge("SLASKIE", "1")
+    rows = {r["match_key"]: r for r in await w.db.fetch_all(select(w.settlements).where(w.settlements.c.judge_id == "1"))}
+    # 42 (31.10) - objęty wpisem: Mikołów, choć rozliczony.
+    assert (rows["d:42"]["home_city"], rows["d:42"]["distance_km"]) == ("Mikołów", 31.0)
+    # 43 (05.11) - rozliczony, poza wpisem: zostaje, jak był.
+    assert (rows["d:43"]["home_city"], rows["d:43"]["distance_km"]) == ("Katowice", 0)
+    # 44 (05.11) - nierozliczony, poza wpisem: miasto z ZPRP.
+    assert (rows["d:44"]["home_city"], rows["d:44"]["distance_km"]) == ("Orzesze", 40.0)
+    assert result == {"judge_id": "1", "matches": 2, "missing_km": 0}

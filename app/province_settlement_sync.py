@@ -791,6 +791,7 @@ async def _store(
     """
     now = _now()
     seen: set[tuple[str, str]] = set()
+    declared: set[tuple[str, str]] = set()
     batch: dict[tuple[str, str], dict] = {}
 
     for row in rows:
@@ -807,7 +808,7 @@ async def _store(
             "origin": row.get("origin"),
             "city": row.get("city"),
             "hall": row.get("hall"),
-            "home_city": _s(judge.get("city")),
+            "home_city": _s(row["home_city"]) if "home_city" in row else _s(judge.get("city")),
             "teams": row.get("teams"),
             "round_text": row.get("round_text"),
             "series_text": row.get("series_text"),
@@ -822,6 +823,8 @@ async def _store(
         # sam wiersz); pozniejszy wygrywa - tak samo jak przy zapisie po jednym.
         batch[(row["judge_id"], row["match_key"])] = values
         seen.add((row["judge_id"], row["match_key"]))
+        if row.get("home_declared"):
+            declared.add((row["judge_id"], row["match_key"]))
 
     # Obsady, ktorych ten przebieg NIE widzial, gasna. Nie kasujemy ich: mecz
     # zdjety i przywrocony ma wrocic z ta sama historia, a nie jako nowy.
@@ -829,10 +832,10 @@ async def _store(
 
     async with database.transaction():
         await lock_province(province)
-        return await _store_locked(province, batch, seen, now, scope, current, started_at)
+        return await _store_locked(province, batch, seen, now, scope, current, started_at, declared)
 
 
-async def _store_locked(province, batch, seen, now, scope, current, started_at):
+async def _store_locked(province, batch, seen, now, scope, current, started_at, declared=frozenset()):
     def physical_key(key):
         prefix, _, match_id = str(key).partition(":")
         return match_id if prefix in {"d", "o"} else str(key)
@@ -876,7 +879,9 @@ async def _store_locked(province, batch, seen, now, scope, current, started_at):
     # przeprowadzka sedziego zmienia tylko to, co jeszcze nierozliczone.
     from app.settlement_home_lock import apply_locks, locked_homes
 
-    kept = apply_locks(batch, await locked_homes(province))
+    # Wpis okregu o miejscu zamieszkania jest silniejszy niz blokada (jawna korekta).
+    locks = {key: value for key, value in (await locked_homes(province)).items() if key not in declared}
+    kept = apply_locks(batch, locks)
     if kept:
         logger.info("[settlement] %s: %d rozliczonych obsad zostaje przy dawnym dojezdzie", province, kept)
 
@@ -1415,6 +1420,18 @@ async def refresh_province(
                 for judge_id, city in (await judge_cities(no_city)).items():
                     judges[judge_id]["city"] = city
 
+            # --- miasto zamieszkania z dnia meczu ---
+            # Wpis okregu „do dnia X mieszkal w Y" (06.11.2026, `settlement_home_rules`)
+            # - mecze do X licza dojazd z Y, reszta z miasta z ZPRP.
+            from app.settlement_home_history import load as load_home_history
+            from app.settlement_home_rules import home_for, local_day
+
+            home_history = await load_home_history(province)
+            for row in rows:
+                declared = home_for(home_history.get(row["judge_id"]) or [], local_day(row.get("match_at")))
+                row["home_city"] = declared or _s((judges.get(row["judge_id"]) or {}).get("city"))
+                row["home_declared"] = bool(declared)
+
             # --- odleglosci ---
             await stage("km")
             distance_row = await database.fetch_one(
@@ -1440,7 +1457,7 @@ async def refresh_province(
             hits: dict[int, tuple[Optional[float], str]] = {}
             google_rows: list[tuple[int, str, str]] = []
             for position, row in enumerate(rows):
-                home = _s((judges.get(row["judge_id"]) or {}).get("city"))
+                home = _s(row.get("home_city"))
                 city = _s(row.get("city"))
                 if not (home and city):
                     continue

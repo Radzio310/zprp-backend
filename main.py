@@ -122,6 +122,7 @@ from app.club_report import router as club_report_router
 from app.province_tournament_hosts import router as province_tournament_hosts_router
 from app.province_invoices import router as province_invoices_router
 from app.province_manual_charges import router as province_manual_charges_router
+from app.province_settlement_homes import router as province_settlement_homes_router
 from app.province_alerts import router as province_alerts_router, start_alert_scheduler, stop_alert_scheduler
 from app.district_alerts import (
     router as district_alerts_router,
@@ -487,6 +488,7 @@ app.include_router(club_report_router)
 app.include_router(province_invoices_router)
 # Ręczne mecze z rachunkiem (np. SPARING) z karty klubu: /province/manual-charges.
 app.include_router(province_manual_charges_router)
+app.include_router(province_settlement_homes_router)
 app.include_router(province_alerts_router)
 app.include_router(district_alerts_router)
 app.include_router(province_assignments_router)

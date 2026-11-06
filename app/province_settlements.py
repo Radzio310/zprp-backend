@@ -2058,6 +2058,10 @@ async def _judge_season(
     from app import settlement_home_lock as HL
 
     home_now = await HL.current_home(key, judge_id)
+    from app.settlement_home_history import load as load_home_history
+    from app.settlement_home_rules import timeline as home_timeline
+
+    home_entries = (await load_home_history(key, judge_id)).get(str(judge_id).strip()) or []
 
     # Okresy liczą się równolegle - czekanie na bazę (podziały, podpowiedzi)
     # nakłada się, zamiast iść okres po okresie (08.10.2026: ekran ma się
@@ -2169,6 +2173,9 @@ async def _judge_season(
         # Miasto zamieszkania z dzisiejszej listy okręgu - z niego liczą się
         # mecze jeszcze nierozliczone (06.11.2026).
         "home_current": home_now or None,
+        # Zmiany miejsca zamieszkania zapisane przez okręg: [{city, from, to}],
+        # ostatni odcinek to miasto dzisiejsze. Pusto, gdy okręg nic nie zapisał.
+        "home_history": home_timeline(home_entries, home_now) if home_entries else [],
         "buckets": buckets,
         "totals": totals,
         "forecast": len(extra or []),

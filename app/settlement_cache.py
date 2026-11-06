@@ -65,6 +65,7 @@ WATCHED_TABLES = frozenset(
     {
         "province_settlement_matches",
         "province_settlement_judges",
+        "province_settlement_home_history",
         "province_judges",
         "central_rates",
         "okreg_rates",
@@ -106,6 +107,7 @@ BASE_TABLES = frozenset(
     {
         "province_settlement_matches",
         "province_settlement_judges",
+        "province_settlement_home_history",
         "province_judges",
         "central_rates",
         "okreg_rates",

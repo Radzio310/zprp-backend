@@ -99,8 +99,17 @@ async def _sync_match(province, match_id, *, previous_state=None, enrich=True):
         # Only build the gazetteer when there is actually a route to resolve.
         locate = None
         route_rows = []
+        from app.settlement_home_history import load as load_home_history
+        from app.settlement_home_rules import home_for, local_day
+
+        home_history = await load_home_history(province)
+        declared: set[tuple[str, str]] = set()
         for item in rows:
-            home = S._s(judges[item["judge_id"]].get("city"))
+            # Okręg zapisał „do dnia X mieszkał w Y" (06.11.2026) - wpis wygrywa.
+            home = home_for(home_history.get(item["judge_id"]) or [], local_day(item.get("match_at")))
+            if home:
+                declared.add((str(item["judge_id"]), str(item["match_key"])))
+            home = home or S._s(judges[item["judge_id"]].get("city"))
             city = S._s(item.get("city"))
             item["home_city"] = home
             central = R.is_central_level_competition(item.get("match_code"))
@@ -139,7 +148,8 @@ async def _sync_match(province, match_id, *, previous_state=None, enrich=True):
         from app.settlement_home_lock import apply_locks, locked_homes
 
         by_key = {(str(v["judge_id"]), str(v["match_key"])): v for v in values}
-        apply_locks(by_key, await locked_homes(province, by_key.keys()))
+        locks = await locked_homes(province, by_key.keys())
+        apply_locks(by_key, {k: v for k, v in locks.items() if k not in declared})
         await S._upsert_matches(values)
         for item in rows:
             # Moving between historical outside/district sources must not leave
