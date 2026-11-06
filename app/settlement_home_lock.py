@@ -23,8 +23,11 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
+
+_PL = ZoneInfo("Europe/Warsaw")
 
 #: Pola wiersza obsady, które blokada zamraża.
 LOCKED_FIELDS = ("home_city", "distance_km", "distance_source")
@@ -126,6 +129,27 @@ def home_story(rows: Iterable[Mapping[str, Any]], current: Any) -> dict | None:
     }
 
 
+def register_window(
+    date_from: date | None,
+    date_to: date | None,
+    created_at: datetime | None,
+    include_future: bool,
+) -> tuple[datetime, datetime] | None:
+    """
+    Zakres meczów dokumentu wydanego PRZED blokadą (zamrożenie wstecz z rejestru):
+    dni okresu po czasie polskim, a bez „przyszłych" - tylko mecze sprzed wydania
+    (późniejszych na dokumencie nie było).
+    """
+    if date_from is None or date_to is None:
+        return None
+    start = datetime.combine(date_from, time.min, _PL)
+    end = datetime.combine(date_to + timedelta(days=1), time.min, _PL)
+    if not include_future and created_at is not None:
+        stamp = created_at if created_at.tzinfo else created_at.replace(tzinfo=_PL)
+        end = min(end, stamp)
+    return (start, end) if end > start else None
+
+
 # ---------------------------------------------------------------------------
 # Baza
 # ---------------------------------------------------------------------------
@@ -207,3 +231,56 @@ async def current_home(province: str, judge_id: str) -> str:
         select(J.c.home_city).where(and_(J.c.province == province, J.c.judge_id == _s(judge_id)))
     )
     return _s(row["home_city"]) if row else ""
+
+
+async def backfill_from_register(province: str) -> int:
+    """
+    Raz na okręg: zamrożenie meczów z dokumentów wydanych, zanim istniała blokada.
+
+    Rejestr pamięta sędziów i okres każdego dokumentu (nie mecze), więc bierzemy
+    obsady sędziego z okresu dokumentu - najstarszy dokument pierwszy (pierwszy
+    wygrywa, tak jak przy wydaniu). Zamraża stan, który jest teraz w bazie: mecz
+    już przeliczony na nowe miasto zostaje z nowym (tego nie da się odtworzyć),
+    ale od tej chwili nic go już nie zmieni.
+    """
+    import json
+
+    from sqlalchemy import and_, select, update
+
+    from app.db import database
+    from app.db import province_settlement_matches as M
+    from app.db import province_settlement_register as T
+
+    docs = await database.fetch_all(
+        select(T.c.number, T.c.date_from, T.c.date_to, T.c.include_future, T.c.items_json, T.c.created_at)
+        .where(T.c.province == province)
+        .order_by(T.c.created_at.asc(), T.c.id.asc())
+    )
+    locked = 0
+    for doc in docs:
+        window = register_window(doc["date_from"], doc["date_to"], doc["created_at"], bool(doc["include_future"]))
+        if window is None:
+            continue
+        try:
+            items = json.loads(doc["items_json"] or "[]")
+        except (TypeError, ValueError):
+            continue
+        judges = sorted({_s(item.get("judge_id")) for item in items if isinstance(item, dict)} - {""})
+        if not judges:
+            continue
+        stamp = doc["created_at"] or datetime.now(_PL)
+        await database.execute(
+            update(M)
+            .where(
+                and_(
+                    M.c.province == province,
+                    M.c.judge_id.in_(judges),
+                    M.c.match_at >= window[0],
+                    M.c.match_at < window[1],
+                    M.c.home_locked_at.is_(None),
+                )
+            )
+            .values(home_locked_doc=_s(doc["number"]), home_locked_at=stamp)
+        )
+        locked += len(judges)
+    return locked

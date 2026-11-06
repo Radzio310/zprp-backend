@@ -1298,6 +1298,15 @@ async def refresh_province(
         # `restore_foreign_once`.
         await restore_foreign_once(province, own=own)
         await fix_history(province, own=own)
+        # Dokumenty wydane, zanim istniala blokada miasta zamieszkania (06.11.2026),
+        # zamrazaja swoje mecze raz - zanim ten przebieg cokolwiek przeliczy.
+        if await _claim_once(f"settlement-home-lock-backfill-{province}"):
+            from app.settlement_home_lock import backfill_from_register
+
+            try:
+                await backfill_from_register(province)
+            except Exception:
+                logger.warning("[settlement] %s: zamrozenie wstecz nieudane", province, exc_info=True)
 
         async with AsyncClient(
             base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0
