@@ -786,3 +786,37 @@ Każde nagranie ma dwa nowe pola (dla nie-YouTube zawsze `mirror: null`, `can_co
 - Migracje przy starcie (idempotentne): `mentor_match_videos.mirror_upload_id`, `mentor_uploads.origin`, `mentor_uploads.source_url`.
 - Zależność: `yt-dlp[default,deno]` w `requirements.txt` bez górnej granicy wersji (YouTube zmienia się co kilka tygodni; nowy build = świeże yt-dlp). `deno` (paczka PyPI) to silnik JS, którego yt-dlp potrzebuje do podpisów YouTube.
 - **Nie sprawdzono na prawdziwym YouTube**: środowisko, w którym powstał kod, nie miało dostępu do YouTube. Przebieg (kolejka, proxy po blokadzie, błąd i ponowienie, usunięcie, MP4 klipu z kopii, kosz) przetestowano na atrapach yt-dlp, ffmpeg i R2. Po wdrożeniu sprawdzić jedną kopię na produkcji; jeśli kończy się `BLOCKED`, ustawić `MENTOR_YT_PROXY`.
+
+### 14.7 Automatyczna kopia transmisji i „Odśwież kopię” (07.11.2026)
+
+Decyzja właściciela (07.11.2026, wersja ostateczna): link do transmisji **na żywo albo zapowiedzi** dodany do meczu uzbraja automatyczną kopię na serwer. Kod: `app/mentor_live_copy.py` (uzbrajanie, przegląd co 60 s, sygnał z ProEla), `app/mentor_live_copy_rules.py` (reguły czyste), testy `tests/test_mentor_live_copy.py`. Kopię robi ten sam worker co przycisk (14.4).
+
+**Harmonogram**
+- **Koniec meczu** = pierwszy z sygnałów: YouTube mówi, że transmisja się skończyła (`actualEndTime` / strona filmu z `endTimestamp`), albo ProEl zgłasza przejście statusu meczu na `finished`/`approved`.
+- Pierwsza próba **5 minut po końcu meczu**, potem w oknie **30 minut** próba co 5 minut (+5, +10, +15, +20, +25, +30). Każda udana kopia **nadpisuje** poprzednią: ten sam wiersz `mentor_uploads`, te same klucze R2 (`play.mp4`, `poster.jpg`), to samo nagranie-kopia (odświeżona długość; nazwa tylko wtedy, gdy para jej nie zmieniła). Wygrywa najnowsza wersja zapisu.
+- Nieudana próba w oknie = spokojne czekanie na następną „piątkę”, nie czerwony błąd. Nieudane nadpisanie **nigdy** nie psuje dobrej kopii (gra dalej).
+- Jeśli w oknie **nie udała się żadna** kopia: dokładnie **jedna próba 60 minut po końcu meczu** i koniec (`done` albo `gave_up` z polskim powodem). Jeśli choć jedna się udała: koniec po próbie z +30 min (bez próby po godzinie).
+- Błąd, którego ponawianie nie naprawi (`TOO_LONG`, `TOO_BIG`, `AGE`, `MEMBERS`, `NO_TOOL`...), kończy od razu: `done` przy istniejącej kopii, inaczej `gave_up`.
+- Długa próba, która skończy się po kolejnej „piątce”, przechodzi do najbliższej przyszłej (bez nadrabiania). Transmisja, która nie skończyła się przez 3 dni, kończy automat (`gave_up`).
+- Uzbrojenie: `mentor_evaluations.insert_link_video` (każde dodanie linku: panel, galeria aplikacji, Trybuna, automat nagrań z sekcji 9) pyta YouTube o stan (API `videos.list`, bez klucza strona filmu) i uzbraja, gdy `live`/`upcoming`. Tylko film YouTube, przy włączonej kopii (14.5) i znanej parze panelu. Zwykły film i zakończona transmisja - jak dotąd, kopia na przycisk.
+- **Godzina startu** (`sync.stream_start_ms`): link dodany przed startem transmisji dostaje ją sam, gdy YouTube poda `actualStartTime` (przegląd co minutę). Z niej aplikacja liczy synchronizację gwizdka (`kickoff_wall_ms` z ProEla minus `stream_start_ms`). Istniejącej wartości automat nie nadpisuje.
+- ProEl -> nagrania: `mentor_match_videos.match_id` = `zprp_match_id` wiersza, ręczne podpięcia `mentor_proel_links.proel_key` = numer meczu (także klucze szkoleniowe z `promoted_to` na ten numer) oraz mecze wspólne `my:<id>` dla klucza `M-<tuleja>/<numer>`. Mecze Trybuny (`tr_...`) dostają koniec meczu tylko z YouTube.
+- Restart serwera: harmonogram jest w bazie; przegląd dogania próbę przerwaną restartem (`_reconcile`).
+- Wyłączniki: `MENTOR_YT_COPY=0` (całe kopie), `MENTOR_LIVE_COPY=0` (sam automat). W testach (`ENVIRONMENT=test`) automat jest domyślnie wyłączony.
+- Ręczne działania: „Zrób kopię” między próbami („Spróbuj teraz”) liczy się jako próba automatu; anulowanie kopii (`DELETE .../copy`) albo wyrzucenie nagrania-kopii do kosza wyłącza automat (`auto_copy: null`). Film YouTube w koszu - automat milknie.
+
+**Kontrakt API (dodatki - stare aplikacje ich nie czytają)**
+- `Video.auto_copy: null | {state, next_at, attempt, until, last_try_at, reason, ended_at, live_ended_at, proel_finished_at}` - na każdym filmie YouTube (także gdy kopii jeszcze nie ma, `mirror: null`). null = film nie jest uzbrojony.
+  - `state`: `waiting_end` (transmisja trwa, czekamy na koniec meczu) · `scheduled` (następna próba w oknie o `next_at`; przy gotowej kopii to nadpisanie, `reason` = czemu poprzednia nie wyszła) · `copying` (próba trwa, kopii jeszcze nie ma) · `refreshing` (nadpisywanie, dobra kopia gra) · `last_try` (w oknie nic nie wyszło: ostatnia próba o `next_at`; `next_at: null` = właśnie trwa) · `done` (koniec, kopia jest) · `gave_up` (koniec bez kopii, `reason` po polsku). Nieznany stan klient traktuje spokojnie (jak `scheduled` bez godziny).
+  - `next_at` (ISO UTC) tylko dla `scheduled`/`last_try`; `until` = koniec meczu + 30 min (koniec okna); `last_try_at` = koniec meczu + 60 min; `ended_at` = koniec meczu (null przy `waiting_end`); `attempt` = liczba prób.
+- `GET .../videos/{v}/copy` -> `{video_id, mirror, auto_copy}`.
+- `Video.mirror` (zgodność wstecz): do pierwszej próby automatu `mirror` zostaje `null`. Kopia czekająca na następną próbę (bez dobrej wersji) ma w bazie `status = 'waiting'`, a w API **`status: "working"`, `phase: "queued"`** i nowe `waiting: true` - stare aplikacje pokazują „w kolejce” zamiast czerwonego błędu (każdy `status` inny niż working/ready traktują jak błąd). Czerwony `failed` dostaje dopiero `gave_up` (`error` = `auto_copy.reason`). Przy gotowej kopii `mirror.status` zostaje `ready` przez całe okno (nadpisania nie zmieniają kopii widzianej przez stare aplikacje).
+- Nowe pola `mirror`: `waiting: bool`, `auto` (= `Video.auto_copy`), `refresh: null | {status: "working"|"failed", phase, progress, speed_bps, eta_s, error, requested_at}` - nadpisanie gotowej kopii w toku albo nieudane **ręczne** odświeżenie (dobra kopia gra dalej; nieudane nadpisanie automatu nie zostawia tu błędu).
+- **„Odśwież kopię”**: `POST .../videos/{v}/copy?refresh=1` (albo body `{"refresh": true}`) na gotowej kopii pobiera film od nowa i nadpisuje kopię (ten sam wiersz, klucze R2 i nagranie-kopia). Idempotentne w trakcie (drugie wywołanie nic nie dubluje); kopia w koszu najpierw wraca z kosza; po „Usuń na zawsze” powstaje nowa kopia jak dotąd. Bez `refresh` gotowa kopia wraca bez zmian (jak dotąd).
+- Zdarzenia `rev` (zakres `videos`): dodatkowo `copy_auto` (zmiana stanu automatu), `copy_refresh_started`, `copy_refreshed`, `copy_refresh_failed`.
+
+**Dane i migracje (idempotentne `ADD COLUMN IF NOT EXISTS`, sprawdzone na PostgreSQL 16)**
+- `mentor_match_videos`: `auto_copy_state`, `auto_next_at`, `auto_attempts`, `auto_end_at`, `auto_reason`, `auto_armed_at`, `live_ended_at`, `proel_finished_at`.
+- `mentor_uploads`: `refresh_at` (zamówione nadpisanie gotowej kopii; worker bierze wiersze `downloading` oraz `ready` z `refresh_at`). Nowy status wiersza kopii: `waiting`.
+- Koszt YouTube API: przy uzbrojonych filmach jedno `videos.list` (1 jednostka na 50 filmów) co 2 minuty; bez klucza strona filmu najwyżej co 5 minut na film.
+- **Nie sprawdzono na prawdziwym YouTube** (jak 14.6): przebieg sprawdzony na atrapach yt-dlp, ffmpeg, R2 i stanu transmisji.

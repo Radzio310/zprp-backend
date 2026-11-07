@@ -189,6 +189,7 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
     from app.mentor_evaluation_request_rules import video_provider, youtube_thumbnail
     from app import mentor_bastion_rules as bastion
     from app import mentor_veo_rules as veo
+    from app.mentor_live_copy_rules import auto_shape
     from app.mentor_video_rules import clean_sync
 
     kind = row.get("kind") or "link"
@@ -212,6 +213,9 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
         "auto_added": _auto_added(row.get("auto_added_json")),
         #: Kopia filmu YouTube na serwerze (02.11.2026) - `app/mentor_youtube_copy.py`; null = brak kopii.
         "mirror": None, "can_copy": False,
+        #: Automatyczna kopia transmisji (07.11.2026, `app/mentor_live_copy_rules.py`): {state, next_at, attempt, until,
+        #: reason, live_ended_at, proel_finished_at}; null = film nie jest uzbrojony. Jest także wtedy, gdy kopii nie ma.
+        "auto_copy": None,
         #: 03.11.2026: nagranie jest gotową kopią filmu YouTube o tym id (osobne nagranie, `kind = 'upload'`); null = nie.
         "copy_of": row.get("copy_of"),
     }
@@ -235,7 +239,8 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
     if provider == "youtube" and kind != "upload":
         from app import mentor_youtube_copy as Y
 
-        out["mirror"] = Y.mirror_of(mirror) if row.get("mirror_upload_id") else None
+        out["mirror"] = Y.mirror_of(mirror, row) if row.get("mirror_upload_id") else None
+        out["auto_copy"] = auto_shape(row)
         out["can_copy"] = Y.can_copy(row, provider) and (ctx is None or C.may(ctx, "video"))
     if ctx is not None:
         out["can_edit"] = C.may(ctx, "edit", owner=R.s(row.get("added_by")) == ctx["actor"].judge_id)

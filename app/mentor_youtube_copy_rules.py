@@ -210,22 +210,45 @@ def overall(phase: str, fraction: Optional[float]) -> float:
     return round(lo + (hi - lo) * max(0.0, min(1.0, float(fraction))), 4)
 
 
+def refresh_shape(upload: Mapping[str, Any], live: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """`mirror.refresh` gotowej kopii (07.11.2026): odświeżenie w toku (`working` z etapem i postępem) albo nieudane
+    (`failed` z błędem - dobra kopia gra dalej); null = brak. Stare aplikacje widzą po prostu gotową kopię."""
+    if upload.get("status") != "ready":
+        return None
+    live = live or {}
+    if upload.get("refresh_at"):
+        return {"status": "working", "phase": live.get("phase") or "queued", "progress": live.get("progress"),
+                "speed_bps": live.get("speed_bps"), "eta_s": live.get("eta_s"), "error": None,
+                "requested_at": upload.get("refresh_at")}
+    if upload.get("error"):
+        return {"status": "failed", "phase": None, "progress": None, "speed_bps": None, "eta_s": None,
+                "error": upload.get("error"), "requested_at": None}
+    return None
+
+
 def mirror_shape(upload: Optional[Mapping[str, Any]], live: Optional[Mapping[str, Any]], play_url: Optional[str],
-                 poster_url: Optional[str]) -> Optional[Dict[str, Any]]:
+                 poster_url: Optional[str], auto: Optional[Mapping[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Pole `mirror` nagrania. `live` = stan z pamięci workera (etap, postęp, prędkość) - po restarcie go nie ma,
-    wtedy kopia w toku jest „w kolejce”, dopóki worker jej nie podejmie."""
+    wtedy kopia w toku jest „w kolejce”, dopóki worker jej nie podejmie.
+
+    07.11.2026: status wiersza `waiting` (automat transmisji czeka na następną próbę) to dla API `working` w etapie
+    `queued` - stare aplikacje traktują wszystko poza working/ready jako błąd, a to nie jest błąd. Szczegóły czekania
+    (`next_at`, `until`, `reason`) niesie `mirror.auto` (= `Video.auto_copy`)."""
     if not upload:
         return None
     status = str(upload.get("status") or "failed")
     live = live or {}
+    waiting = status == "waiting"
     if status == "ready" and play_url:
         state = "ready"
-    elif status in ("downloading", "queued"):
+    elif status in ("downloading", "queued", "waiting"):
         state = "working"
     elif status == "expired":
         state = "expired"
     else:
         state = "failed"
+    if waiting:
+        live = {}
     phase = (live.get("phase") or "queued") if state == "working" else None
     return {
         "id": upload.get("id"), "status": state, "phase": phase,
@@ -245,6 +268,12 @@ def mirror_shape(upload: Optional[Mapping[str, Any]], live: Optional[Mapping[str
         "created_at": upload.get("created_at"),
         #: 03.11.2026: gotowa kopia to osobne nagranie meczu (`Video.copy_of` = ten film); tu jego id (może leżeć w koszu).
         "video_id": upload.get("video_id") if state == "ready" else None,
+        #: 07.11.2026: kopia czeka na następną próbę automatu (status `working`, etap `queued`); szczegóły w `auto`.
+        "waiting": waiting,
+        #: 07.11.2026: odświeżenie (nadpisanie) gotowej kopii - `refresh_shape`; null = brak.
+        "refresh": refresh_shape(upload, live) if state == "ready" else None,
+        #: 07.11.2026: automat kopii transmisji (to samo co `Video.auto_copy`); null = film nie jest uzbrojony.
+        "auto": dict(auto) if auto else None,
     }
 
 

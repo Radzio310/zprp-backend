@@ -4,6 +4,12 @@
     błędzie tym samym wywołaniem. Odpowiedź = nagranie (`Video` z polem `mirror`).
   - `GET .../videos/{v}/copy` - lekki stan kopii do odpytywania co 2-3 s (`{mirror}`).
   - `DELETE .../videos/{v}/copy` - anuluj kopię w toku (albo zamknij błąd); gotowa kopia idzie do kosza jak każde nagranie.
+  - 07.11.2026: `POST .../copy?refresh=1` (albo body `{"refresh": true}`) na GOTOWEJ kopii - „Odśwież kopię”: film
+    pobiera się od nowa i NADPISUJE kopię (ten sam wiersz `mentor_uploads`, te same klucze R2, to samo nagranie-kopia).
+    Kopia gra dalej w trakcie (`mirror.status = 'ready'`, postęp w `mirror.refresh`).
+
+Automatyczna kopia transmisji (07.11.2026, `app/mentor_live_copy.py`): ten sam worker; nieudana próba automatu nie
+jest błędem, tylko czekaniem (`status = 'waiting'`, w API `working`/`queued` z `mirror.auto`).
 
 Od 03.11.2026 gotowa kopia to OSOBNE nagranie meczu (`kind = 'upload'`, `copy_of` = film YouTube, synchronizacja
 skopiowana z filmu), usuwalne do kosza, z przywracaniem i zmianą nazwy jak wgrany plik. Film YouTube trzyma dalej
@@ -33,7 +39,8 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, update
+from pydantic import BaseModel
+from sqlalchemy import and_, or_, select, update
 
 from app import mentor_panel_core as C
 from app import mentor_panel_media as M
@@ -75,14 +82,17 @@ def live_state(upload_id: Any) -> Optional[Dict[str, Any]]:
     return _live.get(R.s(upload_id)) if upload_id else None
 
 
-def mirror_of(upload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Pole `mirror` nagrania z wiersza `mentor_uploads` kopii (adresy podpisane tylko dla gotowej)."""
+def mirror_of(upload: Optional[Dict[str, Any]], video: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Pole `mirror` nagrania z wiersza `mentor_uploads` kopii (adresy podpisane tylko dla gotowej).
+    `video` = film YouTube (kolumny automatu kopii transmisji -> `mirror.auto`)."""
     if not upload:
         return None
+    from app.mentor_live_copy_rules import auto_shape
+
     ready = upload.get("status") == "ready" and upload.get("play_key")
     play = M.presign_get(upload.get("play_key")) if ready else None
     poster = M.presign_get(upload.get("poster_key")) if ready and upload.get("poster_key") else None
-    return Y.mirror_shape(upload, live_state(upload.get("id")), play, poster)
+    return Y.mirror_shape(upload, live_state(upload.get("id")), play, poster, auto_shape(video))
 
 
 def wake_worker() -> None:
@@ -175,9 +185,60 @@ async def adopt_orphans() -> int:
     return done
 
 
+class CopyBody(BaseModel):
+    #: „Odśwież kopię” (07.11.2026): gotowa kopia pobiera się od nowa i nadpisuje poprzednią.
+    refresh: bool = False
+
+
+async def enqueue_copy(video: Dict[str, Any], pair_id: str, uploader_id: str, current: Optional[Dict[str, Any]],
+                       match_at: Any = None) -> str:
+    """Zamówienie kopii: ponowienie istniejącego wiersza (błąd, czekanie automatu, usunięta) albo nowy wiersz.
+    Wspólne dla przycisku „Zrób kopię” i automatu transmisji (`app/mentor_live_copy.py`). Zwraca id kopii."""
+    stamp = C.now()
+    if current and current.get("status") in ("failed", "expired", "removed", "ready", "waiting"):
+        _failed_here.discard(current["id"])
+        _cancelled.discard(current["id"])
+        await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == current["id"]).values(
+            status="downloading", error=None, uploader_id=uploader_id, created_at=stamp, play_key=None, poster_key=None,
+            video_id=None, refresh_at=None))
+        upload_id = current["id"]
+    else:
+        upload_id = R.new_id()
+        await database.execute(mentor_uploads.insert().values(
+            id=upload_id, pair_id=pair_id, match_id=video["match_id"], video_id=None, uploader_id=uploader_id,
+            filename=Y.safe_filename(video.get("title")), size=0, content_type="video/mp4", r2_key=None,
+            status="downloading", created_at=stamp, expires_at=R.upload_expires_at(match_at, stamp),
+            origin=ORIGIN, source_url=Y.watch_url(video.get("url"))))
+        # Dwa równoległe kliknięcia: wygrywa ostatni zapis, a osieroconą kopię worker zamyka sam (`process_copy`: brak nagrania).
+        await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == video["id"])
+                               .values(mirror_upload_id=upload_id, updated_at=stamp))
+    _set_live(upload_id, "queued")
+    wake_worker()
+    return upload_id
+
+
+async def enqueue_refresh(upload: Dict[str, Any]) -> None:
+    """Odświeżenie gotowej kopii: wiersz zostaje `ready` (kopia gra dalej), `refresh_at` ustawia kolejkę workera."""
+    _failed_here.discard(upload["id"])
+    _cancelled.discard(upload["id"])
+    await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == upload["id"])
+                           .where(mentor_uploads.c.status == "ready").values(refresh_at=C.now(), error=None))
+    _set_live(upload["id"], "queued")
+    wake_worker()
+
+
+def _live_copy():
+    from app import mentor_live_copy as LC
+
+    return LC
+
+
 @router.post("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}/copy")
-async def start_copy(pair_id: str, match_id: str, video_id: str, actor: Actor = Depends(mentor_actor)):
-    """Zakłada kopię (albo zwraca trwającą/gotową; po błędzie zaczyna od nowa). Idempotentne."""
+async def start_copy(pair_id: str, match_id: str, video_id: str, actor: Actor = Depends(mentor_actor), refresh: bool = False,
+                     body: Optional[CopyBody] = None):
+    """Zakłada kopię (albo zwraca trwającą/gotową; po błędzie zaczyna od nowa). Idempotentne.
+    `?refresh=1` / `{"refresh": true}` na gotowej kopii: odświeżenie (nadpisanie) - drugie wywołanie w trakcie nic nie dubluje."""
+    want_refresh = bool(refresh) or bool(body is not None and body.refresh)
     ctx = await C.pair_context(pair_id, actor, action="video")
     video = await _youtube_video(ctx, match_id, video_id)
     if not Y.enabled():
@@ -194,40 +255,30 @@ async def start_copy(pair_id: str, match_id: str, video_id: str, actor: Actor = 
         copy = await _copy_video(current)
         if copy is None:
             await attach_copy(current, video)
-            return await M._video_payload(ctx, video_id)
+            if not want_refresh:
+                return await M._video_payload(ctx, video_id)
+            copy = await _copy_video(current)
         from app import mentor_video_trash as T
 
-        if copy.get("deleted_at") is None:
-            return await M._video_payload(ctx, video_id)
-        if T.in_trash(copy):
-            await T.restore(copy)
-            await C.touch(ctx, actor.judge_id, "video_restored", "videos", video["match_id"], {"id": copy["id"]})
+        if copy is not None and (copy.get("deleted_at") is None or T.in_trash(copy)):
+            if copy.get("deleted_at") is not None:
+                await T.restore(copy)
+                await C.touch(ctx, actor.judge_id, "video_restored", "videos", video["match_id"], {"id": copy["id"]})
+            if want_refresh and not current.get("refresh_at"):
+                await enqueue_refresh(current)
+                await _live_copy().note_manual(dict(video), True)
+                await C.touch(ctx, actor.judge_id, "copy_refresh_started", "videos", video["match_id"], {"id": video_id})
             return await M._video_payload(ctx, video_id)
         # Nagrobek (nagranie-kopię usunięto na zawsze, zostały tylko klipy z MP4): nowa kopia od zera.
         await drop_mirror(video, current, reason="Kopię usunięto na zawsze.", force=True)
         current = None
-    stamp = C.now()
-    if current and current.get("status") in ("failed", "expired", "removed", "ready"):
-        _failed_here.discard(current["id"])
-        _cancelled.discard(current["id"])
-        await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == current["id"]).values(
-            status="downloading", error=None, uploader_id=actor.judge_id, created_at=stamp, play_key=None, poster_key=None,
-            video_id=None))
-        upload_id = current["id"]
-    else:
-        card = await C.match_card(ctx, match_id)
-        upload_id = R.new_id()
-        await database.execute(mentor_uploads.insert().values(
-            id=upload_id, pair_id=ctx["pair_id"], match_id=video["match_id"], video_id=None, uploader_id=actor.judge_id,
-            filename=Y.safe_filename(video.get("title")), size=0, content_type="video/mp4", r2_key=None,
-            status="downloading", created_at=stamp, expires_at=R.upload_expires_at(card.get("scheduled_at"), stamp),
-            origin=ORIGIN, source_url=Y.watch_url(video.get("url"))))
-        # Dwa równoległe kliknięcia: wygrywa ostatni zapis, a osieroconą kopię worker zamyka sam (`process_copy`: brak nagrania).
-        await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == video_id)
-                               .values(mirror_upload_id=upload_id, updated_at=stamp))
-    _set_live(upload_id, "queued")
+    match_at = None
+    if not (current and current.get("status") in ("failed", "expired", "removed", "ready", "waiting")):
+        match_at = (await C.match_card(ctx, match_id)).get("scheduled_at")
+    await enqueue_copy(video, ctx["pair_id"], actor.judge_id, current, match_at)
+    # Uzbrojona transmisja: ręczne „Zrób kopię” (albo „Spróbuj teraz” w czasie czekania) liczy się jako próba automatu.
+    await _live_copy().note_manual(dict(video), False)
     await C.touch(ctx, actor.judge_id, "copy_started", "videos", video["match_id"], {"id": video_id})
-    wake_worker()
     return await M._video_payload(ctx, video_id)
 
 
@@ -235,7 +286,10 @@ async def start_copy(pair_id: str, match_id: str, video_id: str, actor: Actor = 
 async def copy_status(pair_id: str, match_id: str, video_id: str, actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(pair_id, actor)
     video = await M._pair_video(ctx, match_id, video_id)
-    return {"video_id": video_id, "mirror": mirror_of(await _mirror_row(video))}
+    from app.mentor_live_copy_rules import auto_shape
+
+    # `auto_copy` (07.11.2026): stan automatu kopii transmisji także wtedy, gdy kopii jeszcze nie ma (`mirror: null`).
+    return {"video_id": video_id, "mirror": mirror_of(await _mirror_row(video), video), "auto_copy": auto_shape(video)}
 
 
 @router.delete("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}/copy")
@@ -247,8 +301,12 @@ async def remove_copy(pair_id: str, match_id: str, video_id: str, actor: Actor =
     current = await _mirror_row(video)
     if current is None:
         return {"ok": True, "removed": False, "trashed": False, "video": await M._video_payload(ctx, video_id)}
+    await _live_copy().disarm(dict(video))  # para sama kończy z kopią: automat transmisji milknie
     if current.get("status") == "ready" and current.get("play_key"):
         current = dict(current)
+        if current.get("refresh_at"):  # odświeżenie w toku: przerwane (wysyłka już trwająca kończy się całym, nowym plikiem)
+            _cancelled.add(current["id"])
+            await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == current["id"]).values(refresh_at=None))
         if not current.get("video_id"):
             await attach_copy(current, video)
         copy = await _copy_video(current)
@@ -455,17 +513,52 @@ def _cookie_file(folder: str) -> Optional[str]:
 
 
 async def _still_wanted(upload_id: str) -> bool:
-    row = await C.one(select(mentor_uploads.c.status).where(mentor_uploads.c.id == upload_id))
-    return bool(row and row.get("status") == "downloading") and upload_id not in _cancelled
+    """Kopia dalej potrzebna: w toku (`downloading`) albo odświeżenie gotowej (`ready` + `refresh_at`)."""
+    row = await C.one(select(mentor_uploads.c.status, mentor_uploads.c.refresh_at).where(mentor_uploads.c.id == upload_id))
+    wanted = bool(row and (row.get("status") == "downloading" or (row.get("status") == "ready" and row.get("refresh_at"))))
+    return wanted and upload_id not in _cancelled
 
 
-async def process_copy(row: Dict[str, Any]) -> None:
+async def _end_refresh(upload_id: str) -> None:
+    await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == upload_id).values(refresh_at=None))
+
+
+async def _refreshed(row: Dict[str, Any], video: Dict[str, Any], play_key: str, poster_key: Optional[str], size: int,
+                     meta: Dict[str, Any], info: Dict[str, Any]) -> None:
+    """Odświeżenie gotowe: ten sam wiersz kopii i to samo nagranie-kopia dostają nowe dane (plik już nadpisany w R2).
+    Nazwa nagrania-kopii zmienia się tylko, jeśli para jej nie zmieniała (dalej „<film> · kopia <wysokość>p”)."""
     upload_id = row["id"]
+    old = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == upload_id)) or row
+    await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == upload_id).values(
+        refresh_at=None, error=None, size=size, poster_key=poster_key or old.get("poster_key"),
+        duration_s=meta.get("duration_s") or old.get("duration_s"), width=meta.get("width") or old.get("width"),
+        height=meta.get("height") or old.get("height"),
+        filename=Y.safe_filename(info.get("title") or video.get("title"))))
+    fresh = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == upload_id)) or {}
+    copy = await _copy_video(dict(old))
+    if copy:
+        values: Dict[str, Any] = {"updated_at": C.now()}
+        if meta.get("duration_s"):
+            values["duration_s"] = int(meta["duration_s"])
+        if R.s(copy.get("title")) == Y.copy_title(video.get("title"), old.get("filename"), old.get("height")):
+            values["title"] = Y.copy_title(video.get("title"), fresh.get("filename"), fresh.get("height"))
+        await database.execute(update(mentor_match_videos).where(mentor_match_videos.c.id == copy["id"]).values(**values))
+    await C.touch(row["pair_id"], row["uploader_id"], "copy_refreshed", "videos", row["match_id"], {"id": video["id"]})
+    logger.info("mentor: kopia YouTube %s odświeżona (%s MB, %sp)", upload_id, size // (1024 * 1024), meta.get("height"))
+
+
+async def process_copy(row: Dict[str, Any]) -> bool:
+    """Jedna kopia (albo odświeżenie gotowej: wiersz `ready` z `refresh_at`). True = kopia gotowa/odświeżona."""
+    upload_id = row["id"]
+    refresh = row.get("status") == "ready"
     video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.mirror_upload_id == upload_id))
     if not video:
-        await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == upload_id)
-                               .values(status="removed", error="Nagranie usunięto."))
-        return
+        if refresh:
+            await _end_refresh(upload_id)
+        else:
+            await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == upload_id)
+                                   .values(status="removed", error="Nagranie usunięto."))
+        return False
     url = Y.watch_url(row.get("source_url") or video.get("url"))
     if not url:
         raise Y.CopyError("NOT_YOUTUBE", Y.MESSAGES["NOT_YOUTUBE"])
@@ -487,7 +580,7 @@ async def process_copy(row: Dict[str, Any]) -> None:
                         os.remove(os.path.join(folder, name))
         assert result is not None
         if not await _still_wanted(upload_id):
-            return
+            return False
         source = result["path"]
         meta = await asyncio.to_thread(_codecs, source)
         target = os.path.join(folder, "play.mp4")
@@ -499,20 +592,27 @@ async def process_copy(row: Dict[str, Any]) -> None:
             await asyncio.to_thread(M.transcode, source, target, meta.get("height"), meta.get("duration_s"),
                                     lambda value: _set_live(upload_id, "converting", value), lambda: upload_id in _cancelled)
             if upload_id in _cancelled:
-                return
+                return False
         await asyncio.to_thread(os.remove, source)
         poster_path = os.path.join(folder, "poster.jpg")
         has_poster = await asyncio.to_thread(M.poster, target, poster_path, meta.get("duration_s"))
+        # Te same klucze R2 co poprzednia kopia tego filmu (id wiersza kopii się nie zmienia): odświeżenie NADPISUJE plik.
         base = M.object_key(row["pair_id"], R.s(row["match_id"]).replace(":", "_"), upload_id)
         play_key, poster_key = f"{base}/play.mp4", f"{base}/poster.jpg"
+        if refresh and upload_id in _cancelled:
+            return False  # anulowane przed wysyłką: stara kopia nietknięta
         _set_live(upload_id, "uploading", 0.0)
         size = await asyncio.to_thread(_put, upload_id, target, play_key)
         if has_poster:
             await asyncio.to_thread(M.put_file, poster_path, poster_key, "image/jpeg")
+        info = result["info"]
+        if refresh:
+            # Plik już nadpisany (cały, nowy) - dane wiersza muszą mu odpowiadać, nawet gdy w trakcie anulowano odświeżenie.
+            await _refreshed(row, video, play_key, poster_key if has_poster else None, size, meta, info)
+            return True
         if not await _still_wanted(upload_id):  # usunięto w trakcie wysyłki: nie zostawiamy sierot w R2
             M.forget_object(play_key, poster_key if has_poster else None)
-            return
-        info = result["info"]
+            return False
         await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == upload_id).values(
             status="ready", play_key=play_key, poster_key=poster_key if has_poster else None, error=None, size=size,
             duration_s=meta.get("duration_s"), width=meta.get("width"), height=meta.get("height"),
@@ -527,38 +627,70 @@ async def process_copy(row: Dict[str, Any]) -> None:
             await attach_copy(dict(fresh_upload), fresh_video)
         await C.touch(row["pair_id"], row["uploader_id"], "copy_ready", "videos", row["match_id"], {"id": video["id"]})
         logger.info("mentor: kopia YouTube %s gotowa (%s MB, %sp)", upload_id, size // (1024 * 1024), meta.get("height"))
+        return True
     finally:
         _live.pop(upload_id, None)
         await asyncio.to_thread(shutil.rmtree, folder, True)
 
 
 async def next_copy() -> Optional[Dict[str, Any]]:
-    return await C.one(select(mentor_uploads).where(mentor_uploads.c.origin == ORIGIN)
-                       .where(mentor_uploads.c.status == "downloading")
+    """Następna praca: kopia w toku albo odświeżenie gotowej kopii (`ready` + `refresh_at`)."""
+    wanted = or_(mentor_uploads.c.status == "downloading",
+                 and_(mentor_uploads.c.status == "ready", mentor_uploads.c.refresh_at.is_not(None)))
+    return await C.one(select(mentor_uploads).where(mentor_uploads.c.origin == ORIGIN).where(wanted)
                        .where(mentor_uploads.c.id.notin_(list(_failed_here) or [""]))
                        .order_by(mentor_uploads.c.created_at.asc()).limit(1))
 
 
-async def _fail(row: Dict[str, Any], message: str) -> None:
+async def _fail(row: Dict[str, Any], message: str, code: str = "FAILED") -> None:
+    """Nieudana próba. Uzbrojona transmisja: automat decyduje (ponowienie = kopia czeka, bez czerwonego błędu).
+    Nieudane odświeżenie zostawia dobrą kopię (`ready`), błąd idzie do `mirror.refresh`."""
     _failed_here.add(row["id"])
-    await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == row["id"])
-                           .where(mentor_uploads.c.status == "downloading").values(status="failed", error=message[:300]))
+    refresh = row.get("status") == "ready"
+    final: Optional[str] = message
+    try:
+        final = await _live_copy().after_failure(row, code, message, refresh)
+    except Exception:  # noqa: BLE001 - automat nie może zatrzymać zwykłego błędu kopii
+        logger.warning("mentor: automat kopii po błędzie %s nieudany", row.get("id"), exc_info=True)
     video = await C.one(select(mentor_match_videos.c.id).where(mentor_match_videos.c.mirror_upload_id == row["id"]))
+    if refresh:
+        await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == row["id"])
+                               .where(mentor_uploads.c.status == "ready").values(refresh_at=None, error=(final or None) and final[:300]))
+        if final is not None:
+            await C.touch(row["pair_id"], row["uploader_id"], "copy_refresh_failed", "videos", row["match_id"], {"id": (video or {}).get("id")})
+        return
+    if final is None:
+        return  # automat ponowi próbę (wiersz czeka: `status = 'waiting'`)
+    await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == row["id"])
+                           .where(mentor_uploads.c.status == "downloading").values(status="failed", error=final[:300]))
     await C.touch(row["pair_id"], row["uploader_id"], "copy_failed", "videos", row["match_id"], {"id": (video or {}).get("id")})
+
+
+async def _succeeded(row: Dict[str, Any], refresh: bool) -> None:
+    try:
+        await _live_copy().after_success(row, refresh)
+    except Exception:  # noqa: BLE001
+        logger.warning("mentor: automat kopii po sukcesie %s nieudany", row.get("id"), exc_info=True)
 
 
 async def process_next() -> bool:
     row = await next_copy()
     if not row:
         return False
+    refresh = row.get("status") == "ready"
     try:
-        await process_copy(row)
+        if await process_copy(row):
+            await _succeeded(row, refresh)
+        elif refresh:
+            _failed_here.add(row["id"])
     except Y.CopyError as exc:
         if exc.code != "CANCELLED":
             logger.info("mentor: kopia YouTube %s nieudana: %s", row["id"], exc.code)
-            await _fail(row, exc.message)
+            await _fail(row, exc.message, exc.code)
         else:
             _failed_here.add(row["id"])
+            if refresh:
+                await _end_refresh(row["id"])
     except Exception:  # noqa: BLE001 - jedna zła kopia nie zatrzymuje kolejki
         logger.warning("mentor: kopia YouTube %s nieudana", row["id"], exc_info=True)
         await _fail(row, Y.MESSAGES["FAILED"])

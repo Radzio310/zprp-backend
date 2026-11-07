@@ -664,6 +664,12 @@ async def insert_link_video(match_id: str, pair_key_value: str, url: str, added_
             raise
         row = dict(existing)
         created = False
+    if created and provider == "youtube":
+        # Transmisja na żywo albo zapowiedź (07.11.2026): automatyczna kopia na serwer po jej końcu, a godzina startu
+        # dochodzi sama, gdy link dodano przed startem - `app/mentor_live_copy.py`. Nigdy nie rzuca.
+        from app.mentor_live_copy import arm_new_link
+
+        row = await arm_new_link(row, stream_start)
     return row, created
 
 
@@ -705,6 +711,21 @@ async def _stream_start_or_none(url: str, timeout_s: float = 6.0) -> Optional[in
     return found.get("stream_start_ms") or None
 
 
+async def store_stream_start(row: Dict[str, Any], stream_start_ms: int) -> bool:
+    """Zapis godziny startu transmisji (`sync.stream_start_ms`) nagrania; reszta synchronizacji bez zmian.
+    Wspólne dla „dociągnij start” i automatu transmisji (`app/mentor_live_copy.py`). True = zmieniono."""
+    if not stream_start_ms:
+        return False
+    current = clean_sync(_loads(row.get("sync_json"))) if row.get("sync_json") else clean_sync({})
+    if current.get("stream_start_ms") == stream_start_ms:
+        return False
+    current["stream_start_ms"] = stream_start_ms
+    await database.execute(
+        update(match_videos).where(match_videos.c.id == row["id"]).values(sync_json=json.dumps(clean_sync(current)), updated_at=now())
+    )
+    return True
+
+
 @router.post("/match/{match_id}/videos/{video_id}/stream-start")
 async def refresh_stream_start(match_id: str, video_id: str, actor: Actor = Depends(market_actor)):
     """Dociągnij godzinę startu transmisji do nagrania dodanego wcześniej (para)."""
@@ -718,13 +739,9 @@ async def refresh_stream_start(match_id: str, video_id: str, actor: Actor = Depe
     )
     if not row:
         raise _err(404, "VIDEO_NOT_FOUND", "Nie znaleziono tego nagrania - mogło zostać usunięte.")
-    current = clean_sync(_loads(row["sync_json"])) if row["sync_json"] else clean_sync({})
     found = await _stream_start_or_none(str(row["url"] or ""), timeout_s=10.0)
-    if found and found != current.get("stream_start_ms"):
-        current["stream_start_ms"] = found
-        await database.execute(
-            update(match_videos).where(match_videos.c.id == video_id).values(sync_json=json.dumps(clean_sync(current)), updated_at=now())
-        )
+    if found:
+        await store_stream_start(dict(row), found)
     fresh = dict(await database.fetch_one(select(match_videos).where(match_videos.c.id == video_id)))
     names = await people([fresh["added_by"]])
     return {"ok": True, "found": bool(found), "video": _video_shape(fresh, names)}

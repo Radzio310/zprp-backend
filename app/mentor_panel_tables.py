@@ -215,6 +215,9 @@ def define_tables(metadata):
         #: przez `mentor_match_videos.mirror_upload_id`).
         Column("origin", String, nullable=True),
         Column("source_url", Text, nullable=True),
+        #: Odświeżenie gotowej kopii YouTube (07.11.2026): kiedy zamówiono nadpisanie; NULL = brak. Kopia zostaje `ready`
+        #: (gra dalej), worker pobiera film od nowa i nadpisuje te same klucze R2 - `app/mentor_youtube_copy.py`.
+        Column("refresh_at", DateTime(timezone=True), nullable=True),
     )
     reports = Table(
         "mentor_reports",
@@ -359,6 +362,7 @@ MIGRATIONS = (
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS zoom_track_json TEXT",
     "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS origin VARCHAR",
     "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS source_url TEXT",
+    "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS refresh_at TIMESTAMPTZ",
     "ALTER TABLE mentor_compilations ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_threads ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_threads ADD COLUMN IF NOT EXISTS event_json TEXT",

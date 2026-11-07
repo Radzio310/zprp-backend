@@ -209,6 +209,17 @@ def _kick_public_details(zprp_match_id: Any, previous: Optional[str], final: Opt
         pass
 
 
+def _kick_live_copy(match_number: Any, zprp_match_id: Any, previous: Optional[str], final: Optional[str]) -> None:
+    """Koniec meczu w ProElu: uzbrojone transmisje YouTube tego meczu dostają pierwszą kopię na serwer za 5 minut
+    (`app/mentor_live_copy.py`, kick_on_proel_status). Nigdy nie rzuca; w testach wyłączone."""
+    try:
+        from app.mentor_live_copy import kick_on_proel_status
+
+        kick_on_proel_status(match_number, zprp_match_id, previous, final)
+    except Exception:
+        pass
+
+
 class _MatchIdConflict(Exception):
     """Sygnał z wnętrza transakcji: blob opisuje inny mecz niż ten pod numerem.
 
@@ -2205,6 +2216,7 @@ async def update_proel_match(
             )
         if not is_training_key(match_number):
             _kick_public_details(incoming_id or known_id, current_status, final_status)
+        _kick_live_copy(match_number, incoming_id or known_id, current_status, final_status)
 
     await journal_absorbed(
         match_number,

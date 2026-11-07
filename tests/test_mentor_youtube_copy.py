@@ -87,6 +87,9 @@ def test_ksztalt_pola_mirror():
     failed = Y.mirror_shape({**base, "status": "failed", "error": "Ten film jest prywatny"}, None, None, None)
     assert failed["status"] == "failed" and failed["error"] and failed["play_url"] is None
     assert Y.mirror_shape(None, None, None, None) is None
+    # 07.11.2026: nowe pola są dodatkami (stare aplikacje ich nie czytają); bez automatu i odświeżenia - puste.
+    assert working["waiting"] is False and working["refresh"] is None and working["auto"] is None
+    assert ready["refresh"] is None and ready["auto"] is None
 
 
 # ─── Przebieg ───────────────────────────────────────────────────────────────

@@ -1709,6 +1709,9 @@ async def startup():
     # Kopie filmów YouTube (1 naraz, osobno od ffmpeg klipów); wyłącznik MENTOR_YT_COPY=0.
     from app.mentor_youtube_copy import run_copy_worker
     asyncio.create_task(run_copy_worker())
+    # Automatyczna kopia transmisji YouTube po jej końcu (07.11.2026); wyłącznik MENTOR_LIVE_COPY=0.
+    from app.mentor_live_copy import run_live_copy_loop
+    asyncio.create_task(run_live_copy_loop())
     asyncio.create_task(run_retention())
     asyncio.create_task(run_email_digest())
     # Handball Bastion: trwały worker klipów MP4 (stan i dzierżawa w bazie, restart go wznawia). Tylko za BASTION_ENABLED.

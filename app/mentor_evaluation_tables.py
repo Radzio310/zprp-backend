@@ -119,6 +119,16 @@ def define_tables(metadata):
         #: Gotowa kopia filmu YouTube (03.11.2026) jest OSOBNYM nagraniem (`kind = 'upload'`): tu id nagrania YouTube,
         #: z którego powstała. Film YouTube trzyma dalej `mirror_upload_id` (pasek w toku, brak dublowania kopii).
         Column("copy_of", String, nullable=True),
+        #: Automatyczna kopia transmisji na serwer (07.11.2026) - harmonogram przeżywa restart, `app/mentor_live_copy_rules.py`.
+        #: `auto_copy_state` NULL = film nie jest uzbrojony.
+        Column("auto_copy_state", String, nullable=True),
+        Column("auto_next_at", DateTime(timezone=True), nullable=True),
+        Column("auto_attempts", Integer, nullable=True),
+        Column("auto_end_at", DateTime(timezone=True), nullable=True),
+        Column("auto_reason", Text, nullable=True),
+        Column("auto_armed_at", DateTime(timezone=True), nullable=True),
+        Column("live_ended_at", DateTime(timezone=True), nullable=True),
+        Column("proel_finished_at", DateTime(timezone=True), nullable=True),
         UniqueConstraint("match_id", "normalized_url", name="uq_mentor_match_video_url"),
     )
     Index("uq_mentor_match_video_idem", videos.c.pair_key, videos.c.match_id, videos.c.idempotency_key, unique=True,
@@ -154,5 +164,13 @@ MIGRATIONS = (
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS veo_json text",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS mirror_upload_id varchar",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS copy_of varchar",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS auto_copy_state varchar",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS auto_next_at timestamptz",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS auto_attempts integer",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS auto_end_at timestamptz",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS auto_reason text",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS auto_armed_at timestamptz",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS live_ended_at timestamptz",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS proel_finished_at timestamptz",
     VEO_PROVIDER_MIGRATION,
 )
