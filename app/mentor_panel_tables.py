@@ -218,6 +218,13 @@ def define_tables(metadata):
         #: Odświeżenie gotowej kopii YouTube (07.11.2026): kiedy zamówiono nadpisanie; NULL = brak. Kopia zostaje `ready`
         #: (gra dalej), worker pobiera film od nowa i nadpisuje te same klucze R2 - `app/mentor_youtube_copy.py`.
         Column("refresh_at", DateTime(timezone=True), nullable=True),
+        #: Nagranie z kilku plików (07.11.2026, `app/mentor_upload_groups.py`): wspólne `group_id` plików jednego nagrania,
+        #: `group_index` = kolejność sklejania (0..N-1), `group_count` = N. Część 0 trzyma stan grupy (nagranie, gotowy
+        #: plik, błąd). `recorded_at` = czas nagrania z metadanych pliku (podpowiedź klienta). NULL = pojedynczy plik.
+        Column("group_id", String, nullable=True, index=True),
+        Column("group_index", Integer, nullable=True),
+        Column("group_count", Integer, nullable=True),
+        Column("recorded_at", DateTime(timezone=True), nullable=True),
     )
     reports = Table(
         "mentor_reports",
@@ -363,6 +370,12 @@ MIGRATIONS = (
     "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS origin VARCHAR",
     "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS source_url TEXT",
     "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS refresh_at TIMESTAMPTZ",
+    # Nagranie z kilku plików (07.11.2026).
+    "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS group_id VARCHAR",
+    "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS group_index INTEGER",
+    "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS group_count INTEGER",
+    "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS recorded_at TIMESTAMPTZ",
+    "CREATE INDEX IF NOT EXISTS ix_mentor_uploads_group_id ON mentor_uploads (group_id)",
     "ALTER TABLE mentor_compilations ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_threads ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_threads ADD COLUMN IF NOT EXISTS event_json TEXT",

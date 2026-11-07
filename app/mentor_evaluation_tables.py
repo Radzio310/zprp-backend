@@ -129,6 +129,9 @@ def define_tables(metadata):
         Column("auto_armed_at", DateTime(timezone=True), nullable=True),
         Column("live_ended_at", DateTime(timezone=True), nullable=True),
         Column("proel_finished_at", DateTime(timezone=True), nullable=True),
+        #: Nagranie z kilku plików (07.11.2026): oś części gotowego filmu [{index, filename, start_s, duration_s}]
+        #: (czasy rzeczywiste po sklejeniu) - `app/mentor_upload_group_rules.py`. NULL = pojedynczy plik.
+        Column("parts_json", Text, nullable=True),
         UniqueConstraint("match_id", "normalized_url", name="uq_mentor_match_video_url"),
     )
     Index("uq_mentor_match_video_idem", videos.c.pair_key, videos.c.match_id, videos.c.idempotency_key, unique=True,
@@ -172,5 +175,6 @@ MIGRATIONS = (
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS auto_armed_at timestamptz",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS live_ended_at timestamptz",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS proel_finished_at timestamptz",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS parts_json text",
     VEO_PROVIDER_MIGRATION,
 )

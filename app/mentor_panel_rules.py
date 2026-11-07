@@ -1501,16 +1501,21 @@ def upload_expires_at(match_at: Any, created_at: datetime) -> datetime:
 def retention_actions(upload: Mapping[str, Any], now: datetime) -> Dict[str, bool]:
     """Co dzienne sprzątanie robi z nagraniem: kasuje oryginał po udanym
     transkodowaniu, a po `expires_at` całe nagranie. Porzucone wgrywanie
-    (ponad dobę bez ukończenia) przerywa."""
+    (ponad dobę bez ukończenia) przerywa.
+
+    Nagranie z kilku plików (07.11.2026): część grupy bez `play_key` (gotowy plik trzyma część 0) też traci oryginał
+    po udanym sklejeniu, a plik czekający na resztę grupy (`uploaded`) ponad dobę jest porzucony jak wgrywanie."""
     status = s(upload.get("status"))
     expires = aware(upload.get("expires_at"))
     created = aware(upload.get("created_at"))
     expire = bool(expires and expires <= now and status not in ("expired",))
+    grouped = bool(upload.get("group_id"))
     return {
         "expire": expire,
-        "delete_original": bool(not expire and status == "ready" and upload.get("r2_key") and upload.get("play_key")
-                                and upload.get("r2_key") != upload.get("play_key")),
-        "abort": bool(not expire and status == "uploading" and created and created <= now - timedelta(days=1)),
+        "delete_original": bool(not expire and status == "ready" and upload.get("r2_key")
+                                and (upload.get("play_key") or grouped) and upload.get("r2_key") != upload.get("play_key")),
+        "abort": bool(not expire and (status == "uploading" or (grouped and status == "uploaded"))
+                      and created and created <= now - timedelta(days=1)),
     }
 
 

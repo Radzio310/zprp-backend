@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 
 from app import mentor_panel_core as C
 from app import mentor_panel_rules as R
@@ -218,6 +218,9 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
         "auto_copy": None,
         #: 03.11.2026: nagranie jest gotową kopią filmu YouTube o tym id (osobne nagranie, `kind = 'upload'`); null = nie.
         "copy_of": row.get("copy_of"),
+        #: Nagranie z kilku plików (07.11.2026): [{index, filename, start_s, duration_s}] w czasie gotowego filmu;
+        #: null = pojedynczy plik albo sklejanie jeszcze trwa - `app/mentor_upload_group_rules.py`.
+        "parts": None,
     }
     if provider == veo.PROVIDER and kind != "upload":
         # Veo (31.10.2026): odtwarzanie prosto z MP4 na c.veocdn.com; stan z zapisu (`veo_json`), odświeżany w tle.
@@ -236,6 +239,10 @@ def video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], upload: O
         out.update(provider="upload", url=play, play_url=play, poster_url=poster, thumbnail_url=poster,
                    playable=bool(play), upload_status=status, title=row.get("title") or upload.get("filename") or "",
                    duration_s=upload.get("duration_s") or row.get("duration_s"))
+        if row.get("parts_json"):
+            from app.mentor_upload_group_rules import clean_timeline
+
+            out["parts"] = clean_timeline(R.json_value(row.get("parts_json"), []))
     if provider == "youtube" and kind != "upload":
         from app import mentor_youtube_copy as Y
 
@@ -395,6 +402,10 @@ async def delete_video(pair_id: str, match_id: str, video_id: str, actor: Actor 
             forget_object(upload.get("r2_key"), upload.get("play_key"), upload.get("poster_key"))
             await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == upload["id"])
                                    .values(status="expired", error="Nagranie usunięte.", r2_key=None, play_key=None, poster_key=None))
+            if upload.get("group_id"):
+                from app import mentor_upload_groups as UG
+
+                await UG.drop_members(upload, "Nagranie usunięte.")
         await database.execute(mentor_match_videos.delete().where(mentor_match_videos.c.id == video_id))
         await C.touch(ctx, actor.judge_id, "video_deleted", "videos", row["match_id"], {"id": video_id})
         return {"ok": True, "trashed": False, "orphan_clips": impact["orphan_clips"], "kept_clips": impact["kept_clips"]}
@@ -509,14 +520,10 @@ async def more_parts(pair_id: str, match_id: str, upload_id: str, from_: int = Q
             "parts": _part_urls(config, row, R.part_batch(total, from_))}
 
 
-@router.post("/pairs/{pair_id}/matches/{match_id}/uploads/{upload_id}/complete")
-async def complete_upload(pair_id: str, match_id: str, upload_id: str, body: CompleteBody, actor: Actor = Depends(mentor_actor)):
-    ctx = await C.pair_context(pair_id, actor, action="video")
-    row = await _own_upload(ctx, match_id, upload_id, actor)
-    if row["status"] != "uploading":
-        return {"status": row["status"], "video_id": row.get("video_id")}
+async def finish_multipart(row: Dict[str, Any], raw_parts: Any) -> None:
+    """Składa multipart w R2 z listy `{n, etag}` klienta; brak części = 422, magazyn nie odpowiada = 502."""
     try:
-        parts = R.clean_parts(body.parts, R.upload_parts(row["size"]))
+        parts = R.clean_parts(raw_parts, R.upload_parts(row["size"]))
     except R.RuleError as exc:
         raise C.rule_error(exc) from exc
     config = _storage_or_503()
@@ -526,6 +533,20 @@ async def complete_upload(pair_id: str, match_id: str, upload_id: str, body: Com
     except Exception as exc:  # noqa: BLE001
         logger.warning("mentor: domknięcie wgrywania nieudane", exc_info=True)
         raise C.err(502, "STORAGE_ERROR", "Nie udało się złożyć pliku w magazynie. Wyślij części jeszcze raz.") from exc
+
+
+@router.post("/pairs/{pair_id}/matches/{match_id}/uploads/{upload_id}/complete")
+async def complete_upload(pair_id: str, match_id: str, upload_id: str, body: CompleteBody, actor: Actor = Depends(mentor_actor)):
+    ctx = await C.pair_context(pair_id, actor, action="video")
+    row = await _own_upload(ctx, match_id, upload_id, actor)
+    if row.get("group_id"):
+        # Plik nagrania z kilku plików (07.11.2026): nie ostatni = `waiting_group`, ostatni = jedno nagranie.
+        from app import mentor_upload_groups as UG
+
+        return await UG.complete_member(ctx, row, body.parts, actor)
+    if row["status"] != "uploading":
+        return {"status": row["status"], "video_id": row.get("video_id")}
+    await finish_multipart(row, body.parts)
     video_id = R.new_id()
     marker = f"upload:{upload_id}"
     await database.execute(mentor_match_videos.insert().values(
@@ -544,7 +565,12 @@ async def upload_status(pair_id: str, match_id: str, upload_id: str, actor: Acto
     row = await C.one(select(mentor_uploads).where(mentor_uploads.c.id == upload_id))
     if not row or row["pair_id"] != ctx["pair_id"] or R.s(row["match_id"]) != R.s(match_id):
         raise C.err(404, "UPLOAD_NOT_FOUND", "Nie ma takiego wgrywania.")
-    progress = 1.0 if row["status"] == "ready" else _progress.get(upload_id) if row["status"] == "processing" else None
+    worker_key = upload_id
+    if row.get("group_id") and row.get("group_index"):  # plik grupy: postęp sklejania liczy część 0
+        lead = await C.one(select(mentor_uploads.c.id).where(mentor_uploads.c.group_id == row["group_id"])
+                           .where(mentor_uploads.c.group_index == 0))
+        worker_key = lead["id"] if lead else upload_id
+    progress = 1.0 if row["status"] == "ready" else _progress.get(worker_key) if row["status"] == "processing" else None
     return {"status": row["status"], "progress": progress, "error": row.get("error"), "video_id": row.get("video_id")}
 
 
@@ -554,6 +580,10 @@ async def abort_upload(pair_id: str, match_id: str, upload_id: str, actor: Actor
     row = await _own_upload(ctx, match_id, upload_id, actor)
     if row.get("origin") == "youtube":
         raise C.err(409, "USE_COPY_ROUTE", "To kopia filmu YouTube - usuń ją przyciskiem przy nagraniu (DELETE .../videos/{id}/copy).")
+    if row.get("group_id"):
+        from app import mentor_upload_groups as UG
+
+        return await UG.abort_member(ctx, row, actor)
     if row["status"] == "uploading" and row.get("upload_id") and storage_ready():
         config = storage_config()
         try:
@@ -761,6 +791,10 @@ def _tmpdir() -> str:
 
 
 async def process_upload(row: Dict[str, Any]) -> None:
+    if row.get("group_id"):  # nagranie z kilku plików: sklejanie (`app/mentor_upload_groups.py`)
+        from app import mentor_upload_groups as UG
+
+        return await UG.process_group(row)
     upload_id = row["id"]
     source = presign_get(row["r2_key"], SOURCE_URL_TTL)
     if not source:
@@ -873,7 +907,9 @@ async def next_job() -> Optional[Tuple[str, Dict[str, Any]]]:
     card = await D.next_card()
     if card and card["id"] not in _failed_here:
         return "card", card
+    # Nagranie z kilku plików: pracę grupy niesie tylko część 0 (pozostałe pliki też są `processing`).
     upload = await C.one(select(mentor_uploads).where(mentor_uploads.c.status == "processing")
+                         .where(or_(mentor_uploads.c.group_index.is_(None), mentor_uploads.c.group_index == 0))
                          .where(mentor_uploads.c.id.notin_(list(_failed_here) or [""]))
                          .order_by(mentor_uploads.c.created_at.asc()).limit(1))
     return ("upload", upload) if upload else None
@@ -903,6 +939,11 @@ async def process_next() -> bool:
             await C.touch(row["pair_id"], row["author_id"], "clip_mp4_failed", "clips", row["match_id"], {"id": row["id"]})
         else:
             message = str(exc) if isinstance(exc, UserFacingError) else "Nie udało się przetworzyć nagrania. Sprawdź plik i wgraj go ponownie."
+            if row.get("group_id"):
+                from app import mentor_upload_groups as UG
+
+                await UG.fail_group(row, message)
+                return True
             await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == row["id"]).values(status="failed", error=message[:300]))
             await C.touch(row["pair_id"], row["uploader_id"], "upload_failed", "videos", row["match_id"], {"id": row["id"]})
     return True
@@ -936,7 +977,7 @@ async def run_media_worker() -> None:
 async def retention_once(now: Optional[datetime] = None) -> Dict[str, int]:
     stamp = now or datetime.now(timezone.utc)
     counts = {"originals": 0, "expired": 0, "aborted": 0}
-    candidates = await C.rows(select(mentor_uploads).where(mentor_uploads.c.status.in_(("ready", "uploading", "processing", "failed"))))
+    candidates = await C.rows(select(mentor_uploads).where(mentor_uploads.c.status.in_(("ready", "uploading", "uploaded", "processing", "failed"))))
     for row in candidates:
         actions = R.retention_actions(row, stamp)
         if actions["expire"]:
@@ -950,7 +991,9 @@ async def retention_once(now: Optional[datetime] = None) -> Dict[str, int]:
             await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == row["id"]).values(r2_key=None))
             counts["originals"] += 1
         elif actions["abort"]:
-            if row.get("upload_id") and row.get("r2_key") and storage_ready():
+            if row.get("status") != "uploading":  # plik grupy czekał na resztę ponad dobę: leży w R2 w całości
+                await asyncio.to_thread(delete_objects, [row.get("r2_key")])
+            elif row.get("upload_id") and row.get("r2_key") and storage_ready():
                 config = storage_config()
                 try:
                     await asyncio.to_thread(s3_client(config).abort_multipart_upload, Bucket=config["bucket"],

@@ -56,8 +56,9 @@ Schemat jak reszta repo: `define_tables(metadata)` + rejestracja w `app/db.py`
   (strzałki/kółka na stopklatce, ≤20 kształtów), `mentions` JSON[], `created_at`, `edited_at`, `deleted_at`.
 - `mentor_reads`: PK (`pair_id`, `judge_id`), `seen_rev`, `seen_at` (nieprzeczytane w pulpicie).
 - `mentor_uploads`: `id`, `pair_id`, `match_id`, `video_id` (po zakończeniu), `uploader_id`, `filename`, `size`,
-  `content_type`, `r2_key`, `upload_id` (multipart), `status` (`uploading|processing|ready|failed|expired`),
-  `duration_s`, `width`, `height`, `play_key` (H.264 MP4 faststart), `poster_key`, `error`, `created_at`, `expires_at` (+12 mies. od meczu).
+  `content_type`, `r2_key`, `upload_id` (multipart), `status` (`uploading|processing|ready|failed|expired`; plik grupy także
+  `uploaded` i `removed`), `duration_s`, `width`, `height`, `play_key` (H.264 MP4 faststart), `poster_key`, `error`, `created_at`,
+  `expires_at` (+12 mies. od meczu); od 07.11.2026 `group_id`, `group_index`, `group_count`, `recorded_at` (nagranie z kilku plików, 4.5).
 - `mentor_reports`: `id`, `pair_id`, `title`, `config_json` (zakres + sekcje), `snapshot_json`, `created_by`, `created_at`,
   `public_token`, `published_at`, `pdf_key`.
 - `mentor_web_sessions`: jak `pod_reka_club_sessions`: `id`, `judge_id`, `session_hash`, `csrf_hash`, `created_at`,
@@ -155,6 +156,47 @@ Każdy zapis podbija `mentor_panels.rev` i zwraca świeży obiekt (klient podmie
 - `GET .../uploads/{uploadId}` → postęp `{status, progress, error}`; `DELETE` przerywa.
 - Kolejka: tabela `mentor_uploads` + pętla w procesie (maks. 1 transkodowanie naraz), ffmpeg w obrazie (dodać do Dockerfile).
 - Retencja: zadanie dzienne kasuje oryginał po udanym transkodowaniu i całe nagranie po `expires_at`.
+
+#### Nagranie z kilku plików (07.11.2026)
+Mecz nagrany w kilku plikach (kamera dzieli nagranie, np. GoPro `GX010123.MP4`, `GX020123.MP4`) wysyła się jako jedno nagranie;
+serwer skleja części bez widocznego szwu. Kod: `app/mentor_upload_groups.py` (trasy, worker), czysta logika z testami:
+`app/mentor_upload_group_rules.py`. Prawa jak przy `/uploads` (`action="video"`).
+- Kolejność ustala klient (aplikacja i web): czas nagrania z metadanych, bez niego numeracja kamery w nazwie, potem nazwa;
+  podgląd miniatur i długości, przeciągnięcie przed wysłaniem. Serwer skleja dokładnie w kolejności tablicy `files`.
+- `POST /pairs/{pairId}/matches/{matchId}/upload-groups`
+  `{files:[{filename, size, content_type, recorded_at?: ISO|null, duration_s?: number|null}], order_source?: "recorded"|"manual"}`
+  → `{group_id, count, order_source, uploads:[{index, upload_id, part_size, total_parts, parts:[{n, url}], expires_at}]}`.
+  2-12 plików (`422 UPLOAD_GROUP_COUNT`), każdy jak pojedyncze wgrywanie (błąd z numerem pliku, np. „Plik 2 (a.png): …”),
+  razem do 20 GB (`422 UPLOAD_TOO_BIG`). Każdy plik ma własny multipart w R2 (`parts` w tym samym kształcie co start pojedynczego
+  pliku). Telefon wysyła pliki PO KOLEI, jeden łączny pasek postępu, każdy plik wznawialny.
+- Dla każdego pliku bez zmian działają `POST .../uploads/{uploadId}/parts?from=n` i `POST .../uploads/{uploadId}/complete`:
+  - plik nie ostatni → `{status:"waiting_group", group_id, done, count}` (nagrania jeszcze nie ma),
+  - ostatni brakujący → JEDNO nagranie (`kind=upload`, `upload_id` = plik o `index` 0, nazwa „<pierwszy plik bez rozszerzenia> (N części)”),
+    praca dla kolejki ffmpeg → `{status:"processing", video_id, group_id}`,
+  - kolejność domknięć dowolna, powtórka idempotentna (po zamknięciu grupy: `{status, video_id, group_id, error}`).
+- `GET .../upload-groups/{groupId}` → `{group_id, status: "uploading"|"processing"|"ready"|"failed"|"removed", progress (0..1, przy
+  processing; ready = 1), error, video_id, done, count, files:[{index, upload_id, filename, size, status}]}`. Status pliku:
+  `uploading` → `uploaded` (czeka na resztę) → `processing` → `ready` | `failed` | `removed`.
+- `DELETE .../upload-groups/{groupId}` (właściciel albo admin) przerywa multiparty w toku, kasuje wysłane pliki, status `removed`;
+  nagranie w toku znika jak przy przerwaniu wgrywania. Gotowa grupa → `409 UPLOAD_GROUP_READY` (usuwa się ją jak nagranie).
+  `DELETE .../uploads/{uploadId}` pliku grupy przerywa całą grupę. `GET .../uploads/{uploadId}` pliku grupy działa dalej.
+- Worker (ta sama kolejka, jedna praca naraz; pracę grupy niesie plik 0): ffprobe każdej części (wymiary po obrocie, fps, kodeki,
+  dźwięk, czas), potem wspólny format:
+  - wszystkie części H.264 + AAC z tym samym obrazem (wymiary, obrót, fps, profil, poziom, piksele yuv420p) i dźwiękiem,
+    do 1080p → concat demuxer + `-c copy` + faststart (bez przekodowania, szybko; tylko obraz i dźwięk, ścieżki danych kamer odpadają),
+  - inaczej każda część wyrównana: wysokość min(1080, najwyższa część), szerokość najszerszych proporcji (parzyste wymiary,
+    węższa część wpisana z pasami), fps = najczęstszy zaokrąglony fps części (maks. 60, remis - wcześniejsza część), H.264 jak
+    zwykłe wgrywanie (CRF 23, veryfast), AAC 48 kHz stereo (cisza, gdy część nie ma dźwięku); potem concat `-c copy`.
+  - Postęp z sumy czasów części (wyrównanie 0-95 %, sklejenie do 99 %). Plakat jak dziś.
+- Błąd jednej części = cała grupa `failed` z polskim powodem, np. „Część 3 (GX030123.MP4) nie daje się odczytać.”.
+- Nagranie ma pole `parts: null | [{index, filename, start_s, duration_s}]` (lista nagrań meczu, pokój): `start_s` w czasie
+  gotowego filmu, rosnąco, część 0 od 0; czasy rzeczywiste po sklejeniu. Pojedynczy plik, stare nagrania i sklejanie w toku: `null`.
+  Klient rysuje z tego znaczniki części na osi i pasku filmu („Część 2 od 31:12”) i propozycję granicy II połowy w kalibracji.
+- Retencja jak dziś: oryginały części żyją do udanego sklejenia (potem dzienne sprzątanie je kasuje), całe nagranie do
+  `expires_at`; plik czekający na resztę grupy ponad dobę jest porzucany jak niedokończone wgrywanie. Usunięcie gotowego
+  nagrania kasuje też oryginały pozostałych części.
+- Schemat (migracje przy starcie, idempotentne): `mentor_uploads.group_id` (indeks), `group_index`, `group_count`, `recorded_at`;
+  `mentor_match_videos.parts_json`.
 
 ### 4.6 Klipy i kategorie
 - `GET /pairs/{pairId}/categories` → `{categories: Category[], palette:[...], icons:[...]}` (seed domyślnych przy pierwszym wywołaniu).
