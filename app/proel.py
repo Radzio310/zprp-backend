@@ -4,6 +4,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy import select, insert, update, delete, func
+from app.proel_lineup_fill import fill_shared_lineup
 from app.db import (
     database,
     proel_deleted_matches,
@@ -1516,6 +1517,8 @@ async def create_proel_match(
         # Nakładamy overlay JUŻ na pierwszy zapis: sędzia mógł potwierdzić
         # badania na długo przed tym, jak stolikowy w ogóle otworzył mecz.
         data_json = _reproject_blob(state, copy.deepcopy(req.data_json))
+        # Mecz ręczny: brakujące nazwiska i osoby A-E ze składu meczu wspólnego (07.11.2026).
+        data_json = await fill_shared_lineup(req.match_number, data_json)
 
         # Pierwsza wersja treści (1) razem z autorem - patrz
         # `app/proel_doc_version.py`. Czas przez `RETURNING`, żeby telefon
@@ -2024,6 +2027,9 @@ async def update_proel_match(
                 state = absorbed["state"]
 
             projected = _reproject_blob(state, copy.deepcopy(req.data_json))
+            # Mecz ręczny: brakujące nazwiska i osoby A-E ze składu meczu wspólnego (07.11.2026) -
+            # także gdy prowadzi telefon ze starszą wersją aplikacji.
+            projected = await fill_shared_lineup(match_number, projected)
 
             # Cofnięcie zatwierdzenia zostawia treść, jaka jest - patrz
             # `unapprove_only` w `app/proel_status.py`. Dalej `projected` służy
