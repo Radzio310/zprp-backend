@@ -424,6 +424,8 @@ from app.mentor_trybuna_thumbs import router as mentor_trybuna_thumbs_router
 app.include_router(mentor_trybuna_thumbs_router)
 from app.mentor_trybuna_suggest import router as mentor_trybuna_suggest_router
 app.include_router(mentor_trybuna_suggest_router)
+from app.mentor_trybuna_history import router as mentor_trybuna_history_router
+app.include_router(mentor_trybuna_history_router)
 # Automat nagrań w dniu meczu: trasy auto-found (seen/accept/dismiss/undo) - `docs/mentor-panel.md`, § "Automat nagrań".
 from app.mentor_auto_found import router as mentor_auto_found_router
 app.include_router(mentor_auto_found_router)
