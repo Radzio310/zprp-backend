@@ -43,6 +43,11 @@ MAX_VIDEO_SECONDS = 6 * 3600
 #: 0:09 w pierwszej klatce = `match_start_s: -9`). Ujemna kotwica to nadal ta sama oś: sekunda nagrania = kotwica +
 #: czas meczu, a zdarzenia sprzed startu nagrania wypadają przed jego początkiem.
 MAX_LEAD_SECONDS = 3 * 3600
+#: Punkty kontrolne synchronizacji (08.11.2026): sędzia wskazuje, gdzie zdarzenie z ProEla naprawdę jest na nagraniu
+#: (`{key, match_ms, half, video_s}`); klient przelicza między nimi resztę zdarzeń (web `player/syncPoints.ts`,
+#: aplikacja `utils/syncPoints.ts`). Serwer tylko pilnuje kształtu i limitu.
+MAX_SYNC_POINTS = 80
+MAX_MATCH_MS = 6 * 3600 * 1000
 MAX_MATCH_MS = 3 * 3600 * 1000
 MARKER_KINDS = ("manual", "goal", "seven", "penalty", "card", "timeout")
 #: Rodzaje akcji znacznika „Ważne" (16.10.2026: pięć zamiast ośmiu) - lustro
@@ -116,7 +121,26 @@ def clean_sync(raw: Any) -> Dict[str, Any]:
     out["break_minutes"] = int(brk) if brk is not None and 0 <= brk <= 60 else None
     for key in ("stream_start_ms", "kickoff_wall_ms", "second_half_wall_ms"):
         out[key] = _wall(src.get(key))
+    out["points"] = clean_points(src.get("points"))
     return out
+
+
+def clean_points(raw: Any) -> List[Dict[str, Any]]:
+    """Punkty kontrolne: śmieci odpadają, ten sam klucz = ostatni wygrywa, kolejność połowa + czas meczu, limit."""
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        key = str(item.get("key") or "").strip()[:120]
+        ms, sec, half = _num(item.get("match_ms")), _num(item.get("video_s")), _num(item.get("half"))
+        if not key or ms is None or sec is None or half not in (1, 2):
+            continue
+        if not (0 <= ms <= MAX_MATCH_MS and 0 <= sec <= MAX_VIDEO_SECONDS):
+            continue
+        by_key.pop(key, None)
+        by_key[key] = {"key": key, "match_ms": int(round(ms)), "half": int(half), "video_s": round(float(sec), 1)}
+    points = sorted(by_key.values(), key=lambda p: (p["half"], p["match_ms"]))
+    return points[-MAX_SYNC_POINTS:]
 
 
 def _wall(value: Any) -> Optional[int]:
