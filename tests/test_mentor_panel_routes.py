@@ -559,7 +559,9 @@ def test_wgrywanie_transkodowanie_i_mp4(env, monkeypatch, tmp_path):
     assert status_before["status"] == "processing"
     pending = next(v for v in room_before["videos"] if v["kind"] == "upload")
     assert pending["upload_status"] == "processing" and pending["playable"] is False
+    landed = status_after.pop("video")  # 08.11.2026: stan niesie nagranie - pokój wkłada je sam
     assert worked is True and status_after == {"status": "ready", "progress": 1.0, "error": None, "video_id": done["video_id"]}
+    assert landed["id"] == done["video_id"] and landed["playable"] is True
     assert video["playable"] and video["play_url"].endswith("/play.mp4?part=None") and video["poster_url"]
     assert video["provider"] == "upload" and video["duration_s"] == 3600.0
     assert ("upload", create["Key"].rsplit("/", 1)[0] + "/play.mp4") in s3.calls

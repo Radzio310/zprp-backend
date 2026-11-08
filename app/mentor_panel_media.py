@@ -571,7 +571,19 @@ async def upload_status(pair_id: str, match_id: str, upload_id: str, actor: Acto
                            .where(mentor_uploads.c.group_index == 0))
         worker_key = lead["id"] if lead else upload_id
     progress = 1.0 if row["status"] == "ready" else _progress.get(worker_key) if row["status"] == "processing" else None
-    return {"status": row["status"], "progress": progress, "error": row.get("error"), "video_id": row.get("video_id")}
+    return {"status": row["status"], "progress": progress, "error": row.get("error"), "video_id": row.get("video_id"),
+            "video": await landed_video(ctx, row.get("video_id"), row["status"])}
+
+
+async def landed_video(ctx: Dict[str, Any], video_id: Optional[str], status: str) -> Optional[Dict[str, Any]]:
+    """Nagranie wgrania w odpowiedzi stanu (08.11.2026): klient wkłada je do pokoju sam, bez przeładowania strony -
+    w przetwarzaniu (pigułka z kropką), a po `ready` gotowe do grania. Nagranie usunięte w międzyczasie = null."""
+    if not video_id or status not in ("processing", "ready"):
+        return None
+    row = await C.one(select(mentor_match_videos.c.id, mentor_match_videos.c.deleted_at).where(mentor_match_videos.c.id == video_id))
+    if not row or row.get("deleted_at") is not None:
+        return None
+    return await _video_payload(ctx, video_id)
 
 
 @router.delete("/pairs/{pair_id}/matches/{match_id}/uploads/{upload_id}")

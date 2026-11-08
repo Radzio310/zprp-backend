@@ -225,6 +225,8 @@ def test_worker_skleja_bez_przekodowania(env, monkeypatch):
     assert ffmpeg[0][-1].endswith("play.mp4") and "+faststart" in ffmpeg[0]
     assert status["status"] == "ready" and status["progress"] == 1.0 and status["video_id"] == video_id and status["error"] is None
     video = next(v for v in room["videos"] if v["kind"] == "upload")
+    # Stan grupy niesie gotowe nagranie - pokój wkłada je sam, bez odświeżania strony (08.11.2026).
+    assert status["video"]["id"] == video_id and status["video"]["playable"] and status["video"]["parts"] == video["parts"]
     assert video["playable"] and video["play_url"].endswith("/play.mp4?part=None") and video["poster_url"]
     assert video["parts"] == [{"index": 0, "filename": NAMES[0], "start_s": 0.0, "duration_s": 1872.04},
                               {"index": 1, "filename": NAMES[1], "start_s": 1872.04, "duration_s": 1800.0},

@@ -150,6 +150,13 @@ class Env:
         self.trybuna_rules = importlib.import_module("app.mentor_trybuna_rules")
         self.trybuna_suggest = importlib.import_module("app.mentor_trybuna_suggest")
         self.auto_found = importlib.import_module("app.mentor_auto_found")
+        # Podpowiedzi transmisji pytają oEmbed YouTube o dostępność filmu - w testach bez sieci („nie wiadomo” = zostaje).
+        self.panel_streams = importlib.import_module("app.mentor_panel_streams")
+
+        async def _no_probe(_video_id):
+            return None
+
+        monkeypatch.setattr(self.panel_streams, "_probe", _no_probe)
         self.auto_rules = importlib.import_module("app.mentor_auto_found_rules")
         self.drive = importlib.import_module("app.mentor_drive")
         self.drive_google = importlib.import_module("app.mentor_drive_google")

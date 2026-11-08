@@ -862,3 +862,10 @@ Decyzja właściciela (07.11.2026, wersja ostateczna): link do transmisji **na �
 - `mentor_uploads`: `refresh_at` (zamówione nadpisanie gotowej kopii; worker bierze wiersze `downloading` oraz `ready` z `refresh_at`). Nowy status wiersza kopii: `waiting`.
 - Koszt YouTube API: przy uzbrojonych filmach jedno `videos.list` (1 jednostka na 50 filmów) co 2 minuty; bez klucza strona filmu najwyżej co 5 minut na film.
 - **Nie sprawdzono na prawdziwym YouTube** (jak 14.6): przebieg sprawdzony na atrapach yt-dlp, ffmpeg, R2 i stanu transmisji.
+
+## Poprawki pokoju meczu (08.11.2026)
+
+- **Stan wgrywania niesie nagranie.** `GET .../uploads/{id}` i `GET .../upload-groups/{id}` mają dodatkowe pole `video: Video | null`: nagranie w przetwarzaniu (`upload_status: "processing"`) i gotowe (`ready`, z `play_url`). `null` przed złożeniem pliku, po błędzie i gdy nagranie usunięto. Klient wkłada je do pokoju sam: przedtem stan miał tylko `video_id`, a pokój stał na „Serwer przetwarza nagranie” do ręcznego odświeżenia strony.
+- **Gwizdek przed początkiem nagrania.** `sync.match_start_s` i `sync.second_half_s` mogą być ujemne (najwyżej `-3 h`, `mentor_video_rules.MAX_LEAD_SECONDS`): kamera ruszyła po gwizdku, np. pierwsza klatka pokazuje 0:09 na zegarze = `match_start_s: -9`. Oś się nie zmienia (sekunda nagrania = kotwica + czas meczu). Zdarzenia sprzed startu nagrania klient przypina do jego początku jako przybliżone. Web: w Synchronizacji mała opcja „Gwizdka nie ma w nagraniu? Ustaw z zegara na ekranie”.
+- **Podpowiedzi transmisji bez martwych filmów.** Przed pokazaniem `suggested_streams` (i w odpowiedziach `streams/search` / `streams/reject`) serwer pyta oEmbed YouTube (bez klucza i bez jednostek puli): 401/403/404 = film prywatny, usunięty albo bez osadzania - podpowiedź znika. Wynik pamiętany w procesie (dostępny 3 h, niedostępny 6 h); brak odpowiedzi = podpowiedź zostaje. Web: zamknięcie podpowiedzi (×) woła `POST .../streams/reject`, więc nie wraca po odświeżeniu.
+

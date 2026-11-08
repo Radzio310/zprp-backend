@@ -135,6 +135,7 @@ async def group_status(pair_id: str, match_id: str, group_id: str, actor: Actor 
     return {
         "group_id": group_id, "status": state["status"], "progress": progress, "error": state["error"],
         "video_id": state["video_id"], "done": state["done"], "count": state["count"],
+        "video": await M.landed_video(ctx, state["video_id"], state["status"]),
         "files": [{"index": r.get("group_index"), "upload_id": r["id"], "filename": r["filename"], "size": r["size"],
                    "status": r["status"]} for r in rows],
     }

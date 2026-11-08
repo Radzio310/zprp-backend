@@ -39,6 +39,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 MAX_MARKERS = 300
 MAX_LABEL = 80
 MAX_VIDEO_SECONDS = 6 * 3600
+#: Gwizdek PRZED początkiem nagrania (08.11.2026): kamera ruszyła po rozpoczęciu meczu (np. zegar na ekranie pokazuje
+#: 0:09 w pierwszej klatce = `match_start_s: -9`). Ujemna kotwica to nadal ta sama oś: sekunda nagrania = kotwica +
+#: czas meczu, a zdarzenia sprzed startu nagrania wypadają przed jego początkiem.
+MAX_LEAD_SECONDS = 3 * 3600
 MAX_MATCH_MS = 3 * 3600 * 1000
 MARKER_KINDS = ("manual", "goal", "seven", "penalty", "card", "timeout")
 #: Rodzaje akcji znacznika „Ważne" (16.10.2026: pięć zamiast ośmiu) - lustro
@@ -105,7 +109,7 @@ def clean_sync(raw: Any) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for key in ("match_start_s", "second_half_s"):
         n = _num(src.get(key))
-        out[key] = int(round(n)) if n is not None and 0 <= n <= MAX_VIDEO_SECONDS else None
+        out[key] = int(round(n)) if n is not None and -MAX_LEAD_SECONDS <= n <= MAX_VIDEO_SECONDS else None
     half = _num(src.get("half_minutes"))
     out["half_minutes"] = int(half) if half and 5 <= half <= 60 else None
     brk = _num(src.get("break_minutes"))

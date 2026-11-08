@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -162,6 +163,59 @@ def visible_rows(rows: Iterable[Dict[str, Any]], added: Iterable[str], rejected:
             and (r.get("confidence") in ("official", "confirmed") or r["video_id"] in mine)]
 
 
+# ─── Dostępność filmu (08.11.2026) ──────────────────────────────────────────
+#
+# Transmisja znaleziona, gdy była publiczna, potem bywa prywatna albo usunięta - podpowiedź „Dodaj nagranie” wisiała
+# wtedy w pokoju bez końca, a dodać jej się nie dało. Przed pokazaniem pytamy oEmbed YouTube (bez klucza i bez
+# jednostek dobowej puli): 200 = jest, 401/403/404 = prywatny, usunięty albo bez osadzania (w pokoju i tak nie zagra).
+# Wynik pamiętamy w procesie; awaria sieci = „nie wiadomo”, podpowiedź zostaje.
+
+AVAILABLE_TTL_S = 3 * 3600.0
+GONE_TTL_S = 6 * 3600.0
+PROBE_TIMEOUT_S = 4.0
+PROBE_MAX = 6
+_availability: Dict[str, tuple] = {}
+
+
+def availability_from_status(code: int) -> Optional[bool]:
+    """Kod odpowiedzi oEmbed -> dostępny (True), niedostępny (False), nie wiadomo (None)."""
+    if code == 200:
+        return True
+    if code in (401, 403, 404):
+        return False
+    return None
+
+
+async def _probe(video_id: str) -> Optional[bool]:
+    import httpx
+
+    url = f"https://www.youtube.com/oembed?format=json&url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3D{video_id}"
+    try:
+        async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_S, follow_redirects=True) as client:
+            res = await client.get(url, headers={"Accept": "application/json"})
+        return availability_from_status(res.status_code)
+    except Exception:  # noqa: BLE001 - brak odpowiedzi nie chowa podpowiedzi
+        return None
+
+
+async def video_available(video_id: str) -> bool:
+    now = time.monotonic()
+    hit = _availability.get(video_id)
+    if hit and hit[0] > now:
+        return hit[1]
+    found = await _probe(video_id)
+    if found is not None:
+        _availability[video_id] = (now + (AVAILABLE_TTL_S if found else GONE_TTL_S), found)
+    return found is not False
+
+
+async def available_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Podpowiedzi bez filmów, których YouTube już nie podaje (sprawdza najwyżej `PROBE_MAX` naraz)."""
+    head = rows[:PROBE_MAX]
+    flags = await asyncio.gather(*(video_available(PR.s(r.get("video_id"))) for r in head))
+    return [r for r, ok in zip(head, flags) if ok] + rows[PROBE_MAX:]
+
+
 # ─── Baza ───────────────────────────────────────────────────────────────────
 
 
@@ -258,6 +312,7 @@ async def stream_state(ctx: Dict[str, Any], card: Dict[str, Any], raw_videos: Li
         row = await _row(ctx["pair_id"], match_id)
     rows = visible_rows(await store.streams_for([match_id]), _added_ids(raw_videos), _json_list((row or {}).get("rejected_json")),
                         _json_list((row or {}).get("found_json")))
+    rows = await available_rows(rows)
     streams = await store.with_channels(rows)
     mctx = await match_context(card)
     now = clock()

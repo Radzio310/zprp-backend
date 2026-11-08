@@ -311,7 +311,9 @@ def test_sync_is_bounded():
         "kickoff_wall_ms": None,
         "second_half_wall_ms": None,
     }
-    assert clean_sync({"match_start_s": -1, "half_minutes": 500}) == {
+    # Ujemna kotwica = gwizdek przed początkiem nagrania (08.11.2026), ale najwyżej 3 h wcześniej.
+    assert clean_sync({"match_start_s": -1})["match_start_s"] == -1
+    assert clean_sync({"match_start_s": -(3 * 3600 + 1), "half_minutes": 500}) == {
         "match_start_s": None,
         "second_half_s": None,
         "half_minutes": None,
