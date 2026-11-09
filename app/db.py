@@ -4758,6 +4758,10 @@ from app.shared_match_tables import define_tables as _define_shared_match_tables
 from app.lineup_read_tables import define_tables as _define_lineup_read_tables
 (lineup_read_usage,) = _define_lineup_read_tables(metadata)
 
+# Kreator nowych sędziów na baza.zprp.pl - historia założonych osób okręgu (09.11.2026, `app/referee_onboarding_tables.py`, `docs/kreator-nowych-sedziow.md`).
+from app.referee_onboarding_tables import define_tables as _define_referee_onboarding_tables
+(province_referee_onboarding,) = _define_referee_onboarding_tables(metadata)
+
 # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.
 from app.province_alert_tables import define_tables as _define_alert_tables
 province_alert_settings, province_alert_state = _define_alert_tables(metadata)

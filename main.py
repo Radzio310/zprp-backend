@@ -93,6 +93,7 @@ from app.upload_protocol import router as upload_protocol_router
 from app.protocol_convert import router as protocol_convert_router
 from app.password_change import router as password_change_router
 from app.baza_web import router as baza_web_router
+from app.referee_onboarding import router as referee_onboarding_router
 from app.atlas_routes import router as atlas_router
 from app.province_judges import router as province_judges_router
 from app.badges import router as badges_router
@@ -458,6 +459,8 @@ app.include_router(upload_protocol_router)
 app.include_router(protocol_convert_router)
 app.include_router(password_change_router)
 app.include_router(baza_web_router)
+# Kreator nowych sędziów na baza.zprp.pl (panel okręgowy BAZA_web, 09.11.2026).
+app.include_router(referee_onboarding_router)
 app.include_router(atlas_router)
 app.include_router(province_judges_router)
 app.include_router(badges_router)
