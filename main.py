@@ -94,6 +94,7 @@ from app.protocol_convert import router as protocol_convert_router
 from app.password_change import router as password_change_router
 from app.baza_web import router as baza_web_router
 from app.referee_onboarding import router as referee_onboarding_router
+from app.zprp_report_snapshots import router as zprp_report_snapshots_router
 from app.atlas_routes import router as atlas_router
 from app.province_judges import router as province_judges_router
 from app.badges import router as badges_router
@@ -461,6 +462,8 @@ app.include_router(password_change_router)
 app.include_router(baza_web_router)
 # Kreator nowych sędziów na baza.zprp.pl (panel okręgowy BAZA_web, 09.11.2026).
 app.include_router(referee_onboarding_router)
+# Zapisane stany zakładek Raportów ZPRP (10.11.2026).
+app.include_router(zprp_report_snapshots_router)
 app.include_router(atlas_router)
 app.include_router(province_judges_router)
 app.include_router(badges_router)
@@ -973,6 +976,7 @@ _province_match_monitor_task: asyncio.Task | None = None
 _exam_promotion_task: asyncio.Task | None = None
 _alarm_scan_task: asyncio.Task | None = None
 _province_offtime_sync_task: asyncio.Task | None = None
+_report_snapshot_task: asyncio.Task | None = None
 _zprp_unavailability_mail_task: asyncio.Task | None = None
 _deploy_push_test_task: asyncio.Task | None = None
 _zprp_public_sync_task: asyncio.Task | None = None
@@ -1578,6 +1582,10 @@ async def startup():
     _deploy_push_test_task = asyncio.create_task(_run_deploy_push_test_safely())
     _province_match_monitor_task = asyncio.create_task(run_province_match_monitor())
     _province_offtime_sync_task = asyncio.create_task(run_province_offtime_sync())
+    # Zapisane stany zakładek Raportów ZPRP - nocny przebieg dla okręgów z kontem sync (10.11.2026).
+    global _report_snapshot_task
+    from app.zprp_report_snapshots import run_report_snapshot_scheduler
+    _report_snapshot_task = asyncio.create_task(run_report_snapshot_scheduler())
     _zprp_unavailability_mail_task = asyncio.create_task(run_overlap_mail_scheduler())
     _calendar_feed_task = asyncio.create_task(run_calendar_feed_sync())
     # Sprzątanie migawek meczu - PARTIAMI, żeby pierwsze uruchomienie po
@@ -1789,6 +1797,8 @@ async def shutdown():
         except asyncio.CancelledError:
             pass
 
+    if _report_snapshot_task:
+        _report_snapshot_task.cancel()
     if _province_offtime_sync_task:
         _province_offtime_sync_task.cancel()
         try:

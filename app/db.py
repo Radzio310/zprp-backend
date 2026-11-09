@@ -4762,6 +4762,10 @@ from app.lineup_read_tables import define_tables as _define_lineup_read_tables
 from app.referee_onboarding_tables import define_tables as _define_referee_onboarding_tables
 (province_referee_onboarding,) = _define_referee_onboarding_tables(metadata)
 
+# Zapisane stany zakładek „Raporty i podsumowania ZPRP" (10.11.2026, `app/zprp_report_snapshot_tables.py`, `docs/raporty-zprp-zapisany-stan.md`).
+from app.zprp_report_snapshot_tables import define_tables as _define_zprp_report_snapshot_tables
+(zprp_report_snapshots,) = _define_zprp_report_snapshot_tables(metadata)
+
 # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.
 from app.province_alert_tables import define_tables as _define_alert_tables
 province_alert_settings, province_alert_state = _define_alert_tables(metadata)

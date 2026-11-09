@@ -531,6 +531,31 @@ async def _sync_province(
     ) as client:
         cookies = await _login_zprp_and_get_cookies(client, username, password)
         officials = await _scrape_officials(client, cookies)
+        # Ta sama lista co w zakładce „Sędziowie i delegaci" Raportów ZPRP -
+        # zapis stanu okręgu (10.11.2026, `app/zprp_report_snapshots.py`).
+        try:
+            from app.zprp.officials import _summarize_roles
+            from app.zprp_report_snapshot_rules import SOURCE_AUTO, officials_payload
+            from app.zprp_report_snapshots import save_snapshot
+
+            await save_snapshot(
+                province,
+                "officials",
+                "",
+                officials_payload(
+                    officials,
+                    base_url=settings.ZPRP_BASE_URL,
+                    entry_href="/index.php?a=sedzia&Filtr_archiwum=1",
+                    summary=_summarize_roles(officials),
+                    fetched_at=_now().replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                ),
+                source=SOURCE_AUTO,
+                fetched_by="serwer",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Central offtimes %s: nie udało się zapisać listy do Raportów ZPRP", province)
         numeric_officials = {
             _clean(judge_id): item
             for judge_id, item in officials.items()
