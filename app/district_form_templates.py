@@ -67,6 +67,25 @@ TEMPLATES: List[Dict[str, Any]] = [
             ]
         },
         "settings": {"reminders": "standard", "roster_visible": True, "home_prompt": True},
+        # Bloki do uzupełnienia w kreatorze (§17). Bez kreatora puste bloki odpadają
+        # (`district_form_info.adapt_template_info`), a tytuł przelewu bierze tytuł formularza.
+        "info": {
+            "above": [
+                {"id": "countdown", "type": "countdown", "title": "Do końca zapisów", "target": "deadline"},
+                {
+                    "id": "payment",
+                    "type": "payment",
+                    "title": "Dane do przelewu",
+                    "recipient": "",
+                    "account": "",
+                    "transfer_title": "Impreza z wpłatą – {imie_nazwisko}",
+                    "amount_column": "payment",
+                    "confirm_column": "payment",
+                    "bank_qr": True,
+                },
+            ],
+            "below": [{"id": "contact", "type": "contact", "title": "Kontakt", "people": []}],
+        },
     },
     {
         "id": "fee",
@@ -108,6 +127,14 @@ TEMPLATES: List[Dict[str, Any]] = [
             ]
         },
         "settings": {"reminders": "standard", "roster_visible": True, "home_prompt": True},
+        # Licznik do wydarzenia (bez spięcia odlicza do terminu) i miejsce do uzupełnienia.
+        "info": {
+            "above": [
+                {"id": "countdown", "type": "countdown", "title": "Do rozpoczęcia", "target": "event"},
+                {"id": "place", "type": "place", "title": "Miejsce", "name": ""},
+            ],
+            "below": [],
+        },
     },
     {
         "id": "attendance",

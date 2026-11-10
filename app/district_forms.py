@@ -26,6 +26,7 @@ from fastapi.routing import APIRoute
 from sqlalchemy import and_, insert, select, update
 
 from app import district_form_export as X
+from app import district_form_info as INFO
 from app import district_form_schema as SC
 from app import district_form_templates as T
 from app import district_forms_rules as R
@@ -142,7 +143,8 @@ def _future(value: Any, moment: datetime) -> Optional[datetime]:
 async def _detail(form_id: str, who: Who) -> Dict[str, Any]:
     ctx = await S.context(form_id, who.viewer)
     events = await S.events_by_id([ctx.form.get("event_id")])
-    return S.detail(ctx, event=events.get(int(ctx.form["event_id"])) if ctx.form.get("event_id") else None)
+    return S.detail(ctx, event=events.get(int(ctx.form["event_id"])) if ctx.form.get("event_id") else None,
+                    viewer_name=who.actor.full_name or None)
 
 
 def _sorted_people(ctx: S.Ctx, ids: List[str]) -> List[str]:
@@ -225,6 +227,8 @@ async def pending(who: Who = Depends(who_dep)) -> Dict[str, Any]:
         if R.in_scope("todo", roles=ctx.roles, status=ctx.status, participant=me["participant"], filled=me["filled"],
                       web_review=me["web_review"]):
             item["status_column"] = R.status_column(ctx.columns) if ctx.kind == "list" else None
+            event = events.get(int(ctx.form["event_id"])) if ctx.form.get("event_id") else None
+            item["info_countdown"] = INFO.first_countdown(S.resolved_info(ctx.form, event))
             out.append(item)
     out.sort(key=_deadline_key)
     return {"forms": out}
@@ -421,7 +425,7 @@ async def create(background: BackgroundTasks, body: Dict[str, Any] = Body(...), 
         template = T.template(body.get("template_id"))
         if not template:
             raise R.FormError("bad_template", "Nie ma takiego szablonu.", 400)
-        base = {k: template[k] for k in ("kind", "title", "description", "schema", "settings")}
+        base = {k: template[k] for k in ("kind", "title", "description", "schema", "settings", "info") if k in template}
     kind = _s(body.get("kind")) or _s(base.get("kind"))
     if kind not in R.KINDS:
         raise R.FormError("bad_kind", "Rodzaj: lista deklaracji albo formularz.", 400)
@@ -435,6 +439,14 @@ async def create(background: BackgroundTasks, body: Dict[str, Any] = Body(...), 
     closes_at = _future(body.get("closes_at"), moment)
     event_id = body.get("event_id")
     event = await S.check_event_link(int(event_id) if event_id not in (None, "") else None, province=prov, form_id=None)
+    if "info" in body:
+        values["info_json"] = INFO.clean_info(body.get("info"), values["schema_json"], has_event=event is not None)
+    elif base.get("info"):
+        adapted = INFO.adapt_template_info(base["info"], has_event=event is not None,
+                                           template_title=_s(base.get("title")), form_title=values["title"])
+        values["info_json"] = INFO.clean_info(adapted, values["schema_json"], has_event=event is not None)
+    else:
+        values["info_json"] = INFO.clean_info(None)
     refusal = R.anonymous_web_refusal(kind=kind, settings=values["settings_json"], audience=values["audience_json"], web_enabled=False)
     if refusal:
         raise refusal
@@ -526,6 +538,14 @@ async def patch_form(
         raw = body.get("event_id")
         event = await S.check_event_link(int(raw) if raw not in (None, "") else None, province=form["province"], form_id=form_id)
         values["event_id"] = int(event["id"]) if event else None
+    if "info" in body or {"schema_json", "event_id"} & set(values):
+        # Bloki sprawdzamy też przy zmianie listy albo wydarzenia: licznik do wydarzenia
+        # i odwołania do kolumny wpłaty muszą dalej mieć cel.
+        has_event = (values["event_id"] if "event_id" in values else form.get("event_id")) is not None
+        cleaned = INFO.clean_info(body.get("info") if "info" in body else form.get("info_json"),
+                                  values.get("schema_json", form.get("schema_json")), has_event=has_event)
+        if "info" in body or INFO.info_changed(form.get("info_json"), cleaned):
+            values["info_json"] = cleaned
     settings = values.get("settings_json", form.get("settings_json") or {})
     audience = values.get("audience_json", form.get("audience_json") or {})
     if form["kind"] == "form" and "settings_json" in values:
@@ -671,6 +691,8 @@ async def duplicate(form_id: str, body: Optional[Dict[str, Any]] = Body(None), w
             id=new_id, province=form["province"], kind=form["kind"], title=title, description=form.get("description"),
             cover_json=form.get("cover_json"), schema_json=form.get("schema_json") or {},
             settings_json=form.get("settings_json") or {}, audience_json=form.get("audience_json") or {},
+            # Kopia nie ma wydarzenia: licznik do wydarzenia odlicza do terminu.
+            info_json=INFO.adapt_template_info(form.get("info_json"), has_event=False, template_title="", form_title=title),
             event_id=None, web_enabled=False, created_by=who.judge_id, created_by_name=who.actor.full_name or None,
             created_at=moment, updated_at=moment, closes_at=closes_at, rev=1,
         )
@@ -920,6 +942,8 @@ async def export(form_id: str, format: str = Query("xlsx"), who: Who = Depends(w
     data = await asyncio.to_thread(
         X.build, format, form=ctx.form, province=R.province_label(display(ctx.form["province"])), header=header,
         rows=table, tones=tones, summary=totals, generated=generated,
+        payment=INFO.first_payment(S.resolved_info(ctx.form, (await S.events_by_id([ctx.form.get("event_id")])).get(
+            int(ctx.form["event_id"])) if ctx.form.get("event_id") else None)),
     )
     token = X.store(data, format)
     filename = X.safe_filename(ctx.form["title"], format)

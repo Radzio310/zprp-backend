@@ -21,6 +21,7 @@ from typing import Any, Dict, Mapping, Optional
 from fastapi import APIRouter, Body, Query, Request
 from sqlalchemy import and_, insert, select, update
 
+from app import district_form_info as INFO
 from app import district_form_schema as SC
 from app import district_forms_rules as R
 from app import district_forms_service as S
@@ -117,11 +118,17 @@ def _people(ctx: S.Ctx):
     return sorted(ctx.circles.participants, key=lambda j: (S.judge_name(ctx.by_id, j).casefold(), j))
 
 
+async def _info(form: Mapping[str, Any], *, web_enabled: bool) -> Dict[str, Any]:
+    """Bloki informacyjne strony; przy wyłączonym webie tylko licznik i tekst."""
+    event = (await S.events_by_id([form.get("event_id")])).get(int(form["event_id"])) if form.get("event_id") else None
+    return INFO.public_info(S.resolved_info(form, event), web_enabled=web_enabled)
+
+
 @router.get("/{code}", summary="Formularz na stronie (bez logowania)")
 async def public_form(code: str) -> Dict[str, Any]:
     form = await _form_by_code(code)
     if not form.get("web_enabled"):
-        return {"web_enabled": False, "title": form["title"]}
+        return {"web_enabled": False, "title": form["title"], "info": await _info(form, web_enabled=False)}
     moment = S.now()
     ctx = await S.public_context(form, moment=moment)
     if ctx.status == "trash":
@@ -138,6 +145,7 @@ async def public_form(code: str) -> Dict[str, Any]:
         "province_label": R.province_label(display(form["province"])),
         "counts": _counts(ctx),
         "privacy_note": PRIVACY_NOTE,
+        "info": await _info(form, web_enabled=True),
     }
     if ctx.kind == "list":
         out["columns"] = R.visible_columns(ctx.columns, "web")

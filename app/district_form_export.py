@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime
 from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
+from app import district_form_info as INFO
 from app import district_form_schema as SC
 from app import district_forms_rules as R
 
@@ -326,6 +327,21 @@ def meta_line(form: Mapping[str, Any], generated: str) -> str:
     return " · ".join(parts)
 
 
+def payment_rows(payment: Optional[Mapping[str, Any]]) -> List[Tuple[str, str]]:
+    """Dane do przelewu z bloku `payment` (sec. 17) - do arkusza Podsumowanie i nagłówka PDF."""
+    if not payment or not _s(payment.get("account")):
+        return []
+    out = [
+        ("Odbiorca przelewu", _s(payment.get("recipient"))),
+        ("Numer konta", INFO.format_nrb(_s(payment.get("account")))),
+        ("Tytuł przelewu", _s(payment.get("transfer_title"))),
+    ]
+    amount = payment.get("resolved_amount", payment.get("amount"))
+    if amount is not None:
+        out.append(("Kwota przelewu", f"{amount} zł"))
+    return out
+
+
 def build(
     fmt: str,
     *,
@@ -336,10 +352,15 @@ def build(
     tones: Optional[Sequence[Sequence[Optional[str]]]],
     summary: Sequence[Tuple[str, str]],
     generated: str,
+    payment: Optional[Mapping[str, Any]] = None,
 ) -> bytes:
     if fmt == "csv":
         return to_csv(header, rows)
     line = meta_line(form, generated)
+    extra = payment_rows(payment)
+    summary = list(summary) + extra
+    if extra:
+        line += " · " + ", ".join(value for _label, value in extra[:3])
     if fmt == "xlsx":
         return to_xlsx(
             sheet_title="Lista" if form.get("kind") == "list" else "Odpowiedzi",

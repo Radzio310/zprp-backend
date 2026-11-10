@@ -26,6 +26,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app import district_form_info as INFO
 from app import district_form_schema as SC
 from app import district_forms_rules as R
 from app.db import (
@@ -83,6 +84,7 @@ def parse_form(raw: Any) -> Dict[str, Any]:
     form["settings_json"] = R.loads(form.get("settings_json"), {})
     form["audience_json"] = R.loads(form.get("audience_json"), {})
     form["cover_json"] = R.loads(form.get("cover_json"), {}) or None
+    form["info_json"] = INFO.stored_info(R.loads(form.get("info_json"), {}))
     return form
 
 
@@ -311,9 +313,19 @@ def can_flags(ctx: Ctx) -> Dict[str, bool]:
     return {"manage": manage, "respond": respond, "view_rows": view_rows, "view_results": view_results, "edit_after_deadline": late}
 
 
-def detail(ctx: Ctx, *, event: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+def resolved_info(form: Mapping[str, Any], event: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    return INFO.resolve_info(
+        form.get("info_json"),
+        closes_at=form.get("closes_at"),
+        event_start=(event or {}).get("event_date"),
+        schema=form.get("schema_json"),
+    )
+
+
+def detail(ctx: Ctx, *, event: Optional[Mapping[str, Any]] = None, viewer_name: Optional[str] = None) -> Dict[str, Any]:
     out = summary(ctx, event=event)
     me = ctx.who.judge_id if ctx.who else ""
+    full_name = viewer_name or _s((ctx.by_id.get(me) or {}).get("full_name"))
     participant = me in ctx.circles.participants
     out.update(
         {
@@ -322,6 +334,8 @@ def detail(ctx: Ctx, *, event: Optional[Mapping[str, Any]] = None) -> Dict[str, 
             "audience": ctx.form.get("audience_json") if ctx.manager else None,
             "my_entry": entry_view(ctx, ctx.entries.get(me), judge_id=me, mode="own", include_answers=True) if participant else None,
             "can": can_flags(ctx),
+            "info": resolved_info(ctx.form, event),
+            "viewer": INFO.viewer_info(me, full_name),
         }
     )
     if ctx.manager:

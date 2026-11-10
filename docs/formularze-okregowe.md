@@ -559,3 +559,31 @@ Bloki niosą tylko treść. Nie mają nadtytułów (zakaz z CLAUDE.md BAZA): `ti
 `{NIP odbiorcy albo pusty}|PL|{NRB 26 cyfr}|{kwota w groszach, 6 cyfr z zerami}|{nazwa odbiorcy ≤ 20 znaków}|{tytuł ≤ 32 znaki}|||`
 
 Przykład: 80 zł → `008000`. Brak kwoty → `000000`. Tytuł i nazwę przycinamy oraz usuwamy z nich `|`. Pod kodem: „Zeskanuj w aplikacji banku (Skanuj i zapłać)”.
+
+### Uzupełnienia z implementacji serwera (§17)
+
+Logika: `app/district_form_info.py` (testy: `tests/test_district_form_info.py`). Kształty jak wyżej, poniżej doprecyzowania:
+
+- **Identyfikatory:** blok bez `id` (albo z powtórzonym) dostaje `b<n>`, pozycje `copy`/`contact`/`links` – `c<n>`/`p<n>`/`l<n>`. Identyfikatory bloków są unikalne w obu strefach razem (`errors` są po nich).
+- **Limity bez wartości w kontrakcie:** `title` ≤ 80, `done_label` ≤ 60, etykiety ≤ 60, `place.name` ≤ 120, `place.address` ≤ 200, `contact.name` ≤ 80, `role` ≤ 60, `url` ≤ 500. `place` przyjmuje `lat` i `lon` tylko parą.
+- **Kwota:** `resolved_amount` = `amount`, a gdy go brak – `amount` kolumny `amount_column`. Kolumna musi być typu `confirm` (formularz `kind=form` nie ma kolumn, więc przy nim `amount_column`/`confirm_column` to błąd).
+- **PATCH:** bloki są sprawdzane od nowa także przy zmianie `schema` albo `event_id` bez pola `info`. Np. odpięcie wydarzenia przy liczniku `target:"event"` daje 400 `bad_info` – klient zmienia licznik w tym samym żądaniu. Każda zmiana `info` podbija `rev`.
+- **Szablon bez kreatora** (`POST` z `template_id` i bez `info`):
+  - puste bloki do uzupełnienia (`payment` bez konta lub odbiorcy, `contact` bez osób, `place` bez nazwy) odpadają;
+  - licznik `event` bez spiętego wydarzenia liczy do `deadline`;
+  - tytuł przelewu zaczynający się od nazwy szablonu dostaje tytuł formularza.
+
+  `GET /district-forms/templates` oddaje bloki szablonu w całości (pole `info`), więc kreator może je wypełnić.
+- **Szablony:**
+  - „Impreza z wpłatą”: `transfer_title` „Impreza z wpłatą – {imie_nazwisko}” (po utworzeniu: tytuł formularza), `amount_column` i `confirm_column` = `payment`;
+  - „Zebranie / szkolenie”: licznik „Do rozpoczęcia” (`event`) i `place` „Miejsce”.
+- **`duplicate`:** kopiuje bloki. Kopia nie ma wydarzenia, więc licznik `event` przechodzi na `deadline`.
+- **Odpowiedzi:**
+  - `PublicForm` przy `web_enabled:false` ma kształt `{web_enabled:false, title, info}`, a w `info` tylko `countdown` i `text`;
+  - `/pending`: `info_countdown` to pierwszy licznik z `resolved_at`, albo `null`.
+- **`viewer`:**
+  - nazwisko WERSALIKAMI w `full_name` (zapis ZPRP „NOWAK Jan”) rozstrzyga kolejność: wersaliki to `last_name`, reszta to `first_name`;
+  - bez wersalików: `first_name = ""`, `last_name = name`;
+  - `name` to nazwisko z tokenu i z listy sędziów, a przy jego braku `judge_id`.
+- **Eksport:** pierwszy blok `payment` z kontem dopisuje do arkusza „Podsumowanie” wiersze Odbiorca przelewu / Numer konta (`12 3456 …`) / Tytuł przelewu / Kwota przelewu. Do nagłówka PDF trafiają odbiorca, konto i tytuł.
+- **Migracja:** `ALTER TABLE district_forms ADD COLUMN IF NOT EXISTS info_json JSONB DEFAULT '{"above":[],"below":[]}'`. Stare wiersze z `NULL` czytamy jako puste strefy.

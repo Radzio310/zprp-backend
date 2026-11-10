@@ -47,6 +47,8 @@ def define_tables(metadata):
         Column("schema_json", _JSON, nullable=False),
         Column("settings_json", _JSON, nullable=False),
         Column("audience_json", _JSON, nullable=False),
+        #: Bloki informacyjne nad i pod formularzem (sec. 17): {"above": [...], "below": [...]}.
+        Column("info_json", _JSON, nullable=True),
         Column("event_id", Integer, nullable=True, index=True),
         Column("web_enabled", Boolean, nullable=False, default=False),
         #: Raz nadany zostaje (wydrukowany QR dalej działa po wyłączeniu i włączeniu webu).
@@ -155,6 +157,8 @@ def define_tables(metadata):
 
 #: Jedno wydarzenie ma najwyżej jeden żywy formularz. Każda instrukcja osobno - brak jednej nie zatrzymuje startu.
 MIGRATIONS = (
+    # Bloki informacyjne (sec. 17) - tabela mogla juz powstac bez tej kolumny.
+    "ALTER TABLE district_forms ADD COLUMN IF NOT EXISTS info_json JSONB DEFAULT '{\"above\":[],\"below\":[]}'::jsonb",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_district_forms_event ON district_forms (event_id) "
     "WHERE event_id IS NOT NULL AND deleted_at IS NULL",
 )
