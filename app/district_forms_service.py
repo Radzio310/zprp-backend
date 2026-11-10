@@ -280,6 +280,7 @@ def summary(ctx: Ctx, *, event: Optional[Mapping[str, Any]] = None, moment: Opti
         ),
         "web_enabled": bool(form.get("web_enabled")),
         "web_url": R.web_url(form.get("web_code")) if form.get("web_enabled") else None,
+        "silent": bool(form.get("silent")),
         "roles": list(ctx.roles),
         "me": {
             "participant": me in ctx.circles.participants,
@@ -374,6 +375,8 @@ def _writable_status(form: Mapping[str, Any], source: str, moment: datetime) -> 
     status = R.form_status(form, moment)
     if status == "trash":
         raise R.not_found()
+    if status == "draft" and R.draft_writable(source):
+        return
     if source == "manager":
         return
     if status == "draft":
@@ -635,8 +638,13 @@ async def notify(
     body: str,
     moment: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """Najpierw wpis w dzienniku (unikalny klucz), potem push do tych, których wpis jest nowy."""
+    """Najpierw wpis w dzienniku (unikalny klucz), potem push do tych, których wpis jest nowy.
+
+    Szkic i tryb cichy (`R.pushes_muted`) nie wysyłają NIC i nie piszą do dziennika.
+    """
     stamp = moment or now()
+    if R.pushes_muted(form):
+        return {"sent_to": 0, "devices": 0, "judge_ids": [], "muted": True}
     fresh: List[str] = []
     for jid in sorted({_s(j) for j in judge_ids if _s(j)}):
         row = await database.fetch_one(
@@ -681,7 +689,7 @@ async def notify_web_review(form: Mapping[str, Any], judge_id: str, change: str,
         logger.warning("formularze: „To Ty?” nieudane form=%s", form.get("id"), exc_info=True)
 
 
-async def notify_published(form: Mapping[str, Any], participants: Sequence[str], actor_id: str) -> None:
+async def notify_published(form: Mapping[str, Any], participants: Sequence[str], actor_id: str, *, slot: str = "1") -> None:
     deadline = R.deadline_label(form.get("closes_at"))
     columns = R.columns_of(form.get("schema_json"))
     if form.get("kind") == "list" and R.status_column(columns):
@@ -692,10 +700,33 @@ async def notify_published(form: Mapping[str, Any], participants: Sequence[str],
         form,
         [j for j in participants if j != actor_id],
         kind="published",
-        slot="1",
+        slot=slot,
         title=f"📋 {form['title']}",
         body=body,
     )
+
+
+async def clear_test_answers(form: Mapping[str, Any]) -> int:
+    """Tryb cichy -> „cofnij do szkicu”: znikają wiersze, historia, dziennik powiadomień
+    i pliki odpowiedzi. Spięte wydarzenie traci odbicie RSVP (lista jest jego jedyną prawdą)."""
+    form_id = form["id"]
+    async with database.transaction():
+        gone = await database.fetch_all(select(ENTRIES.c.id).where(ENTRIES.c.form_id == form_id))
+        files = await database.fetch_all(
+            select(UPLOADS.c.token).where(and_(UPLOADS.c.form_id == form_id, UPLOADS.c.purpose == "answer")))
+        await database.execute(delete(ENTRIES).where(ENTRIES.c.form_id == form_id))
+        await database.execute(delete(LOG).where(LOG.c.form_id == form_id))
+        await database.execute(delete(NOTES).where(NOTES.c.form_id == form_id))
+        await database.execute(delete(UPLOADS).where(and_(UPLOADS.c.form_id == form_id, UPLOADS.c.purpose == "answer")))
+        if form.get("event_id"):
+            await database.execute(
+                delete(province_event_responses).where(province_event_responses.c.event_id == int(form["event_id"])))
+    for row in files:
+        try:
+            upload_path(form_id, row["token"]).unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 - plik bez wpisu nikomu nie szkodzi
+            logger.warning("formularze: nie usunięto pliku testowego form=%s", form_id, exc_info=True)
+    return len(gone)
 
 
 def reminder_text(form: Mapping[str, Any]) -> Tuple[str, str]:
@@ -911,6 +942,7 @@ async def sweep_district_forms(moment: Optional[datetime] = None) -> int:
         .where(FORMS.c.closed_at.is_(None))
         .where(FORMS.c.archived_at.is_(None))
         .where(FORMS.c.deleted_at.is_(None))
+        .where(FORMS.c.silent.is_not(True))
         .where(FORMS.c.closes_at > stamp)
         .where(FORMS.c.closes_at <= stamp + timedelta(days=8))
         .limit(500)

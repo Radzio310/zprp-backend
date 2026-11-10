@@ -316,24 +316,59 @@ async def _get_title_image_regeneration_count(tournament_id: int) -> int:
         return 0
 
 
-async def _generate_openai_title_image(prompt: str, *, quality: Optional[str] = None) -> bytes:
+_IMAGE_MODEL_TTL = 6 * 3600
+_image_model_override: Dict[str, Any] = {"model": None, "at": 0.0}
+
+
+def _current_image_model() -> str:
+    import time as _time
+
+    cached = _image_model_override
+    if cached["model"] and _time.time() - cached["at"] < _IMAGE_MODEL_TTL:
+        return str(cached["model"])
+    return os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+
+
+async def _discover_image_model(avoid: str) -> Optional[str]:
+    """Pyta GET /v1/models o dostępny model obrazów i zapamiętuje go na kilka godzin."""
+    import time as _time
+    from app.openai_image_errors import pick_image_model
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {api_key}"})
+        if resp.status_code >= 400:
+            logger.error("OpenAI models list %s: %s", resp.status_code, resp.text[:300])
+            return None
+        ids = [m.get("id") for m in resp.json().get("data", []) if m.get("id")]
+    except Exception:
+        logger.exception("OpenAI models list failed")
+        return None
+    model = pick_image_model(ids)
+    if not model or model == avoid:
+        logger.error("OpenAI: brak innego dostępnego modelu obrazów (próbowano %s)", avoid)
+        return None
+    _image_model_override.update({"model": model, "at": _time.time()})
+    logger.warning("OpenAI: model obrazów %s niedostępny, używam %s", avoid, model)
+    return model
+
+
+async def _post_openai_image(prompt: str, quality: Optional[str], model: Optional[str] = None) -> httpx.Response:
+    from app.openai_image_errors import image_payload
+
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(500, "Brak OPENAI_API_KEY w środowisku serwera")
-
-    model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "size": "1536x1024",
-        "quality": quality or os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
-        "n": 1,
-    }
+    payload = image_payload(
+        model or _current_image_model(),
+        prompt,
+        quality or os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
+    )
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
+            return await client.post(
                 "https://api.openai.com/v1/images/generations",
                 headers=headers,
                 json=payload,
@@ -342,9 +377,43 @@ async def _generate_openai_title_image(prompt: str, *, quality: Optional[str] = 
         logger.exception("OpenAI title image request failed")
         raise HTTPException(502, "Nie udało się połączyć z OpenAI Images API")
 
+
+OPENAI_IMAGE_RETRY_DELAY = 3.0
+
+
+async def _generate_openai_title_image(
+    prompt: str,
+    *,
+    quality: Optional[str] = None,
+    subject: str = "turnieju",
+    soft_prompt: Optional[str] = None,
+) -> bytes:
+    """`subject` trafia do komunikatu błędu; `soft_prompt` to łagodniejszy opis na ponowną próbę po moderacji."""
+    from app.openai_image_errors import classify, is_retryable
+
+    tried_model = _current_image_model()
+    resp = await _post_openai_image(prompt, quality, tried_model)
     if resp.status_code >= 400:
-        logger.error("OpenAI title image error %s: %s", resp.status_code, resp.text[:700])
-        raise HTTPException(502, "OpenAI nie wygenerował grafiki turnieju")
+        kind, code, message = classify(resp.status_code, resp.text, subject)
+        logger.error("OpenAI title image error %s [%s] kind=%s: %s", resp.status_code, code, kind, resp.text[:700])
+        retry_prompt: Optional[str] = None
+        retry_model = tried_model
+        if kind == "model":
+            found = await _discover_image_model(tried_model)
+            if found:
+                retry_prompt, retry_model = prompt, found
+        elif kind == "moderation" and soft_prompt and soft_prompt != prompt:
+            retry_prompt = soft_prompt
+        elif is_retryable(kind):
+            await asyncio.sleep(OPENAI_IMAGE_RETRY_DELAY)
+            retry_prompt = prompt
+        if retry_prompt is not None:
+            resp = await _post_openai_image(retry_prompt, quality, retry_model)
+            if resp.status_code >= 400:
+                kind, code, message = classify(resp.status_code, resp.text, subject)
+                logger.error("OpenAI title image retry %s [%s] kind=%s: %s", resp.status_code, code, kind, resp.text[:700])
+        if resp.status_code >= 400:
+            raise HTTPException(502, message)
 
     data = resp.json()
     image_item = (data.get("data") or [{}])[0]

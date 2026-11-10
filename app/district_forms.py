@@ -979,6 +979,8 @@ async def remind(form_id: str, body: Optional[Dict[str, Any]] = Body(None), who:
     _manager(ctx)
     if ctx.status != "open":
         raise R.FormError("not_open", "Przypominać można tylko o otwartym formularzu.", 409)
+    if ctx.form.get("silent"):
+        raise R.FormError("silent", "Lista jest w trybie cichym - włącz powiadomienia, żeby przypomnieć.", 409)
     moment = S.now()
     last = await database.fetch_one(
         select(S.NOTES.c.sent_at)
@@ -1007,6 +1009,37 @@ async def remind(form_id: str, body: Optional[Dict[str, Any]] = Body(None), who:
     text = _s(payload.get("body"))[:300] or default_body
     result = await S.notify(ctx.form, people, kind="manual", slot=moment.strftime("%Y%m%dT%H%M%S"), title=title, body=text, moment=moment)
     return {"sent_to": result["sent_to"], "devices": result["devices"]}
+
+
+@router.post("/{form_id}/silent", summary="Tryb cichy: lista widoczna, bez pushy i przypomnień (testy)")
+async def silent_toggle(form_id: str, background: BackgroundTasks, body: Dict[str, Any] = Body(...),
+                        who: Who = Depends(who_dep)) -> Dict[str, Any]:
+    """`{"silent": true}` wycisza. `{"silent": false, "mode": ...}` włącza powiadomienia z powrotem:
+    `reset` cofa do szkicu i czyści testowe odpowiedzi (potem zwykła publikacja z pushem),
+    `send` zostawia odpowiedzi i wysyła powiadomienie o publikacji teraz, `later` tylko odcisza.
+    Szkic odcisza się bez trybu - nikt go jeszcze nie widział."""
+    ctx = await S.context(form_id, who.viewer, with_entries=False)
+    _manager(ctx)
+    moment = S.now()
+    rev = int(ctx.form.get("rev") or 1) + 1
+    if bool(body.get("silent")):
+        if ctx.status == "trash":
+            raise R.FormError("trash", "Formularz jest w koszu.", 409)
+        await database.execute(update(S.FORMS).where(S.FORMS.c.id == form_id).values(silent=True, rev=rev, updated_at=moment))
+        return await _detail(form_id, who)
+    mode = _s(body.get("mode")) or ("later" if ctx.status == "draft" else "")
+    refusal = R.silent_off_refusal(ctx.status, mode)
+    if refusal:
+        raise refusal
+    values: Dict[str, Any] = {"silent": False, "rev": rev, "updated_at": moment}
+    if mode == "reset":
+        await S.clear_test_answers(ctx.form)
+        values.update(published_at=None, closed_at=None)
+    await database.execute(update(S.FORMS).where(S.FORMS.c.id == form_id).values(**values))
+    if mode == "send":
+        background.add_task(S.notify_published, await S.load_form(form_id), ctx.circles.participants, who.judge_id,
+                            slot=R.silent_publish_slot(moment))
+    return await _detail(form_id, who)
 
 
 @router.post("/{form_id}/web", summary="Włącz albo wyłącz stronę www (kod zostaje na stałe)")

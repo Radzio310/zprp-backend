@@ -361,6 +361,23 @@ def clean_target(value: Any) -> Dict[str, Any]:
     }
 
 
+def clean_icon(value: Any) -> Optional[str]:
+    from app.province_event_icon import valid_icon
+
+    return valid_icon(value)
+
+
+def _icon_fields(raw: Mapping[str, Any]) -> Dict[str, Any]:
+    """Pole jest tylko wtedy, gdy formularz je przysłał (pusty = brak ikony)."""
+    if "icon" not in raw:
+        return {}
+    icon = clean_icon(raw.get("icon"))
+    if not icon:
+        return {"icon": None, "icon_source": None}
+    source = "ai" if raw.get("icon_source") == "ai" else "manual"
+    return {"icon": icon, "icon_source": source}
+
+
 def clean_details(raw: Mapping[str, Any], start: datetime) -> Dict[str, Any]:
     """Pola trzymane w `data_json` - wszystko poza nazwą, opisem i datami."""
     deadline = clean_deadline(raw.get("rsvp_deadline"), start)
@@ -374,6 +391,7 @@ def clean_details(raw: Mapping[str, Any], start: datetime) -> Dict[str, Any]:
         "rsvp_deadline": deadline.isoformat() if deadline else None,
         "capacity": clean_capacity(raw.get("capacity")),
         "program": clean_program(raw.get("program")),
+        **_icon_fields(raw),
     }
 
 
@@ -635,20 +653,20 @@ _IMAGE_SCENES: Dict[str, Tuple[str, ...]] = {
     "training": (
         "a tiny wise owl referee demonstrates an exaggerated hand signal on a glowing handball tactics court while a few round ball-like referee apprentices copy the pose",
         "several small referee mascots rehearse positioning between miniature goals while a friendly whistle character points at luminous court lines",
-        "a playful training workshop inside a handball hall where a stopwatch mentor times two clumsy mascot referees practising synchronized signals",
+        "a playful training workshop inside a handball hall where a stopwatch mentor times two enthusiastic mascot referees practising synchronized signals",
     ),
     "exam": (
-        "a whimsical exam room where several small referee mascots concentrate at desks and one nervous handball character quietly checks its whistle, with a calm owl invigilator in the distance",
-        "a surreal rules exam staged on a dark handball court, with tiny mascot candidates solving glowing symbol puzzles at separate desks",
-        "a humorous but gentle pre-exam moment: a whistle mascot encourages a worried handball referee while other candidates prepare beneath soft auditorium lights",
+        "a whimsical exam room where several small referee mascots concentrate at desks and one focused handball character quietly checks its whistle, with a calm owl invigilator in the distance",
+        "an imaginative rules exam staged on a dark handball court, with tiny mascot candidates solving glowing symbol puzzles at separate desks",
+        "a humorous but gentle pre-exam moment: a whistle mascot encourages a thoughtful handball referee while other candidates prepare beneath soft auditorium lights",
     ),
     "fitness_test": (
         "a lively indoor running test where a determined stopwatch mascot keeps pace beside several small referee characters on luminous court lanes",
         "tiny referee mascots sprint around a handball court while a cheerful whistle character holds an imaginary finish ribbon and an owl records the result",
-        "a playful fitness circuit in a sports hall: compact mascot referees weave around cones as an animated stopwatch tries comically hard to keep up",
+        "a playful fitness circuit in a sports hall: compact mascot referees weave around cones as an animated stopwatch keeps up cheerfully",
     ),
     "meeting": (
-        "a miniature referee council around a round table: handball, whistle, stopwatch and owl characters discuss court diagrams with amusingly serious expressions",
+        "a miniature referee council around a round table: handball, whistle, stopwatch and owl characters discuss court diagrams with earnest expressions",
         "a cozy committee meeting inside an oversized referee locker, with small mascot officials arranging cards and whistles like an important strategy session",
         "several distinct referee mascots debate around a glowing model handball court while one tiny ball character raises its hand to speak",
     ),
@@ -669,7 +687,7 @@ _IMAGE_SCENES: Dict[str, Tuple[str, ...]] = {
     ),
     "other": (
         "an imaginative miniature world built from a handball court, whistles, cards and stopwatches, inhabited by a few curious referee mascots",
-        "a dreamlike handball hall after hours where small original referee characters explore glowing court lines and floating sports objects",
+        "a quiet handball hall in the evening where small original referee characters explore glowing court lines and floating sports objects",
         "a playful backstage scene before an unspecified referee event, with several tiny mascots preparing equipment amid abstract golden light trails",
     ),
 }
@@ -686,7 +704,12 @@ _IMAGE_PALETTES = {
 }
 
 
-def title_image_prompt(*, name: str, event_type: str, place: str, date_label: str, extra: str = "") -> str:
+def title_image_prompt(
+    *, name: str, event_type: str, place: str, date_label: str, extra: str = "", safe: bool = False
+) -> str:
+    """`safe` = łagodna wersja na ponowną próbę po filtrze treści: bez dopisku, nazwy i miejsca."""
+    if safe:
+        name, place, extra = "", "", ""
     scenes = _IMAGE_SCENES.get(event_type, _IMAGE_SCENES["other"])
     scene = secrets.choice(scenes)
     palette = _IMAGE_PALETTES.get(event_type, _IMAGE_PALETTES["other"])
@@ -700,7 +723,7 @@ def title_image_prompt(*, name: str, event_type: str, place: str, date_label: st
         "Create an original, charming and slightly humorous story scene in a polished high-end 3D animated illustration style. "
         "The environment and the event story are the main subject; this is not a character portrait, not a mascot cutout and not a poster. "
         "Use a small ensemble of original mascot-like characters inspired by handball and refereeing objects: for example an owl referee, "
-        "a handball character, a whistle character or a stopwatch character. Do not reproduce any existing mascot or copyrighted character. "
+        "a handball character, a whistle character or a stopwatch character. Every character is a new original design. "
         "Characters must remain secondary elements inside the scene, usually in the middle distance or background, occupying no more than "
         "about one third of the frame height. No close-up face, no giant head, no single character filling the frame. "
         f"Story direction: {scene}. "
@@ -711,8 +734,8 @@ def title_image_prompt(*, name: str, event_type: str, place: str, date_label: st
         "and low-detail for large white interface text, badges and countdown tiles. Place the story action mostly in the upper-right or far-right "
         "background, with important faces and objects safely away from all edges. The image must still read at thumbnail size. "
         "No text, no letters, no numbers, no logos, no badges, no watermarks. "
-        f"Event name as visual inspiration only, never render it: {name}. "
-        f"Event type: {EVENT_TYPES.get(event_type, 'event')}. "
+        + (f"Event name as visual inspiration only, never render it: {name}. " if name else "")
+        + f"Event type: {EVENT_TYPES.get(event_type, 'event')}. "
         f"Date context: {date_label or 'this season'}. "
         f"Location inspiration: {place or 'a Polish city'}; include at most one subtle environmental reference and never a written place name. "
         + organizer_context

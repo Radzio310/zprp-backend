@@ -286,6 +286,8 @@ def _details(data: Mapping[str, Any]) -> Dict[str, Any]:
         "capacity": data.get("capacity") or None,
         "program": data.get("program") if isinstance(data.get("program"), list) else [],
         "title_image": dict(image) if image else None,
+        "icon": R.clean_icon(data.get("icon")),
+        "icon_source": data.get("icon_source") if data.get("icon_source") in ("ai", "manual") else None,
         "title_image_job": dict(image_job) if image_job else None,
         # Wydarzenie typu exam prowadzi do egzaminu (deep-link w aplikacji).
         "exam_id": data.get("exam_id") or None,
@@ -861,6 +863,10 @@ async def patch_v2(
         for keep in ("checkin", "present_ids", "invited_cache", "title_image_job"):
             if keep in data:
                 details[keep] = data[keep]
+        # Brak klucza ikony w formularzu = zostaje to, co dobrał serwer (AI jest asynchroniczne).
+        if "icon" not in details and data.get("icon"):
+            details["icon"] = data["icon"]
+            details["icon_source"] = data.get("icon_source")
         # Brak pola = grafika bez zmian; pusty słownik = usunięta w formularzu.
         if "title_image" not in details and body.title_image is None and data.get("title_image"):
             details["title_image"] = data["title_image"]
@@ -1549,6 +1555,8 @@ class TitleImageBody(BaseModel):
     regeneration_count: int = 0
     regenerate: bool = False
     extra_prompt: Optional[str] = None
+    #: Ikona wybrana ręcznie przez admina - wtedy serwer nie dobiera własnej.
+    icon: Optional[str] = None
 
 
 async def _render_title_image(body: TitleImageBody) -> Dict[str, Any]:
@@ -1565,19 +1573,33 @@ async def _render_title_image(body: TitleImageBody) -> Dict[str, Any]:
             date_label = parsed.astimezone(R.WARSAW).strftime("%d.%m.%Y") if parsed else ""
         except R.Invalid:
             date_label = ""
-    prompt = R.title_image_prompt(
+    prompt_args = dict(
         name=_s(body.name),
         event_type=_s(body.event_type) or R.DEFAULT_TYPE,
         place=_s(body.place),
         date_label=date_label,
-        extra=_s(body.extra_prompt)[:300],
     )
+    prompt = R.title_image_prompt(**prompt_args, extra=_s(body.extra_prompt)[:300])
+    soft = R.title_image_prompt(**prompt_args, safe=True)
     from app.beach.tournaments import _generate_openai_title_image, _public_static_url, _static_root_dir
+    from app.province_event_icon import pick_icon, valid_icon
 
-    image = await _generate_openai_title_image(
-        prompt,
-        quality=os.getenv("OPENAI_PROVINCE_EVENT_IMAGE_QUALITY", "high"),
+    manual_icon = valid_icon(body.icon)
+    icon_task = None if manual_icon else asyncio.ensure_future(
+        pick_icon(_s(body.name), prompt_args["event_type"], _s(body.extra_prompt)[:200])
     )
+    try:
+        image = await _generate_openai_title_image(
+            prompt,
+            quality=os.getenv("OPENAI_PROVINCE_EVENT_IMAGE_QUALITY", "high"),
+            subject="wydarzenia",
+            soft_prompt=soft,
+        )
+    except BaseException:
+        if icon_task:
+            icon_task.cancel()
+        raise
+    icon, icon_source = (manual_icon, "manual") if manual_icon else await icon_task
     out_dir = _static_root_dir() / "province-events" / "title-images"
     out_dir.mkdir(parents=True, exist_ok=True)
     path: Path = out_dir / f"{uuid.uuid4().hex}.png"
@@ -1587,6 +1609,8 @@ async def _render_title_image(body: TitleImageBody) -> Dict[str, Any]:
         "generated_at": _now().isoformat(),
         "regeneration_count": count + 1 if body.regenerate else count,
         "style_version": "referee-story-scenes-v2",
+        "icon": icon,
+        "icon_source": icon_source,
     }
 
 
@@ -1603,7 +1627,11 @@ async def _set_title_image_job(
             event = await _event(event_id, deleted_ok=True)
             data = _data(event.get("data_json"))
             if image:
-                data["title_image"] = dict(image)
+                data["title_image"] = {k: v for k, v in dict(image).items() if k not in ("icon", "icon_source")}
+                # Ikona AI tylko tam, gdzie admin nie wybrał własnej.
+                if image.get("icon") and not data.get("icon"):
+                    data["icon"] = image["icon"]
+                    data["icon_source"] = "ai"
             data["title_image_job"] = {
                 "status": status,
                 "updated_at": _now().isoformat(),

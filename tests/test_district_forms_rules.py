@@ -442,3 +442,35 @@ def test_szablony_przechodza_walidacje():
     party = T.template("party_payment")
     party["schema"]["columns"].clear()
     assert T.template("party_payment")["schema"]["columns"]  # kopia, nie oryginał
+
+
+# ---------------------------------------------------------------- tryb cichy i szkic (10.11.2026)
+
+
+def test_szkic_i_tryb_cichy_wyciszaja_pushe():
+    published = {"published_at": datetime(2026, 11, 10, tzinfo=UTC)}
+    assert R.pushes_muted({"published_at": None}) is True
+    assert R.pushes_muted({**published, "silent": True}) is True
+    assert R.pushes_muted({**published, "silent": False}) is False
+    assert R.pushes_muted(published) is False
+
+
+def test_szkic_przyjmuje_zapis_ze_strony_i_od_komisji_ale_nie_z_aplikacji():
+    assert R.draft_writable("web") and R.draft_writable("web_qr") and R.draft_writable("manager")
+    assert not R.draft_writable("app")
+
+
+def test_wylaczenie_trybu_cichego_tryby():
+    assert R.silent_off_refusal("open", "reset") is None
+    assert R.silent_off_refusal("closed", "reset") is None
+    assert R.silent_off_refusal("open", "send") is None
+    assert R.silent_off_refusal("draft", "later") is None
+    assert R.silent_off_refusal("draft", "reset").code == "not_published"
+    assert R.silent_off_refusal("closed", "send").code == "not_open"
+    assert R.silent_off_refusal("open", "").code == "bad_mode"
+    assert R.silent_off_refusal("trash", "later").code == "trash"
+
+
+def test_slot_publikacji_po_trybie_cichym_nie_dubluje_pierwszego():
+    slot = R.silent_publish_slot(datetime(2026, 11, 10, 12, 30, tzinfo=UTC))
+    assert slot != "1" and slot.startswith("loud-")

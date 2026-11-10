@@ -74,7 +74,9 @@ async def _form_by_code(code: str) -> Dict[str, Any]:
     if not row:
         raise R.not_found()
     form = S.parse_form(row)
-    if form.get("deleted_at") is not None or form.get("published_at") is None:
+    # Szkic też: strona działa w pełni przed publikacją (decyzja 10.11.2026), komisja
+    # testuje link i QR, zanim lista pójdzie do sędziów. Kosz zostaje 404.
+    if form.get("deleted_at") is not None:
         raise R.not_found()
     return form
 
@@ -142,6 +144,7 @@ async def public_form(code: str) -> Dict[str, Any]:
         "cover": form.get("cover_json") or None,
         "closes_at": R.iso(form.get("closes_at")),
         "closed": _closed(ctx, moment),
+        "draft": ctx.status == "draft",
         "province_label": R.province_label(display(form["province"])),
         "counts": _counts(ctx),
         "privacy_note": PRIVACY_NOTE,

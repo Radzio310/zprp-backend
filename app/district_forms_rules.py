@@ -345,6 +345,47 @@ def check_access(roles: Sequence[str], status: str) -> None:
         raise not_found()
 
 
+#: Źródła, które piszą już w szkicu: komisja i strona www (decyzja 10.11.2026 -
+#: link działa przed publikacją). Aplikacja uczestnika czeka na publikację.
+DRAFT_WRITABLE_SOURCES = ("manager", "web", "web_qr")
+
+
+def draft_writable(source: str) -> bool:
+    return source in DRAFT_WRITABLE_SOURCES
+
+
+def pushes_muted(form: Mapping[str, Any]) -> bool:
+    """Bez pushy i przypomnień: szkic (odbiorcy go nie widzą) albo tryb cichy (testy na żywo).
+
+    Jedyna bramka wysyłki modułu - sprawdza ją `notify`, przez który idą wszystkie pushe list
+    (publikacja, przypomnienia z harmonogramu, ręczne, „To Ty?”). Wyciszony push NIE trafia
+    do dziennika, więc po włączeniu powiadomień publikacja może pójść naprawdę.
+    """
+    return form.get("published_at") is None or bool(form.get("silent"))
+
+
+#: Wyłączenie trybu cichego: reset = cofnij do szkicu i wyczyść testowe odpowiedzi,
+#: send = zostaw i wyślij powiadomienie o publikacji teraz, later = tylko przyszłe przypomnienia.
+SILENT_OFF_MODES = ("reset", "send", "later")
+
+
+def silent_off_refusal(status: str, mode: str) -> Optional["FormError"]:
+    if mode not in SILENT_OFF_MODES:
+        return FormError("bad_mode", "Wybierz, co zrobić z testowymi odpowiedziami.", 400)
+    if status == "trash":
+        return FormError("trash", "Formularz jest w koszu.", 409)
+    if mode == "reset" and status == "draft":
+        return FormError("not_published", "Szkic nie ma jeszcze odpowiedzi do wyczyszczenia.", 409)
+    if mode == "send" and status != "open":
+        return FormError("not_open", "Powiadomienie o publikacji wyślesz tylko przy otwartej liście.", 409)
+    return None
+
+
+def silent_publish_slot(moment: datetime) -> str:
+    """Slot powiadomienia o publikacji po trybie cichym - inny niż „1”, żeby dziennik go nie zdublował."""
+    return f"loud-{moment.strftime('%Y%m%dT%H%M%S')}"
+
+
 def in_scope(scope: str, *, roles: Sequence[str], status: str, participant: bool, filled: bool, web_review: bool) -> bool:
     """Zakładki listy formularzy (`GET /district-forms?scope=`)."""
     manager = "manager" in roles

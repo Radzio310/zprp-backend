@@ -199,3 +199,25 @@ def test_moduly_regul_nie_lacza_sie_z_baza():
     for path in ("app/district_forms_rules.py", "app/district_form_schema.py", "app/district_form_templates.py",
                  "app/district_forms_tables.py"):
         assert "app.db" not in source(path), path
+
+
+def test_tryb_cichy_kolumna_trasa_i_jedna_bramka_wysylki():
+    tables = source("app/district_forms_tables.py")
+    assert 'Column("silent", Boolean' in tables
+    assert "ADD COLUMN IF NOT EXISTS silent BOOLEAN" in tables
+    assert ("POST", "/{form_id}/silent") in routes("app/district_forms.py")
+    service, fns = functions("app/district_forms_service.py")
+    notify_src = ast.get_source_segment(service, fns["notify"])
+    # Bramka przed dziennikiem: wyciszony push nie zjada slotu publikacji.
+    assert notify_src.index("R.pushes_muted(form)") < notify_src.index("pg_insert(NOTES)")
+    assert "FORMS.c.silent" in ast.get_source_segment(service, fns["sweep_district_forms"])
+    # Wszystkie pushe list idą przez `notify` (bez bezpośredniego send_push poza nim).
+    assert service.count("send_push_to_judges_report(") == 1
+    api, api_fns = functions("app/district_forms.py")
+    assert 'ctx.form.get("silent")' in ast.get_source_segment(api, api_fns["remind"])
+    assert "send_push" not in api
+
+
+def test_strona_www_dziala_w_szkicu():
+    public, fns = functions("app/district_forms_public.py")
+    assert "published_at" not in ast.get_source_segment(public, fns["_form_by_code"])
