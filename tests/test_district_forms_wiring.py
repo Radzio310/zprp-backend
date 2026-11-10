@@ -229,3 +229,12 @@ def test_usuniecie_odpowiedzi_trasa_historia_i_rsvp():
     clear = ast.get_source_segment(service, fns["clear_entry"])
     assert "_log(" in clear and "mirror_rsvp(" in clear and "cleared_entry_values" in clear
     assert "notify" not in clear
+
+
+def test_strona_nie_wysyla_cudzych_komorek_listy():
+    public, fns = functions("app/district_forms_public.py")
+    body = ast.get_source_segment(public, fns["public_form"])
+    assert "public_pick_row" in body and "with_cells=True" not in body
+    assert ("GET", "/{code}/rows/{judge_id}") in routes("app/district_forms_public.py")
+    service, sfns = functions("app/district_forms_service.py")
+    assert "R.list_visibility(" in ast.get_source_segment(service, sfns["can_flags"])

@@ -435,6 +435,29 @@ def clear_log_payload(cells: Any, answers: Any) -> Tuple[Optional[Dict[str, Any]
     return (old or None), {"cleared": True}
 
 
+def list_visibility(*, manage: bool, observer: bool, participant: bool, summary: bool) -> Tuple[bool, bool]:
+    """Lista deklaracji: (widzi wiersze, widzi wyniki). Decyzja 10.11.2026: uczestnik NIGDY nie
+    dostaje cudzych wierszy (nazwisk, wpłat, innych kolumn) - najwyżej liczby, gdy formularz
+    ma włączone podsumowanie (`roster_visible`). Wiersze widzą komisja i obserwatorzy."""
+    rows = manage or observer
+    return rows, rows or (participant and summary)
+
+
+#: Kolumny, których liczby widzi uczestnik w podsumowaniu (bez wpłat, liczb i tekstów).
+SUMMARY_COLUMN_TYPES = ("status", "choice")
+
+
+def summary_columns(columns: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    return [dict(c) for c in columns if c.get("type") in SUMMARY_COLUMN_TYPES and (c.get("visibility") or "all") == "all"]
+
+
+def public_pick_row(judge_id: str, judge: Mapping[str, Any]) -> Dict[str, Any]:
+    """Wiersz listy na stronie www przed wyborem „To ja": samo nazwisko do znalezienia siebie,
+    bez komórek, potwierdzeń i śladów (decyzja 10.11.2026)."""
+    return {"judge_id": judge_id, "name": _s(judge.get("full_name")) or judge_id, "photo_url": _s(judge.get("photo_url")) or None,
+            "cells": {}, "verified": False, "web_claimed": None, "filled": False}
+
+
 def silent_publish_slot(moment: datetime) -> str:
     """Slot powiadomienia o publikacji po trybie cichym - inny niż „1”, żeby dziennik go nie zdublował."""
     return f"loud-{moment.strftime('%Y%m%dT%H%M%S')}"
@@ -510,7 +533,8 @@ def clean_settings(raw: Any, *, kind: str) -> Dict[str, Any]:
     if len(confirmation) > CONFIRMATION_MAX:
         raise FormError("bad_settings", f"Komunikat po wysłaniu ma najwyżej {CONFIRMATION_MAX} znaków.", 400)
     out: Dict[str, Any] = {
-        "roster_visible": bool(data.get("roster_visible", False)),
+        # Od 10.11.2026: „uczestnicy widzą podsumowanie" (same liczby), domyślnie tak.
+        "roster_visible": bool(data.get("roster_visible", True)),
         "reminders": reminders,
         "home_prompt": bool(data.get("home_prompt", True)),
         "confirmation": confirmation or None,

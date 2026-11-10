@@ -932,9 +932,12 @@ async def stats(form_id: str, who: Who = Depends(who_dep)) -> Dict[str, Any]:
     if not S.can_flags(ctx)["view_results"]:
         raise R.FormError("forbidden", "Wyniki tego formularza widzi komisja.", 403)
     if ctx.kind == "list":
-        # Uczestnik przy roster_visible widzi liczby tylko kolumn jawnych, obserwator - bez kolumn komisji.
-        mode = "manager" if ctx.manager else ("observer" if "observer" in ctx.roles else "roster")
-        return R.list_stats(R.visible_columns(ctx.columns, mode), ctx.circles.participants, ctx.entries)
+        # Uczestnik widzi same liczby jawnych kolumn statusu i wyboru (bez wpłat), obserwator - bez kolumn komisji.
+        if ctx.manager or "observer" in ctx.roles:
+            columns = R.visible_columns(ctx.columns, "manager" if ctx.manager else "observer")
+        else:
+            columns = R.summary_columns(R.visible_columns(ctx.columns, "roster"))
+        return R.list_stats(columns, ctx.circles.participants, ctx.entries)
     return form_stats(ctx, await _form_responses(ctx))
 
 

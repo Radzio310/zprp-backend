@@ -300,8 +300,8 @@ def can_flags(ctx: Ctx) -> Dict[str, bool]:
     observer = "observer" in ctx.roles
     participant = "participant" in ctx.roles
     if ctx.kind == "list":
-        view_rows = manage or observer or (participant and bool(settings.get("roster_visible")))
-        view_results = view_rows
+        view_rows, view_results = R.list_visibility(manage=manage, observer=observer, participant=participant,
+                                                    summary=bool(settings.get("roster_visible", True)))
         late = manage or (participant and any(R.self_editable(c) and not c.get("lock_after_deadline", True) for c in ctx.columns))
         respond = participant and ctx.status == "open"
     else:

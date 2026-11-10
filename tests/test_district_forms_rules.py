@@ -457,7 +457,7 @@ def test_kody_linki_i_drobne():
 
 def test_ustawienia_i_anonimowosc_na_webie():
     settings = R.clean_settings({}, kind="list")
-    assert settings == {"roster_visible": False, "reminders": "standard", "home_prompt": True, "confirmation": None}
+    assert settings == {"roster_visible": True, "reminders": "standard", "home_prompt": True, "confirmation": None}
     form = R.clean_settings({"anonymous": True}, kind="form")
     assert form["allow_edit"] is True and form["results_visibility"] == "managers" and form["fill_mode"] == "steps"
     with pytest.raises(R.FormError):
@@ -545,3 +545,30 @@ def test_usuniecie_odpowiedzi_zeruje_wiersz_i_zostawia_slad():
     old, new = R.clear_log_payload({"status": {"v": "yes", "src": "app"}}, {})
     assert old == {"cells": {"status": "yes"}} and new == {"cleared": True}
     assert R.clear_log_payload({}, None)[0] is None
+
+
+def test_uczestnik_listy_nie_widzi_cudzych_wierszy_tylko_liczby():
+    assert R.list_visibility(manage=False, observer=False, participant=True, summary=True) == (False, True)
+    assert R.list_visibility(manage=False, observer=False, participant=True, summary=False) == (False, False)
+    assert R.list_visibility(manage=True, observer=False, participant=True, summary=False) == (True, True)
+    assert R.list_visibility(manage=False, observer=True, participant=False, summary=False) == (True, True)
+
+
+def test_podsumowanie_uczestnika_bez_wplat_i_kolumn_prywatnych():
+    cols = [
+        {"id": "status", "type": "status"},
+        {"id": "menu", "type": "choice", "visibility": "all"},
+        {"id": "pay", "type": "confirm", "visibility": "all"},
+        {"id": "note", "type": "choice", "visibility": "self"},
+        {"id": "n", "type": "number"},
+    ]
+    assert [c["id"] for c in R.summary_columns(cols)] == ["status", "menu"]
+
+
+def test_strona_wybiera_siebie_z_samych_nazwisk():
+    row = R.public_pick_row("7", {"full_name": "Jan Kos", "photo_url": None})
+    assert row["name"] == "Jan Kos" and row["cells"] == {} and row["verified"] is False
+
+
+def test_podsumowanie_domyslnie_wlaczone():
+    assert R.clean_settings({}, kind="list")["roster_visible"] is True

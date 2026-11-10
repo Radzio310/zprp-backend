@@ -35,6 +35,8 @@ router = APIRouter(prefix="/public/forms", tags=["District forms (web)"], route_
 
 #: 30 zapisów na minutę z jednego adresu; 20 kodów QR na 10 minut.
 WRITE_LIMITER = AttemptLimiter(limit=30, window=timedelta(minutes=1), max_keys=20_000)
+#: Odczyt jednego wiersza: 60 na minutę z adresu - nikt nie przejdzie tak całej listy.
+READ_LIMITER = AttemptLimiter(limit=60, window=timedelta(minutes=1), max_keys=20_000)
 QR_LIMITER = AttemptLimiter(limit=20, window=timedelta(minutes=10), max_keys=20_000)
 QR_POLL_MAX_S = 25
 
@@ -176,7 +178,8 @@ async def public_form(code: str) -> Dict[str, Any]:
     }
     if ctx.kind == "list":
         out["columns"] = R.visible_columns(ctx.columns, "web")
-        out["rows"] = [public_row(ctx, jid, with_cells=True) for jid in _people(ctx)]
+        # Same nazwiska do „Znajdź siebie" - cudzych komórek strona już nie dostaje (10.11.2026).
+        out["rows"] = [R.public_pick_row(jid, ctx.by_id.get(jid) or {}) for jid in _people(ctx)]
     else:
         out["schema"] = SC.with_image_urls(form.get("schema_json") or {}, form["id"], public_code=form.get("web_code"))
         out["open"] = ctx.circles.open
@@ -187,6 +190,19 @@ async def public_form(code: str) -> Dict[str, Any]:
             public_row(ctx, jid, with_cells=False) for jid in _people(ctx)
         ]
     return out
+
+
+@router.get("/{code}/rows/{judge_id}", summary="Jeden wiersz listy po wyborze „To ja” (bez logowania)")
+async def public_row_read(code: str, judge_id: str, request: Request) -> Dict[str, Any]:
+    _limit(READ_LIMITER, f"r:{_address(request)}")
+    form = await _form_by_code(code)
+    _web_on(form)
+    if form["kind"] != "list":
+        raise R.FormError("wrong_kind", "To jest formularz - wyślij odpowiedzi.", 400)
+    ctx = await S.public_context(form)
+    if judge_id not in ctx.circles.participants:
+        raise R.FormError("not_participant", "Tego sędziego nie ma na liście.", 404)
+    return {"row": public_row(ctx, judge_id, with_cells=True)}
 
 
 @router.put("/{code}/rows/{judge_id}", summary="Zaznacz w wierszu sędziego (bez logowania)")
