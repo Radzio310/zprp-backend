@@ -32,7 +32,7 @@ from app import district_form_templates as T
 from app import district_forms_rules as R
 from app import district_forms_service as S
 from app import province_event_rules as PR
-from app.db import board_members, database, province_events, push_tokens
+from app.db import database, province_events, push_tokens
 from app.deps import FORM_WEB_SCOPE, get_jwt_payload
 from app.match_market import Actor, market_actor
 from app.settlement_province import canonical, display, spellings
@@ -87,29 +87,9 @@ class Who:
         return "web_qr" if self.scope == FORM_WEB_SCOPE else "app"
 
 
-async def _manual_board_member(judge_id: str, province: str) -> bool:
-    """Ręczny wpis w składzie Tablicy Komisji okręgu (bez odznaki). Błąd bazy = brak nadania."""
-    try:
-        row = await database.fetch_one(
-            select(board_members.c.id).where(
-                and_(
-                    board_members.c.province.in_(spellings(province)),
-                    board_members.c.judge_id == judge_id,
-                    board_members.c.source == "manual",
-                    board_members.c.deleted_at.is_(None),
-                )
-            )
-        )
-    except Exception:
-        return False
-    return row is not None
-
-
 async def who_dep(request: Request, payload: Dict[str, Any] = Depends(get_jwt_payload)) -> Who:
     actor = await market_actor(payload)
     viewer = PR.viewer(judge_id=actor.judge_id, province=actor.province, is_admin=actor.is_admin, badges=actor.badges)
-    if not viewer.is_commission and not viewer.is_admin and viewer.judge_id and viewer.province:
-        viewer = R.commission_viewer(viewer, manual_member=await _manual_board_member(viewer.judge_id, viewer.province))
     scope = payload.get("scope")
     token_form = None
     if scope == FORM_WEB_SCOPE:

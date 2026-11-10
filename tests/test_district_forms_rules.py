@@ -113,13 +113,9 @@ def test_tworzenie_formularzy_komisja_z_odznaki_i_reczne_nadania():
     assert not R.can_create(who("1", badges={"Młodzi sędziowie okręgowi": True}), "SLASKIE")
     # Admin wszędzie.
     assert R.can_create(who("9", admin=True, province="OPOLSKIE"), "SLASKIE")
-    # Ręczny członek Tablicy Komisji (bez odznaki) - tylko u siebie.
+    # Bez odznaki komisyjnej (np. tylko ręczny wpis w Tablicy Komisji) - brak tworzenia.
     plain = who("3")
     assert not R.can_create(plain, "SLASKIE")
-    manual = R.commission_viewer(plain, manual_member=True)
-    assert R.can_create(manual, "SLASKIE")
-    assert not R.can_create(manual, "OPOLSKIE")
-    assert R.commission_viewer(plain, manual_member=False) is plain
     # Ręczne nadanie zarządzania jednym formularzem (`audience.managers`) zostaje, ale nie daje tworzenia.
     circles = R.resolve_audience([{"judge_id": "3", "badges": {}}], {"managers": {"include_ids": ["3"]}}, author="1")
     assert "3" in circles.managers

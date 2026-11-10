@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -313,18 +313,11 @@ def roles_for(who: Viewer, *, province: str, author: str, circles: Circles) -> L
 def can_create(who: Viewer, province: str) -> bool:
     """Tworzą admin i komisja okręgu (ta sama reguła co wydarzenia).
 
-    Komisja = odznaka „Komisja sędziowska” (domyślnie, bez nadawania) albo ręczny
-    wpis w składzie Tablicy Komisji okręgu (`board_members.source = manual`) -
-    patrz `commission_viewer`.
+    Komisja = odznaka „Komisja sędziowska” albo „Komisja” we własnym okręgu
+    (domyślnie, bez nadawania). Ręczny wpis w Tablicy Komisji nie wystarcza
+    (decyzja właściciela 10.11.2026).
     """
     return can_manage(who, province)
-
-
-def commission_viewer(who: Viewer, *, manual_member: bool) -> Viewer:
-    """Ręczny członek komisji (Tablica Komisji) liczy się jak odznaka - tylko we własnym okręgu."""
-    if who.is_commission or not manual_member:
-        return who
-    return replace(who, is_commission=True)
 
 
 def scope_counts(items: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
