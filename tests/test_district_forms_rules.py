@@ -102,6 +102,50 @@ def test_zarzadzajacy_to_autor_komisja_i_wskazani_a_admin_wszedzie():
     assert not R.can_create(who("1"), "SLASKIE")
 
 
+def test_tworzenie_formularzy_komisja_z_odznaki_i_reczne_nadania():
+    def who(jid, admin=False, province="ŚLĄSKIE", badges=None):
+        return PR.viewer(judge_id=jid, province=province, is_admin=admin, badges=badges or {})
+
+    # Domyślnie: odznaka komisyjna we własnym okręgu (obie pisownie), bez nadawania.
+    assert R.can_create(who("2", badges={"Komisja sędziowska": True}), "SLASKIE")
+    assert R.can_create(who("2", badges=["Komisja"]), "ŚLĄSKIE")
+    assert not R.can_create(who("2", province="OPOLSKIE", badges={"Komisja sędziowska": True}), "SLASKIE")
+    assert not R.can_create(who("1", badges={"Młodzi sędziowie okręgowi": True}), "SLASKIE")
+    # Admin wszędzie.
+    assert R.can_create(who("9", admin=True, province="OPOLSKIE"), "SLASKIE")
+    # Ręczny członek Tablicy Komisji (bez odznaki) - tylko u siebie.
+    plain = who("3")
+    assert not R.can_create(plain, "SLASKIE")
+    manual = R.commission_viewer(plain, manual_member=True)
+    assert R.can_create(manual, "SLASKIE")
+    assert not R.can_create(manual, "OPOLSKIE")
+    assert R.commission_viewer(plain, manual_member=False) is plain
+    # Ręczne nadanie zarządzania jednym formularzem (`audience.managers`) zostaje, ale nie daje tworzenia.
+    circles = R.resolve_audience([{"judge_id": "3", "badges": {}}], {"managers": {"include_ids": ["3"]}}, author="1")
+    assert "3" in circles.managers
+    assert R.roles_for(plain, province="SLASKIE", author="1", circles=circles) == ["manager"]
+    assert not R.can_create(plain, "SLASKIE")
+
+
+def test_liczniki_zakladek():
+    def item(status, roles=("participant",), filled=False, web_review=False, participant=True):
+        return {"roles": list(roles), "status": status, "me": {"participant": participant, "filled": filled, "web_review": web_review}}
+
+    counts = R.scope_counts([
+        item("open"),
+        item("open", filled=True),
+        item("open", filled=True, web_review=True),
+        item("draft", roles=("manager",), participant=False),
+        item("open", roles=("manager",), participant=False),
+        item("closed"),
+        item("archived"),
+        item("trash", roles=("manager",), participant=False),
+        item("trash", participant=True),
+    ])
+    assert counts == {"todo": 2, "active": 4, "manage": 2, "drafts": 1, "closed": 1, "archived": 1, "trash": 1}
+    assert R.scope_counts([]) == {scope: 0 for scope in R.SCOPES}
+
+
 def test_obcy_dostaje_404_a_szkic_widzi_tylko_zarzadzajacy():
     with pytest.raises(R.FormError) as err:
         R.check_access([], "open")

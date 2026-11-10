@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -311,8 +311,33 @@ def roles_for(who: Viewer, *, province: str, author: str, circles: Circles) -> L
 
 
 def can_create(who: Viewer, province: str) -> bool:
-    """Tworzą admin i komisja okręgu (ta sama reguła co wydarzenia)."""
+    """Tworzą admin i komisja okręgu (ta sama reguła co wydarzenia).
+
+    Komisja = odznaka „Komisja sędziowska” (domyślnie, bez nadawania) albo ręczny
+    wpis w składzie Tablicy Komisji okręgu (`board_members.source = manual`) -
+    patrz `commission_viewer`.
+    """
     return can_manage(who, province)
+
+
+def commission_viewer(who: Viewer, *, manual_member: bool) -> Viewer:
+    """Ręczny członek komisji (Tablica Komisji) liczy się jak odznaka - tylko we własnym okręgu."""
+    if who.is_commission or not manual_member:
+        return who
+    return replace(who, is_commission=True)
+
+
+def scope_counts(items: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
+    """Liczniki zakładek listy: ile pozycji w każdej (`items`: roles, status, me)."""
+    out = {scope: 0 for scope in SCOPES}
+    for item in items:
+        me = item.get("me") or {}
+        for scope in SCOPES:
+            if in_scope(scope, roles=item.get("roles") or (), status=_s(item.get("status")),
+                        participant=bool(me.get("participant")), filled=bool(me.get("filled")),
+                        web_review=bool(me.get("web_review"))):
+                out[scope] += 1
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -32,10 +32,10 @@ from app import district_form_templates as T
 from app import district_forms_rules as R
 from app import district_forms_service as S
 from app import province_event_rules as PR
-from app.db import database, province_events, push_tokens
+from app.db import board_members, database, province_events, push_tokens
 from app.deps import FORM_WEB_SCOPE, get_jwt_payload
 from app.match_market import Actor, market_actor
-from app.settlement_province import canonical, display
+from app.settlement_province import canonical, display, spellings
 
 
 class FormRoute(APIRoute):
@@ -87,9 +87,29 @@ class Who:
         return "web_qr" if self.scope == FORM_WEB_SCOPE else "app"
 
 
+async def _manual_board_member(judge_id: str, province: str) -> bool:
+    """Ręczny wpis w składzie Tablicy Komisji okręgu (bez odznaki). Błąd bazy = brak nadania."""
+    try:
+        row = await database.fetch_one(
+            select(board_members.c.id).where(
+                and_(
+                    board_members.c.province.in_(spellings(province)),
+                    board_members.c.judge_id == judge_id,
+                    board_members.c.source == "manual",
+                    board_members.c.deleted_at.is_(None),
+                )
+            )
+        )
+    except Exception:
+        return False
+    return row is not None
+
+
 async def who_dep(request: Request, payload: Dict[str, Any] = Depends(get_jwt_payload)) -> Who:
     actor = await market_actor(payload)
     viewer = PR.viewer(judge_id=actor.judge_id, province=actor.province, is_admin=actor.is_admin, badges=actor.badges)
+    if not viewer.is_commission and not viewer.is_admin and viewer.judge_id and viewer.province:
+        viewer = R.commission_viewer(viewer, manual_member=await _manual_board_member(viewer.judge_id, viewer.province))
     scope = payload.get("scope")
     token_form = None
     if scope == FORM_WEB_SCOPE:
@@ -198,18 +218,22 @@ async def list_forms(scope: str = Query("active"), province: str = Query(""), wh
     if scope not in R.SCOPES:
         raise R.FormError("bad_scope", "Nieznana zakładka formularzy.", 400)
     prov = _province_for(who, province)
-    contexts = await _contexts(who, prov, include_trash=scope == "trash")
+    # Kosz liczymy zawsze - zakładki dostają liczniki (`scope_counts`), a `in_scope`
+    # i tak nie wpuszcza formularza z kosza do innej zakładki.
+    contexts = await _contexts(who, prov, include_trash=True)
     events = await S.events_by_id(c.form.get("event_id") for c in contexts)
     out = []
+    every = []
     for ctx in contexts:
         item = S.summary(ctx, event=events.get(int(ctx.form["event_id"])) if ctx.form.get("event_id") else None)
         me = item["me"]
+        every.append({"roles": ctx.roles, "status": ctx.status, "me": me})
         if R.in_scope(scope, roles=ctx.roles, status=ctx.status, participant=me["participant"], filled=me["filled"],
                       web_review=me["web_review"]):
             out.append(item)
     if scope in ("todo", "active"):
         out.sort(key=_deadline_key)
-    return {"forms": out, "can_create": R.can_create(who.viewer, prov)}
+    return {"forms": out, "can_create": R.can_create(who.viewer, prov), "scope_counts": R.scope_counts(every)}
 
 
 @router.get("/pending", summary="Na kartę panelu: czeka na Ciebie (posortowane wg terminu)")
