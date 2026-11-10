@@ -588,3 +588,18 @@ Logika: `app/district_form_info.py` (testy: `tests/test_district_form_info.py`).
   - `name` to nazwisko z tokenu i z listy sędziów, a przy jego braku `judge_id`.
 - **Eksport:** pierwszy blok `payment` z kontem dopisuje do arkusza „Podsumowanie” wiersze Odbiorca przelewu / Numer konta (`12 3456 …`) / Tytuł przelewu / Kwota przelewu. Do nagłówka PDF trafiają odbiorca, konto i tytuł.
 - **Migracja:** `ALTER TABLE district_forms ADD COLUMN IF NOT EXISTS info_json JSONB DEFAULT '{"above":[],"below":[]}'`. Stare wiersze z `NULL` czytamy jako puste strefy.
+
+## 18. Tryb cichy i strona w szkicu (10.11.2026)
+
+- Kolumna `district_forms.silent` (migracja `ADD COLUMN IF NOT EXISTS`). W `FormSummary` pole `silent`.
+- Jedna bramka wysyłki: `R.pushes_muted(form)` w `S.notify` - szkic albo tryb cichy nie wysyła NIC
+  i nie pisze do dziennika (slot publikacji zostaje wolny). Dotyczy publikacji, przypomnień
+  z harmonogramu (sweep pomija też `silent` w zapytaniu), ręcznych i "To Ty?".
+  `POST /remind` przy trybie cichym: 409 `silent`.
+- `POST /district-forms/{id}/silent` `{silent: true}` wycisza. `{silent: false, mode}`:
+  `reset` - cofa do szkicu (`published_at`, `closed_at` = NULL) i czyści wiersze, historię,
+  dziennik powiadomień, pliki odpowiedzi i odbicie RSVP spiętego wydarzenia;
+  `send` - zostawia odpowiedzi i wysyła powiadomienie o publikacji (slot `loud-<czas>`, tylko otwarta);
+  `later` - tylko odcisza (szkic odcisza się bez trybu).
+- Strona www działa w szkicu: `GET /public/forms/{kod}` nie wymaga publikacji (pole `draft`),
+  zapis z `web`/`web_qr` w szkicu przechodzi (`R.DRAFT_WRITABLE_SOURCES`); aplikacja uczestnika czeka na publikację.
