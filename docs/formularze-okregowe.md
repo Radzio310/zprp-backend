@@ -301,6 +301,7 @@ type Entry = {
 | `GET /district-forms/pending` | zalogowany | Na kartę panelu: `{forms: Array<FormSummary & {status_column: Column \| null}>}`, posortowane wg terminu. |
 | `GET /district-forms/templates` | twórca | Gotowe szablony `{id,title,kind,description,schema,settings}` (§13). |
 | `GET /district-forms/people` | twórca/zarządzający | `{judges:[{judge_id,name,photo_url,badges}], badges:[{name,color?,icon?}]}` do edytora odbiorców (okręg z tokenu). |
+| `GET /district-forms/info/recall` | komisja okręgu, admin | `{items:[{form_id,form_title,event,at,block}]}`: bloki `payment`/`place`/`contact` z list okręgu (bez kosza, najnowsze pierwsze, do 120) - podpowiedzi kreatora; scala je klient (przelew po numerze konta). |
 | `POST /district-forms/audience/preview` | twórca | `{audience}` → `{participants:n, observers:n, managers:n, sample:[name]}` |
 | `POST /district-forms` | twórca | Body `{kind,title,description?,cover?,schema,settings?,audience,closes_at?,event_id?,publish?:boolean,template_id?}` → `FormDetail` |
 | `GET /district-forms/{id}` | role | `FormDetail` |

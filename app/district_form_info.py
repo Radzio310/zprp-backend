@@ -451,3 +451,42 @@ def viewer_info(judge_id: str, full_name: Any) -> Dict[str, str]:
     first, last = split_full_name(full_name)
     name = re.sub(r"\s+", " ", _s(full_name)) or judge_id
     return {"judge_id": judge_id, "name": name, "first_name": first, "last_name": last or name}
+
+
+# ---------------------------------------------------------------------------
+# Podpowiedzi kreatora: przelewy, miejsca i kontakty z poprzednich list okręgu
+# ---------------------------------------------------------------------------
+
+#: Bloki z powtarzalnymi danymi, które kreator podpowiada przy następnych listach.
+RECALL_TYPES = ("payment", "place", "contact")
+RECALL_MAX = 120
+_RECALL_DROP = ("id", "resolved_amount", "resolved_at", "amount_column", "confirm_column")
+
+
+def recall_sightings(forms: Sequence[Mapping[str, Any]], events: Mapping[int, Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Bloki `payment`/`place`/`contact` z zapisanych list okręgu, najnowsze pierwsze.
+
+    Surowe „wystąpienia" z nazwą listy, wydarzenia i chwilą zmiany - scala je klient
+    (po numerze konta, nazwie miejsca, telefonie), razem z rejestrem na telefonie.
+    """
+    out: List[Dict[str, Any]] = []
+    ordered = sorted(forms, key=lambda f: iso(f.get("updated_at") or f.get("created_at")) or "", reverse=True)
+    for form in ordered:
+        info = stored_info(form.get("info_json"))
+        event = events.get(int(form["event_id"])) if form.get("event_id") else None
+        for zone in ZONES:
+            for block in info[zone]:
+                if block.get("type") not in RECALL_TYPES:
+                    continue
+                out.append(
+                    {
+                        "form_id": _s(form.get("id")),
+                        "form_title": _s(form.get("title")),
+                        "event": _s((event or {}).get("name")) or None,
+                        "at": iso(form.get("updated_at") or form.get("created_at")),
+                        "block": {k: v for k, v in block.items() if k not in _RECALL_DROP},
+                    }
+                )
+                if len(out) >= RECALL_MAX:
+                    return out
+    return out

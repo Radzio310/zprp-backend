@@ -188,3 +188,17 @@ def test_kto_oglada_imie_i_nazwisko():
     assert I.split_full_name("") == ("", "")
     assert I.viewer_info("12", "ZAJĄC Karol R.") == {"judge_id": "12", "name": "ZAJĄC Karol R.", "first_name": "Karol R.", "last_name": "ZAJĄC"}
     assert I.viewer_info("12", None) == {"judge_id": "12", "name": "12", "first_name": "", "last_name": "12"}
+
+
+def test_recall_sightings_newest_first_and_only_repeatable_blocks():
+    old = {"id": "f1", "title": "Wigilia 2025", "event_id": 7, "updated_at": datetime(2025, 12, 1, tzinfo=UTC),
+           "info_json": {"above": [payment(amount_column="pay", resolved_amount=80)], "below": [{"id": "t", "type": "text", "body": "x"}]}}
+    new = {"id": "f2", "title": "Szkolenie", "event_id": None, "updated_at": datetime(2026, 3, 1, tzinfo=UTC),
+           "info_json": {"above": [], "below": [{"id": "pl", "type": "place", "name": "Hala", "address": "Ul. 1"}]}}
+    out = I.recall_sightings([old, new], {7: {"name": "Wigilia sędziów"}})
+    assert [x["form_id"] for x in out] == ["f2", "f1"]
+    assert out[0]["block"] == {"type": "place", "name": "Hala", "address": "Ul. 1"}
+    pay = out[1]
+    assert pay["event"] == "Wigilia sędziów" and pay["form_title"] == "Wigilia 2025"
+    assert pay["block"]["account"] == NRB and "id" not in pay["block"] and "resolved_amount" not in pay["block"]
+    assert "amount_column" not in pay["block"]

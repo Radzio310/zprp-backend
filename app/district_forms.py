@@ -275,6 +275,23 @@ async def people(province: str = Query(""), form_id: str = Query(""), who: Who =
     }
 
 
+@router.get("/info/recall", summary="Kreator: przelewy, miejsca i kontakty z poprzednich list okręgu (podpowiedzi)")
+async def info_recall(province: str = Query(""), who: Who = Depends(who_dep)) -> Dict[str, Any]:
+    _app_only(who)
+    prov = _province_for(who, province)
+    if not R.can_create(who.viewer, prov) and not who.viewer.is_admin:
+        raise R.FormError("forbidden", "Podpowiedzi widzi komisja sędziowska okręgu i administrator.", 403)
+    rows = await database.fetch_all(
+        select(S.FORMS.c.id, S.FORMS.c.title, S.FORMS.c.event_id, S.FORMS.c.info_json, S.FORMS.c.updated_at, S.FORMS.c.created_at)
+        .where(S.FORMS.c.province == prov, S.FORMS.c.deleted_at.is_(None))
+        .order_by(S.FORMS.c.updated_at.desc())
+        .limit(200)
+    )
+    forms = [S.parse_form(r) for r in rows]
+    events = await S.events_by_id(f.get("event_id") for f in forms)
+    return {"items": INFO.recall_sightings(forms, events)}
+
+
 @router.post("/audience/preview", summary="Ilu ludzi obejmą kręgi odbiorców")
 async def audience_preview(body: Dict[str, Any] = Body(...), who: Who = Depends(who_dep)) -> Dict[str, Any]:
     _app_only(who)
