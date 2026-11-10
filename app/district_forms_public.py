@@ -25,7 +25,7 @@ from app import district_form_info as INFO
 from app import district_form_schema as SC
 from app import district_forms_rules as R
 from app import district_forms_service as S
-from app.db import database
+from app.db import database, province_events
 from app.deps import FORM_WEB_SCOPE
 from app.district_forms import FormRoute, pair_events
 from app.pod_reka_login_rules import AttemptLimiter
@@ -126,6 +126,29 @@ async def _info(form: Mapping[str, Any], *, web_enabled: bool) -> Dict[str, Any]
     return INFO.public_info(S.resolved_info(form, event), web_enabled=web_enabled)
 
 
+async def _event(form: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Wydarzenie okręgowe spięte z listą: nazwa, daty i grafika tytułowa (tło strony WWW)."""
+    if not form.get("event_id"):
+        return None
+    row = await database.fetch_one(
+        select(province_events.c.id, province_events.c.name, province_events.c.event_date, province_events.c.end_date,
+               province_events.c.data_json, province_events.c.deleted_at)
+        .where(province_events.c.id == int(form["event_id"]))
+    )
+    if row is None or row["deleted_at"] is not None:
+        return None
+    data = row["data_json"] if isinstance(row["data_json"], Mapping) else {}
+    image = data.get("title_image") if isinstance(data.get("title_image"), Mapping) else {}
+    url = str(image.get("url") or "").strip()
+    return {
+        "id": int(row["id"]),
+        "name": row["name"],
+        "event_date": R.iso(row["event_date"]),
+        "end_date": R.iso(row["end_date"]),
+        "title_image": url if url.startswith("/static/") or url.startswith("https://") else None,
+    }
+
+
 @router.get("/{code}", summary="Formularz na stronie (bez logowania)")
 async def public_form(code: str) -> Dict[str, Any]:
     form = await _form_by_code(code)
@@ -149,6 +172,7 @@ async def public_form(code: str) -> Dict[str, Any]:
         "counts": _counts(ctx),
         "privacy_note": PRIVACY_NOTE,
         "info": await _info(form, web_enabled=True),
+        "event": await _event(form),
     }
     if ctx.kind == "list":
         out["columns"] = R.visible_columns(ctx.columns, "web")
