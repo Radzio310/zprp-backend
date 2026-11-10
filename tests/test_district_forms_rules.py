@@ -361,7 +361,7 @@ def test_statystyki_listy_z_kwotami():
     }
     stats = R.list_stats(columns, ["1", "2", "3", "4"], entries)
     assert stats["participants"] == 4 and stats["filled"] == 3
-    assert stats["sources"] == {"app": 0, "web_qr": 1, "web": 1, "manager": 1}
+    assert stats["sources"] == {"app": 0, "web_qr": 1, "web": 1, "manager": 1, "event": 0}
     assert stats["web_review"] == 1
     assert stats["timeline"] == [{"date": "2026-11-10", "filled": 1}, {"date": "2026-11-11", "filled": 3}]
     by_id = {c["id"]: c for c in stats["columns"]}
@@ -572,3 +572,15 @@ def test_strona_wybiera_siebie_z_samych_nazwisk():
 
 def test_podsumowanie_domyslnie_wlaczone():
     assert R.clean_settings({}, kind="list")["roster_visible"] is True
+
+
+def test_event_rsvp_summary_liczy_przeniesione_i_czekajace():
+    cells = lambda v: {"cells_json": {"status": {"v": v}}}  # noqa: E731
+    out = R.event_rsvp_summary(
+        {"1": "yes", "2": "yes", "3": "no", "4": "yes", "9": "yes"},
+        ["1", "2", "3", "4"],
+        {"1": cells("yes"), "3": cells("no"), "4": cells("no")},
+        "status",
+    )
+    assert out == {"yes": 3, "no": 1, "total": 4, "carried": 2, "pending": 2}
+    assert R.event_rsvp_summary({"1": "yes"}, ["1"], {}, "status")["pending"] == 1

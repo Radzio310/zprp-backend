@@ -34,7 +34,8 @@ from app.province_event_rules import WARSAW, Viewer, can_manage
 # ---------------------------------------------------------------------------
 
 KINDS = ("list", "form")
-SOURCES = ("app", "web_qr", "web", "manager")
+#: `event` = migracja RSVP oddanych na wydarzeniu przed publikacją listy (seed_from_event_rsvps).
+SOURCES = ("app", "web_qr", "web", "manager", "event")
 SELF_SOURCES = ("app", "web_qr", "web")
 ROLES = ("manager", "observer", "participant")
 STATUSES = ("draft", "open", "closed", "archived", "trash")
@@ -1234,3 +1235,28 @@ def badge_catalog(judges: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
             counts[name] = counts.get(name, 0) + 1
     return [{"name": name, "count": counts[name]} for name in sorted(counts, key=lambda n: n.casefold())]
 
+
+
+def event_rsvp_summary(
+    rsvps: Mapping[str, str],
+    participants: Iterable[str],
+    entries: Mapping[str, Mapping[str, Any]],
+    status_column_id: str,
+) -> Dict[str, int]:
+    """Odpowiedzi kliknięte na spiętym wydarzeniu (tylko uczestnicy listy, tylko yes/no).
+
+    `carried` = komórka statusu w formularzu ma już tę samą wartość co RSVP; `pending` = reszta
+    (szkic albo brak wartości w formularzu - przejdą przy publikacji / starcie).
+    """
+    people = set(participants)
+    yes = no = carried = 0
+    for jid, rsvp in rsvps.items():
+        if jid not in people or rsvp not in ("yes", "no"):
+            continue
+        yes += rsvp == "yes"
+        no += rsvp == "no"
+        cell = loads((entries.get(jid) or {}).get("cells_json"), {}).get(status_column_id)
+        if isinstance(cell, Mapping) and cell.get("v") == rsvp:
+            carried += 1
+    total = yes + no
+    return {"yes": yes, "no": no, "total": total, "carried": carried, "pending": total - carried}

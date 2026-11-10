@@ -143,8 +143,11 @@ def _future(value: Any, moment: datetime) -> Optional[datetime]:
 async def _detail(form_id: str, who: Who) -> Dict[str, Any]:
     ctx = await S.context(form_id, who.viewer)
     events = await S.events_by_id([ctx.form.get("event_id")])
-    return S.detail(ctx, event=events.get(int(ctx.form["event_id"])) if ctx.form.get("event_id") else None,
-                    viewer_name=who.actor.full_name or None)
+    out = S.detail(ctx, event=events.get(int(ctx.form["event_id"])) if ctx.form.get("event_id") else None,
+                   viewer_name=who.actor.full_name or None)
+    if ctx.manager:
+        out["event_rsvp"] = await S.event_rsvp_info(ctx)
+    return out
 
 
 def _sorted_people(ctx: S.Ctx, ids: List[str]) -> List[str]:
@@ -586,7 +589,11 @@ async def patch_form(
             values.update(rev=int(row["rev"] or 1) + 1, updated_at=moment)
             await database.execute(update(S.FORMS).where(S.FORMS.c.id == form_id).values(**values))
     if {"audience_json", "event_id", "schema_json"} & set(values):
-        await S.mirror_participants(await S.load_form(form_id))
+        fresh = await S.load_form(form_id)
+        await S.mirror_participants(fresh)
+        if values.get("event_id") is not None:
+            # Opublikowana lista spięta z (nowym) wydarzeniem: RSVP z wydarzenia nie mogą zniknąć.
+            await S.seed_from_event_rsvps(fresh)
     return await _detail(form_id, who)
 
 
@@ -611,6 +618,9 @@ async def publish(form_id: str, background: BackgroundTasks, who: Who = Depends(
         return {"published_at": moment}
 
     ctx = await _lifecycle(form_id, who, change)
+    published = await S.load_form(form_id)
+    # RSVP oddane na wydarzeniu przed publikacją (updated_at < published_at) trafiają do listy.
+    await S.seed_from_event_rsvps(published, before=R.aware(published.get("published_at")))
     background.add_task(S.notify_published, await S.load_form(form_id), ctx.circles.participants, who.judge_id)
     return await _detail(form_id, who)
 

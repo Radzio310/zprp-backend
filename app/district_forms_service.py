@@ -809,6 +809,88 @@ async def mirror_rsvp(event_id: int, judge_id: str, status_value: Any, moment: d
         logger.warning("formularze: kopia RSVP nieudana event=%s", event_id, exc_info=True)
 
 
+async def event_rsvp_info(ctx: Ctx) -> Optional[Dict[str, int]]:
+    """Dla zarządzających: ile RSVP leży na spiętym wydarzeniu i ile już przeszło do listy."""
+    form = ctx.form
+    column = R.status_column(R.columns_of(form.get("schema_json"))) if form.get("kind") == "list" else None
+    if not form.get("event_id") or not column:
+        return None
+    rows = await database.fetch_all(
+        select(province_event_responses.c.judge_id, province_event_responses.c.status)
+        .where(province_event_responses.c.event_id == int(form["event_id"]))
+    )
+    return R.event_rsvp_summary({r["judge_id"]: r["status"] for r in rows}, ctx.circles.participants, ctx.entries, column["id"])
+
+
+async def seed_from_event_rsvps(form: Mapping[str, Any], *, before: Optional[datetime] = None) -> int:
+    """Przenosi RSVP oddane na wydarzeniu (yes/no) do kolumny statusu spiętej listy.
+
+    Migracja danych, nie zapis uczestnika: źródło `event`, bez powiadomień, bez blokady terminu,
+    bez kopii zwrotnej (RSVP już leży w tabeli wydarzenia). Tylko uczestnicy listy i tylko komórki
+    bez wartości - odpowiedzi z formularza nigdy nie są nadpisywane. Idempotentne.
+    `before`: bierzemy tylko RSVP z `updated_at` sprzed tej chwili (publikacja listy). Kopie
+    z `mirror_rsvp` powstają dopiero po publikacji, więc nie wrócą po „cofnij do szkicu" ani na starcie.
+    Zwraca liczbę przeniesionych odpowiedzi.
+    """
+    event_id = form.get("event_id")
+    if not event_id or form.get("kind") != "list" or form.get("published_at") is None or form.get("deleted_at") is not None:
+        return 0
+    column = R.status_column(R.columns_of(form.get("schema_json")))
+    if not column:
+        return 0
+    query = select(province_event_responses).where(
+        and_(province_event_responses.c.event_id == int(event_id), province_event_responses.c.status.in_(("yes", "no")))
+    )
+    if before is not None:
+        query = query.where(province_event_responses.c.updated_at < before)
+    rsvps = {r["judge_id"]: r["status"] for r in await database.fetch_all(query)}
+    if not rsvps:
+        return 0
+    people = await judges(form["province"])
+    participants = circles_of(form, people).participants
+    stamp = now()
+    moved = 0
+    for judge_id, rsvp in rsvps.items():
+        if judge_id not in participants:
+            continue
+        try:
+            value = R.status_from_rsvp(column, rsvp)
+        except R.FormError:
+            continue
+        async with database.transaction():
+            await _ensure_entry(form["id"], judge_id, stamp)
+            entry = await _locked_entry(form["id"], judge_id)
+            cells = dict(entry.get("cells_json") or {})
+            current = cells.get(column["id"])
+            if isinstance(current, Mapping) and not _blank(current.get("v")):
+                continue
+            cells[column["id"]] = R.make_cell(value, source="event", by=None, now=stamp)
+            values: Dict[str, Any] = {"cells_json": cells, "updated_at": stamp}
+            if entry.get("submitted_at") is None:
+                values["submitted_at"] = stamp
+            await database.execute(update(ENTRIES).where(ENTRIES.c.id == entry["id"]).values(**values))
+            await _log(form["id"], entry["id"], judge_id, column["id"], {"v": None}, {"v": value}, actor=None,
+                       source="event", meta=Meta(), moment=stamp)
+            moved += 1
+    return moved
+
+
+async def seed_all_linked_forms() -> int:
+    """Jednorazowa naprawa przy starcie: opublikowane spięte listy dostają RSVP sprzed publikacji."""
+    rows = await database.fetch_all(
+        select(FORMS).where(and_(FORMS.c.event_id.is_not(None), FORMS.c.kind == "list", FORMS.c.deleted_at.is_(None),
+                                 FORMS.c.published_at.is_not(None)))
+    )
+    total = 0
+    for raw in rows:
+        form = parse_form(raw)
+        try:
+            total += await seed_from_event_rsvps(form, before=R.aware(form.get("published_at")))
+        except Exception:  # noqa: BLE001
+            logger.warning("formularze: seed RSVP nieudany form=%s", form.get("id"), exc_info=True)
+    return total
+
+
 async def mirror_participants(form: Mapping[str, Any]) -> None:
     """Zaproszeni na wydarzenie = uczestnicy listy ze statusem (kopiujemy do `data_json`)."""
     event_id = form.get("event_id")

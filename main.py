@@ -1230,6 +1230,15 @@ async def startup():
         logger.exception("Stan początkowy nieaktywnych sędziów nie przeszedł")
 
     try:
+        from app.district_forms_service import seed_all_linked_forms as _seed_form_rsvps
+
+        moved = await _seed_form_rsvps()
+        if moved:
+            logger.info("Formularze: przeniesiono %s RSVP wydarzeń do spiętych list", moved)
+    except Exception:
+        logger.exception("Przeniesienie RSVP wydarzeń do list nie przeszło")
+
+    try:
         if await ensure_pod_reka_defaults():
             logger.info("Utworzono bazowy szablon zgłoszeń BAZA pod RĘKĄ")
     except Exception:

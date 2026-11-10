@@ -238,3 +238,18 @@ def test_strona_nie_wysyla_cudzych_komorek_listy():
     assert ("GET", "/{code}/rows/{judge_id}") in routes("app/district_forms_public.py")
     service, sfns = functions("app/district_forms_service.py")
     assert "R.list_visibility(" in ast.get_source_segment(service, sfns["can_flags"])
+
+
+def test_seed_rsvp_wydarzenia_do_spietej_listy():
+    text, funcs = functions("app/district_forms_service.py")
+    seed = ast.get_source_segment(text, funcs["seed_from_event_rsvps"])
+    assert 'source="event"' in seed and "status_from_rsvp" in seed
+    assert "circles_of(form, people).participants" in seed  # tylko uczestnicy
+    assert "_blank(current.get" in seed  # nie nadpisuje odpowiedzi z formularza
+    assert "mirror_rsvp(" not in seed and "notify" not in seed and "closed" not in seed
+    assert "before" in seed and "updated_at < before" in seed
+    ftext, ffuncs = functions("app/district_forms.py")
+    publish = ast.get_source_segment(ftext, ffuncs["publish"])
+    assert "seed_from_event_rsvps" in publish and "before=" in publish
+    assert "seed_from_event_rsvps" in ast.get_source_segment(ftext, ffuncs["update_form"] if "update_form" in ffuncs else ffuncs["patch_form"])
+    assert "seed_all_linked_forms" in source("main.py")
