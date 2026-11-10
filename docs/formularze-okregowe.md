@@ -466,3 +466,96 @@ Dopisane przy budowie serwera. Kształty z §1–§14 bez zmian; poniższe pola 
 **Kody błędów** (`{"error", "message", ...}`): `not_found` 404, `forbidden` 403, `not_participant` 403/404, `column_forbidden` 403, `confirmed_locked` 403, `web_disabled` 403, `verified_lock` 423, `soft_claimed` 409 (+`at`), `closed` 409, `draft` 409, `stale` 409, `event_linked` 409, `already_answered` 409, `client_conflict` 409, `anonymous_frozen` 409, `column_type_locked` 409, `rate_limited` 429, `bad_*`/`invalid_answers` 400 (`invalid_answers` niesie `errors: {questionId: zdanie}`), `trash_expired` 410.
 
 **Wydarzenie przy spiętej liście:** `POST /province-events/:id/rsvp` zapisuje status formularza (źródło `app`), termin odpowiedzi to termin formularza, a odmowy formularza wracają do starej aplikacji jako zwykłe 409 ze zdaniem. Status jest też kopiowany do `province_event_responses` (dla czytników spoza modułu); powód „Nie będę” przy spiętej liście nie jest zapisywany. Feed i `/item/:id` mają zawsze klucz `form` (`null`, gdy brak spięcia); obiekt formularza ma dodatkowo `status` i `status_column`.
+
+## 17. Bloki informacyjne (nad i pod formularzem)
+
+Każdy formularz (`list` i `form`) może mieć dwie strefy bloków: **nad** formularzem i **pod** nim. Twórca składa je w kreatorze w kroku „Informacje”:
+
+- dodaje blok jednym tapnięciem z arkusza typów;
+- przesuwa bloki w górę i w dół oraz między strefami;
+- widzi podgląd na żywo.
+
+Bloki pokazują się:
+
+- w aplikacji: uczestnikowi i obserwatorowi na ekranie formularza, zarządzającemu w podglądzie i w zakładce Ustawienia;
+- na stronie `/f/<kod>`: także przy wyłączonym webie, na karcie „tylko w aplikacji”, ale tylko bloki `countdown` i `text`;
+- na ekranie „Czeka na Ciebie” i w oknie <72 h: tylko pierwszy blok `countdown`.
+
+### Model
+
+Nowa kolumna `district_forms.info_json` (JSON, domyślnie `{"above":[],"below":[]}`), dodawana przez `MIGRATIONS`.
+
+```ts
+type FormInfo = { above: InfoBlock[]; below: InfoBlock[] };   // każda strefa ≤ 12 bloków
+type InfoBlock =
+  | { id: string; type: "text";      title?: string; body: string }                       // body ≤ 3000
+  | { id: string; type: "callout";   tone: "info" | "warning" | "success" | "danger"; title?: string; body: string }  // ≤ 600
+  | { id: string; type: "countdown"; title?: string; target: "deadline" | "event" | "date";
+      date?: string;                 // ISO, wymagane przy target="date"
+      done_label?: string;           // np. „Zapisy zamknięte”; domyślnie zależne od celu
+      show_date?: boolean }          // pokaż pod licznikiem datę, np. „wt 9.12, 23:59”; domyślnie true
+  | { id: string; type: "payment";   title?: string;                                      // domyślnie „Dane do przelewu”
+      recipient: string;             // ≤ 70
+      account: string;               // NRB: serwer zapisuje 26 cyfr bez spacji, z poprawną sumą kontrolną IBAN PL
+      transfer_title: string;        // szablon ≤ 140, symbole: {imie_nazwisko} {imie} {nazwisko} {numer_sedziego}
+      amount?: number | null;        // zł (np. 80); albo:
+      amount_column?: string | null; // id kolumny confirm z kwotą; brane z niej
+      confirm_column?: string | null;// id kolumny confirm: blok pokazuje jej stan i przycisk „Zapłaciłem”
+      address?: string;              // ≤ 140
+      bank_qr?: boolean;             // kod QR do aplikacji banku (domyślnie true)
+      note?: string }                // ≤ 300
+  | { id: string; type: "copy";      title?: string; items: Array<{ id: string; label: string; value: string; mono?: boolean }> } // 1..10 pozycji, value ≤ 300
+  | { id: string; type: "place";     title?: string; name: string; address?: string; lat?: number; lon?: number; note?: string }
+  | { id: string; type: "contact";   title?: string; people: Array<{ id: string; name: string; role?: string; phone?: string; email?: string }> } // 1..6 osób
+  | { id: string; type: "links";     title?: string; items: Array<{ id: string; label: string; url: string }> };          // 1..6, tylko https
+```
+
+Bloki niosą tylko treść. Nie mają nadtytułów (zakaz z CLAUDE.md BAZA): `title` to zwykły tytuł bloku i jest opcjonalny.
+
+### Serwer
+
+- **Walidacja i czyszczenie:** `clean_info(raw, schema)` w `district_forms_rules.py` albo w osobnym `district_form_info.py`, z testami.
+  - Przycina teksty i usuwa nieznane typy.
+  - Odrzuca `target:"event"` bez `event_id`: 400 `bad_info` z `errors: {blockId: zdanie}`.
+  - Sprawdza NRB (26 cyfr, `PL` + mod 97 == 1) i `amount_column`/`confirm_column` (musi istnieć kolumna typu `confirm`).
+  - Linki przyjmuje tylko z `https://`.
+- **Gdzie trafia `info`:** do `POST`/`PATCH` `/district-forms` (pole `info`), `FormDetail.info`, `PublicForm.info` (zawsze; przy `web_enabled:false` tylko `countdown` i `text`), `/pending` (`info_countdown`: pierwszy blok `countdown` albo null) i do `duplicate`.
+- **`resolved_at` (ISO albo null) w każdym bloku `countdown` w odpowiedziach**, wyliczane z celu:
+  - `deadline` → `closes_at`;
+  - `event` → początek spiętego wydarzenia;
+  - `date` → `date`.
+
+  Klient odlicza tylko do `resolved_at`.
+- **`payment` w odpowiedziach** dostaje `resolved_amount` (number albo null): `amount` albo `amount` z kolumny `amount_column`.
+- **`FormDetail.viewer`** = `{judge_id, name, first_name, last_name}`. Imię i nazwisko z `province_judges.full_name`; kolejność ustalić z danych, a gdy niejasna: `first_name = ""`, `last_name = name`.
+- **Szablon „Impreza z wpłatą”** dostaje bloki:
+  - nad: `countdown` (deadline, tytuł „Do końca zapisów”) i `payment` (puste konto, `transfer_title` „{tytuł formularza} – {imie_nazwisko}”, `amount_column` = kolumna wpłaty, `confirm_column` = ta sama);
+  - pod: `contact` (pusty, do uzupełnienia).
+
+  Szablon „Zebranie / szkolenie” dostaje `countdown` (event) i `place`.
+
+### Klienci (aplikacja i web)
+
+- **`text`:** proste formatowanie, czyli `**pogrubienie**`, nowe linie i listy `- `. Adresy `https://`, telefony i e-maile są klikalne.
+- **`callout`:** kolorowa ramka według `tone`.
+- **`countdown`:**
+  - Kafle dni / godz. / min / sek z poprawną odmianą, jak licznik najbliższego meczu (`components/home/CountdownTile.tsx` w BAZA; na webie odpowiednik CSS).
+  - Pod licznikiem data, jeśli `show_date`.
+  - Po czasie: `done_label`, domyślnie dla celu `deadline` „Termin minął”, dla `event` „Wydarzenie trwa albo minęło”.
+  - Zegar we własnym komponencie, żeby nie przerysowywać całego ekranu. Zatrzymany, gdy ekran nie jest widoczny.
+- **`payment`:**
+  - Wiersze Odbiorca / Numer konta (formatowany `12 3456 7890 …`) / Tytuł przelewu (szablon wypełniony danymi oglądającego) / Kwota / Adres.
+  - Każdy wiersz z przyciskiem **Kopiuj** i potwierdzeniem „Skopiowano”; numer konta kopiujemy bez spacji. Jest też „Kopiuj wszystko”.
+  - Przy `bank_qr`: kod QR w standardzie ZBP „Skanuj i zapłać”, opisany niżej.
+  - Przy `confirm_column`: stan wpłaty uczestnika (Nie zapłacono / Zapłaciłem / Otrzymano ✓) i przycisk „Zapłaciłem”, który zapisuje kolumnę tak jak wiersz uczestnika.
+  - Na anonimowym webie tytuł personalizuje się dopiero po wybraniu siebie z listy albo po zalogowaniu QR. Wcześniej symbol zamienia się na „[imię i nazwisko]”, a przycisk „Zapłaciłem” jest ukryty.
+- **`copy`:** etykieta, wartość (`mono` = krój o stałej szerokości) i Kopiuj.
+- **`place`:** nazwa, adres, „Otwórz w mapach” (współrzędne albo wyszukanie adresu).
+- **`contact`:** osoby z przyciskami Zadzwoń / Napisz.
+- **`links`:** przyciski otwierające adresy.
+
+**Kod QR przelewu (rekomendacja ZBP, standard 2D)** to jeden napis z polami rozdzielonymi `|`:
+
+`{NIP odbiorcy albo pusty}|PL|{NRB 26 cyfr}|{kwota w groszach, 6 cyfr z zerami}|{nazwa odbiorcy ≤ 20 znaków}|{tytuł ≤ 32 znaki}|||`
+
+Przykład: 80 zł → `008000`. Brak kwoty → `000000`. Tytuł i nazwę przycinamy oraz usuwamy z nich `|`. Pod kodem: „Zeskanuj w aplikacji banku (Skanuj i zapłać)”.
