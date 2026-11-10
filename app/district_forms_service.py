@@ -497,6 +497,52 @@ async def write_cells(
     return fresh, changed
 
 
+async def clear_entry(
+    form: Dict[str, Any],
+    *,
+    judge_id: str,
+    column_id: Optional[str],
+    actor_id: str,
+    meta: Optional[Meta] = None,
+) -> Optional[Dict[str, Any]]:
+    """Komisja usuwa odpowiedź sędziego: jedną komórkę listy albo całą odpowiedź.
+
+    Komórka idzie zwykłym zapisem komisji (historia, odbicie RSVP). Cała odpowiedź:
+    wiersz wraca do stanu sprzed pierwszego zapisu, jeden wpis w historii, pliki odpowiedzi
+    znikają, spięte wydarzenie traci RSVP tej osoby. Bez powiadomienia sędziego.
+    """
+    meta = meta or Meta()
+    stamp = now()
+    if R.form_status(form, stamp) == "trash":
+        raise R.not_found()
+    if column_id:
+        entry, _changed = await write_cells(form, judge_id=judge_id, changes={column_id: None}, source="manager",
+                                            actor_id=actor_id, meta=meta, moment=stamp)
+        return entry
+    row = await database.fetch_one(select(ENTRIES).where(and_(ENTRIES.c.form_id == form["id"], ENTRIES.c.judge_id == judge_id)))
+    if not row:
+        return None
+    async with database.transaction():
+        entry = await _locked_entry(form["id"], judge_id)
+        old, new = R.clear_log_payload(entry.get("cells_json"), entry.get("answers_json"))
+        await database.execute(update(ENTRIES).where(ENTRIES.c.id == entry["id"]).values(**R.cleared_entry_values(stamp)))
+        if old is not None:
+            await _log(form["id"], entry["id"], judge_id, None, old, new, actor=actor_id, source="manager", meta=meta,
+                       moment=stamp)
+        files = await database.fetch_all(select(UPLOADS.c.token).where(and_(
+            UPLOADS.c.form_id == form["id"], UPLOADS.c.judge_id == judge_id, UPLOADS.c.purpose == "answer")))
+        await database.execute(delete(UPLOADS).where(and_(
+            UPLOADS.c.form_id == form["id"], UPLOADS.c.judge_id == judge_id, UPLOADS.c.purpose == "answer")))
+    for item in files:
+        try:
+            upload_path(form["id"], item["token"]).unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            logger.warning("formularze: nie usunięto pliku odpowiedzi form=%s", form["id"], exc_info=True)
+    if form.get("event_id") and form.get("kind") == "list" and R.status_column(R.columns_of(form.get("schema_json"))):
+        await mirror_rsvp(int(form["event_id"]), judge_id, None, stamp)
+    return parse_entry(await database.fetch_one(select(ENTRIES).where(ENTRIES.c.id == entry["id"])))
+
+
 async def confirm_me(form: Dict[str, Any], judge_id: str, *, source: str, meta: Optional[Meta] = None) -> Dict[str, Any]:
     """„To ja": weryfikacja wiersza bez zmiany wartości."""
     stamp = now()

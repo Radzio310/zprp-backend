@@ -407,6 +407,34 @@ def event_image_url(data_json: Any) -> Optional[str]:
     return url or None
 
 
+def cleared_entry_values(moment: datetime) -> Dict[str, Any]:
+    """Wiersz po „Usuń odpowiedź” komisji: jak przed pierwszym zapisem (bez komórek, odpowiedzi,
+    potwierdzenia i śladu strony). Sam wiersz zostaje - sędzia dalej jest na liście."""
+    return {
+        "cells_json": {},
+        "answers_json": {},
+        "verified": False,
+        "web_review": False,
+        "web_device": None,
+        "web_at": None,
+        "self_source": None,
+        "submitted_at": None,
+        "client_id": None,
+        "fill_seconds": None,
+        "updated_at": moment,
+    }
+
+
+def clear_log_payload(cells: Any, answers: Any) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Wpis historii przy usunięciu całej odpowiedzi: (stare, nowe). `cleared` czyta aplikacja."""
+    old: Dict[str, Any] = {}
+    if isinstance(cells, Mapping) and cells:
+        old["cells"] = {k: (v.get("v") if isinstance(v, Mapping) else v) for k, v in cells.items()}
+    if isinstance(answers, Mapping) and answers:
+        old["answers"] = dict(answers)
+    return (old or None), {"cleared": True}
+
+
 def silent_publish_slot(moment: datetime) -> str:
     """Slot powiadomienia o publikacji po trybie cichym - inny niż „1”, żeby dziennik go nie zdublował."""
     return f"loud-{moment.strftime('%Y%m%dT%H%M%S')}"

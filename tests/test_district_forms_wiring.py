@@ -221,3 +221,11 @@ def test_tryb_cichy_kolumna_trasa_i_jedna_bramka_wysylki():
 def test_strona_www_dziala_w_szkicu():
     public, fns = functions("app/district_forms_public.py")
     assert "published_at" not in ast.get_source_segment(public, fns["_form_by_code"])
+
+
+def test_usuniecie_odpowiedzi_trasa_historia_i_rsvp():
+    assert ("POST", "/{form_id}/rows/{judge_id}/clear") in routes("app/district_forms.py")
+    service, fns = functions("app/district_forms_service.py")
+    clear = ast.get_source_segment(service, fns["clear_entry"])
+    assert "_log(" in clear and "mirror_rsvp(" in clear and "cleared_entry_values" in clear
+    assert "notify" not in clear

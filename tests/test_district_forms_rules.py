@@ -535,3 +535,13 @@ def test_my_fields_list_and_form():
                            {"id": "s2", "questions": [{"id": "q3", "title": "Rozmiar koszulki"}]}]}
     assert R.my_fields("form", schema, []) == ["Menu", "Rozmiar koszulki"]
     assert R.my_fields("form", None, []) == []
+
+
+def test_usuniecie_odpowiedzi_zeruje_wiersz_i_zostawia_slad():
+    moment = datetime(2026, 11, 10, 12, tzinfo=UTC)
+    values = R.cleared_entry_values(moment)
+    assert values["cells_json"] == {} and values["answers_json"] == {}
+    assert values["verified"] is False and values["web_review"] is False and values["submitted_at"] is None
+    old, new = R.clear_log_payload({"status": {"v": "yes", "src": "app"}}, {})
+    assert old == {"cells": {"status": "yes"}} and new == {"cleared": True}
+    assert R.clear_log_payload({}, None)[0] is None

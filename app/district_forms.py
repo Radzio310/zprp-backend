@@ -814,6 +814,26 @@ async def patch_row(form_id: str, judge_id: str, request: Request, body: Dict[st
     return {"entry": S.entry_view(ctx, entry, judge_id=judge_id, mode="manager")}
 
 
+@router.post("/{form_id}/rows/{judge_id}/clear", summary="Komisja usuwa odpowiedź sędziego (cały wiersz albo komórkę)")
+async def clear_row(form_id: str, judge_id: str, request: Request, body: Optional[Dict[str, Any]] = Body(None),
+                    who: Who = Depends(who_dep)) -> Dict[str, Any]:
+    ctx = await S.context(form_id, who.viewer, with_entries=False)
+    _manager(ctx)
+    column_id = _s((body or {}).get("column_id")) or None
+    if column_id:
+        if ctx.kind != "list":
+            raise R.FormError("wrong_kind", "Komórki ma tylko lista deklaracji.", 400)
+        if column_id not in {c["id"] for c in ctx.columns}:
+            raise R.FormError("unknown_column", "Takiej kolumny nie ma - odśwież listę.", 400)
+        if judge_id not in ctx.circles.participants:
+            raise R.FormError("not_participant", "Tego sędziego nie ma na liście.", 404)
+    entry = await S.clear_entry(ctx.form, judge_id=judge_id, column_id=column_id, actor_id=who.judge_id, meta=_meta(request))
+    if entry is None:
+        return {"entry": None}
+    await S.load_entries(ctx)
+    return {"entry": S.entry_view(ctx, ctx.entries.get(judge_id), judge_id=judge_id, mode="manager")}
+
+
 @router.post("/{form_id}/rows/bulk", summary="Jedna wartość w jednej kolumnie dla wielu sędziów")
 async def bulk(form_id: str, request: Request, body: Dict[str, Any] = Body(...), who: Who = Depends(who_dep)) -> Dict[str, Any]:
     ctx = await S.context(form_id, who.viewer, with_entries=False)
