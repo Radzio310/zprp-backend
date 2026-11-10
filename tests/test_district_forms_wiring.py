@@ -253,3 +253,33 @@ def test_seed_rsvp_wydarzenia_do_spietej_listy():
     assert "seed_from_event_rsvps" in publish and "before=" in publish
     assert "seed_from_event_rsvps" in ast.get_source_segment(ftext, ffuncs["update_form"] if "update_form" in ffuncs else ffuncs["patch_form"])
     assert "seed_all_linked_forms" in source("main.py")
+
+
+def test_overlay_nie_chowa_rsvp_wydarzenia_i_reset_ich_nie_kasuje():
+    from typing import Any, Dict, Mapping, Set
+
+    from app import district_forms_rules as R
+
+    text, funcs = functions("app/district_forms_service.py")
+    ns = {"R": R, "Any": Any, "Dict": Dict, "Mapping": Mapping, "Set": Set}
+    names = ("_blank", "overlay_responses")
+    code = "\n".join(["from __future__ import annotations"] + [ast.get_source_segment(text, funcs[n]) for n in names])
+    exec(code, ns)  # noqa: S102
+
+    class S:  # noqa: N801
+        overlay_responses = staticmethod(ns["overlay_responses"])
+
+    column = {"id": "status", "type": "status", "options": [{"id": "yes"}, {"id": "no"}]}
+    item = {"column": column, "entries": {
+        "1": {"cells_json": {"status": {"v": "no", "at": "2026-11-10T10:00:00+00:00"}}},
+        "2": {"cells_json": {}},
+        "3": {"cells_json": {"status": {"v": None}}},
+    }}
+    original = {"1": {"judge_id": "1", "status": "yes"}, "2": {"judge_id": "2", "status": "yes"},
+                "3": {"judge_id": "3", "status": "no"}, "7": {"judge_id": "7", "status": "yes"}}
+    out = S.overlay_responses(item, original)
+    assert out["1"]["status"] == "no"  # formularz wygrywa, gdzie ma wartość
+    assert {j: out[j]["status"] for j in ("2", "3", "7")} == {"2": "yes", "3": "no", "7": "yes"}
+    assert S.overlay_responses({"column": column, "entries": {}}, original).keys() == original.keys()
+    clear = ast.get_source_segment(text, funcs["clear_test_answers"])
+    assert "updated_at >= form[\"published_at\"]" in clear

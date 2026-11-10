@@ -755,7 +755,7 @@ async def notify_published(form: Mapping[str, Any], participants: Sequence[str],
 
 async def clear_test_answers(form: Mapping[str, Any]) -> int:
     """Tryb cichy -> „cofnij do szkicu”: znikają wiersze, historia, dziennik powiadomień
-    i pliki odpowiedzi. Spięte wydarzenie traci odbicie RSVP (lista jest jego jedyną prawdą)."""
+    i pliki odpowiedzi. Spięte wydarzenie traci tylko odbicie RSVP z listy (kliknięcia sprzed publikacji zostają)."""
     form_id = form["id"]
     async with database.transaction():
         gone = await database.fetch_all(select(ENTRIES.c.id).where(ENTRIES.c.form_id == form_id))
@@ -765,9 +765,13 @@ async def clear_test_answers(form: Mapping[str, Any]) -> int:
         await database.execute(delete(LOG).where(LOG.c.form_id == form_id))
         await database.execute(delete(NOTES).where(NOTES.c.form_id == form_id))
         await database.execute(delete(UPLOADS).where(and_(UPLOADS.c.form_id == form_id, UPLOADS.c.purpose == "answer")))
-        if form.get("event_id"):
+        if form.get("event_id") and form.get("published_at") is not None:
+            # Kasujemy tylko kopie z listy (mirror_rsvp powstaje po publikacji). RSVP kliknięte
+            # na wydarzeniu przed publikacją mają updated_at starszy - zostają.
             await database.execute(
-                delete(province_event_responses).where(province_event_responses.c.event_id == int(form["event_id"])))
+                delete(province_event_responses).where(and_(
+                    province_event_responses.c.event_id == int(form["event_id"]),
+                    province_event_responses.c.updated_at >= form["published_at"])))
     for row in files:
         try:
             upload_path(form_id, row["token"]).unlink(missing_ok=True)
@@ -945,14 +949,24 @@ async def event_overlay(event_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
 
 
 def overlay_responses(item: Mapping[str, Any], original: Mapping[str, Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """RSVP wydarzenia czytane z kolumny statusu (yes/no; reszta = brak odpowiedzi)."""
+    """RSVP wydarzenia: kolumna statusu formularza wygrywa tylko tam, gdzie ma wartość.
+
+    Uczestnik bez wartości w komórce statusu zachowuje RSVP z tabeli wydarzenia - spięcie nigdy
+    nie chowa odpowiedzi oddanych na wydarzeniu (np. przed publikacją listy albo w starej aplikacji).
+    Wartość spoza yes/no (np. „może”) to odpowiedź formularza: brak RSVP, bez cofania do tabeli.
+    """
     column = item.get("column")
     if not column:
         return dict(original)
     out: Dict[str, Dict[str, Any]] = {}
+    claimed: Set[str] = set()
     for jid, entry in (item.get("entries") or {}).items():
         cell = (entry.get("cells_json") or {}).get(column["id"])
-        rsvp = R.rsvp_from_status((cell or {}).get("v") if isinstance(cell, Mapping) else None)
+        value = cell.get("v") if isinstance(cell, Mapping) else None
+        if _blank(value):
+            continue
+        claimed.add(jid)
+        rsvp = R.rsvp_from_status(value)
         if rsvp is None:
             continue
         previous = original.get(jid) or {}
@@ -962,6 +976,9 @@ def overlay_responses(item: Mapping[str, Any], original: Mapping[str, Mapping[st
             "reason": previous.get("reason") if previous.get("status") == rsvp else None,
             "updated_at": R.parse_iso(cell.get("at")) if isinstance(cell, Mapping) and cell.get("at") else entry.get("updated_at"),
         }
+    for jid, row in original.items():
+        if jid not in claimed and jid not in out:
+            out[jid] = dict(row)
     return out
 
 
