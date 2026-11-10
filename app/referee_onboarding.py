@@ -481,23 +481,25 @@ async def _upsert_judge_badges(nr: str, full_name: str, province: str, names: Li
 
 
 async def _add_young(nr: str, full_name: str, province: str, jwt: dict) -> str:
-    """Rejestr Młodych - z tymi samymi uprawnieniami co moduł Młodych (Teach Master okręgu / admin)."""
-    from app.young_referees import _ensure_young_referee_write
+    """Rejestr Młodych dla osoby założonej kreatorem.
 
+    Uprawnienie: to samo co cały kreator - panel „Sędziowie wojewódzcy" okręgu
+    (`province_judges`, bramka routera). Moduł Młodych osobno wymaga Teach Mastera,
+    ale nowa osoba z kursu trafia do Młodych przy zakładaniu, a robi to Komisja
+    okręgu - decyzja właściciela z 10.11.2026. Oceny Młodych dalej należą do modułu.
+    """
     prov = R.s(province).upper()
-    try:
-        await _ensure_young_referee_write(jwt, province=prov, action="Dodanie młodego sędziego")
-    except HTTPException as exc:
-        return f"Młodzi: {exc.detail}"
     exists = await database.fetch_one(
         select(young_referees.c.id).where(
             (young_referees.c.base_judge_id == nr) & (young_referees.c.province == prov)
         )
     )
-    if not exists:
-        await database.execute(
-            young_referees.insert().values(full_name=full_name, base_judge_id=nr, province=prov, is_active=True)
-        )
+    if exists:
+        return "już w Młodych"
+    await database.execute(
+        young_referees.insert().values(full_name=full_name, base_judge_id=nr, province=prov, is_active=True)
+    )
+    logger.info("Onboarding: Młodzi +%s %s by=%s", nr, prov, jwt.get("sub"))
     return "dodano do Młodych"
 
 
