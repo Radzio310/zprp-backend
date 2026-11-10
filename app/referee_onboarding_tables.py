@@ -6,7 +6,7 @@ do ZPRP z prośbą o konta do logowania. Trzymamy tylko to, co trafia do maila -
 bez PESEL-u, adresu i telefonu.
 """
 
-from sqlalchemy import JSON, Column, DateTime, Integer, String, Table, func
+from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, String, Table, func
 
 
 def define_tables(metadata):
@@ -35,4 +35,21 @@ def define_tables(metadata):
         Column("mailed_at", DateTime, nullable=True),
         Column("mailed_by", String, nullable=True),
     )
-    return (onboarding,)
+    #: Badge zamówione w kreatorze dla osoby z historii (10.11.2026). Osobna tabela,
+    #: bo historia stoi już na produkcji - nowa tabela powstaje sama, bez migracji.
+    badges = Table(
+        "province_referee_onboarding_badges",
+        metadata,
+        Column("record_id", Integer, primary_key=True),
+        #: Nazwy badge okręgu (jak w `badges.name`), bez „Młodzi".
+        Column("badges", JSON, nullable=False),
+        #: Dodać do rejestru Młodych (`young_referees`).
+        Column("young", Boolean, nullable=False, server_default="false"),
+        #: Kiedy nadano (NULL = czeka, np. osoba bez numeru NrSedzia).
+        Column("applied_at", DateTime, nullable=True),
+        #: Krótki opis wyniku dla historii („nadano", „Młodzi: brak uprawnień" …).
+        Column("note", String, nullable=True),
+        Column("updated_by", String, nullable=True),
+        Column("updated_at", DateTime, nullable=False, server_default=func.now()),
+    )
+    return (onboarding, badges)

@@ -425,6 +425,49 @@ def classify_duplicate(person: Dict[str, Any], matches: List[Dict[str, Any]]) ->
 
 
 # ---------------------------------------------------------------------------
+# Badge
+# ---------------------------------------------------------------------------
+
+YOUNG_BADGE = "Młodzi"
+
+
+def clean_badges(names: Iterable[Any]) -> List[str]:
+    """Nazwy badge bez powtórek (porównanie bez ogonków i wielkości liter), bez „Młodzi"."""
+    out: List[str] = []
+    seen = set()
+    for name in names or []:
+        text = s(name)
+        key = fold(text)
+        if not text or key in seen or key == fold(YOUNG_BADGE):
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
+def merge_badges(existing: Any, add: Iterable[str]) -> Dict[str, Any]:
+    """Obiekt badge sędziego (`province_judges.badges`) z dopisanymi nazwami - istniejących nie rusza."""
+    obj: Dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    have = {fold(k) for k in obj}
+    for name in add:
+        if fold(name) not in have:
+            obj[name] = True
+            have.add(fold(name))
+    return obj
+
+
+def display_name(first: Any, last: Any) -> str:
+    """„Martyna Wiąckiewicz" - tak jak lista ZPRP zapisuje rejestr okręgu."""
+    return " ".join(x for x in (cap_name(first), cap_name(last)) if x)
+
+
+def resolve_nr(record: Dict[str, Any], registry: Iterable[Dict[str, Any]]) -> str:
+    """Numer osoby „bez numeru" z rejestru okręgu - tylko gdy imię i nazwisko pasują do JEDNEJ osoby."""
+    hits = {s(r.get("nr")) for r in registry if s(r.get("nr")) and name_relation(record, r) == "same"}
+    return hits.pop() if len(hits) == 1 else ""
+
+
+# ---------------------------------------------------------------------------
 # Wynik zapisu
 # ---------------------------------------------------------------------------
 

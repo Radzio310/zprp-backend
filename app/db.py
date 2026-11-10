@@ -4760,7 +4760,7 @@ from app.lineup_read_tables import define_tables as _define_lineup_read_tables
 
 # Kreator nowych sędziów na baza.zprp.pl - historia założonych osób okręgu (09.11.2026, `app/referee_onboarding_tables.py`, `docs/kreator-nowych-sedziow.md`).
 from app.referee_onboarding_tables import define_tables as _define_referee_onboarding_tables
-(province_referee_onboarding,) = _define_referee_onboarding_tables(metadata)
+(province_referee_onboarding, province_referee_onboarding_badges) = _define_referee_onboarding_tables(metadata)
 
 # Zapisane stany zakładek „Raporty i podsumowania ZPRP" (10.11.2026, `app/zprp_report_snapshot_tables.py`, `docs/raporty-zprp-zapisany-stan.md`).
 from app.zprp_report_snapshot_tables import define_tables as _define_zprp_report_snapshot_tables

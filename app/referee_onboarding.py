@@ -13,6 +13,7 @@ Konto ZPRP musi mieć w „Sędziowie i Delegaci" opcję NOWY - sprawdza `/probe
   GET  /province_referees/onboarding/history  - osoby założone w okręgu
   POST /province_referees/onboarding/history/mailed  - oznacz „mail do ZPRP wysłany"
   POST /province_referees/onboarding/history/remove  - usuń wpis z historii (nie z ZPRP)
+  POST /province_referees/onboarding/badges          - nadaj badge (i Młodych) osobom z historii
 
 Kontrakt: `docs/kreator-nowych-sedziow.md`. Reguły: `referee_onboarding_rules.py`.
 """
@@ -30,7 +31,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, desc, select, update
 
 from app import referee_onboarding_rules as R
-from app.db import database, province_judges, province_referee_onboarding, province_settlement_judges
+from app.db import (
+    database,
+    province_judges,
+    province_referee_onboarding,
+    province_referee_onboarding_badges,
+    province_settlement_judges,
+    young_referees,
+)
 from app.deps import Settings, get_jwt_payload, get_rsa_keys, get_settings
 from app.province_panel_access import PANEL_PROVINCE_JUDGES
 from app.province_panel_guard import panel_read_gate
@@ -95,6 +103,16 @@ class CreateRequest(ZprpCreds):
     force: bool = False
     source: str = "manual"
     batch_id: str = ""
+    #: Badge do nadania zaraz po założeniu (10.11.2026); „young" = rejestr Młodych.
+    badges: List[str] = Field(default_factory=list)
+    young: bool = False
+
+
+class BadgesRequest(BaseModel):
+    province: str
+    ids: List[int] = Field(default_factory=list)
+    badges: List[str] = Field(default_factory=list)
+    young: bool = False
 
 
 class HistoryIdsRequest(BaseModel):
@@ -316,6 +334,9 @@ async def create(
             select(province_referee_onboarding).where(province_referee_onboarding.c.id == record_id)
         )
         record = _row(row) if row else None
+        if row and (R.clean_badges(payload.badges) or payload.young):
+            outcome = await _order_badges(row, R.clean_badges(payload.badges), payload.young, jwt)
+            record = {**(record or {}), **outcome}
     return {**result, "record": record}
 
 
@@ -327,7 +348,17 @@ async def history(province: str = Query(...)):
         .order_by(desc(province_referee_onboarding.c.created_at))
         .limit(1000)
     )
-    return {"items": [_row(r) for r in rows]}
+    items = [_row(r) for r in rows]
+    if items:
+        orders = await database.fetch_all(
+            select(province_referee_onboarding_badges).where(
+                province_referee_onboarding_badges.c.record_id.in_([i["id"] for i in items])
+            )
+        )
+        by_id = {o["record_id"]: _badge_row(o) for o in orders}
+        for item in items:
+            item.update(by_id.get(item["id"], {}))
+    return {"items": items}
 
 
 @router.post("/history/mailed")
@@ -351,6 +382,134 @@ async def remove(payload: HistoryIdsRequest):
             .where(province_referee_onboarding.c.province.in_(_province_keys(payload.province)))
         )
     return {"ok": True}
+
+
+@router.post("/badges")
+async def give_badges(payload: BadgesRequest, jwt: dict = Depends(get_jwt_payload)):
+    """Badge dla osób z historii okręgu. Osoba bez numeru dostaje je, gdy numer się znajdzie."""
+    names = R.clean_badges(payload.badges)
+    if not payload.ids or not (names or payload.young):
+        raise HTTPException(400, "Wybierz osoby i co najmniej jeden badge.")
+    rows = await database.fetch_all(
+        select(province_referee_onboarding)
+        .where(province_referee_onboarding.c.id.in_(payload.ids))
+        .where(province_referee_onboarding.c.province.in_(_province_keys(payload.province)))
+    )
+    registry = None
+    results = []
+    for row in rows:
+        if not R.s(row["nr_sedzia"]):
+            # Numer mógł już przyjść z listy ZPRP (synchronizacja okręgu) - szukamy po imieniu i nazwisku.
+            registry = registry if registry is not None else await _registry(payload.province)
+            nr = R.resolve_nr(dict(row), registry)
+            if nr:
+                await database.execute(
+                    update(province_referee_onboarding)
+                    .where(province_referee_onboarding.c.id == row["id"])
+                    .values(nr_sedzia=nr, status="created")
+                )
+                row = await database.fetch_one(
+                    select(province_referee_onboarding).where(province_referee_onboarding.c.id == row["id"])
+                )
+        outcome = await _order_badges(row, names, payload.young, jwt)
+        results.append({"id": row["id"], "nr_sedzia": row["nr_sedzia"], **outcome})
+    return {"results": results}
+
+
+async def _order_badges(row, names: List[str], young: bool, jwt: dict) -> Dict[str, Any]:
+    """Zapisuje zamówienie badge i - gdy osoba ma numer - od razu je nadaje."""
+    T = province_referee_onboarding_badges
+    prev = await database.fetch_one(select(T).where(T.c.record_id == row["id"]))
+    wanted = R.clean_badges(list((prev["badges"] if prev else None) or []) + names)
+    want_young = bool(young or (prev and prev["young"]))
+    applied_at, note = None, "czeka na numer NrSedzia"
+    nr = R.s(row["nr_sedzia"])
+    if nr:
+        notes = []
+        if wanted:
+            await _upsert_judge_badges(nr, R.display_name(row["first_name"], row["last_name"]), row["province"], wanted)
+            notes.append("badge nadane")
+        if want_young:
+            notes.append(await _add_young(nr, R.display_name(row["first_name"], row["last_name"]), row["province"], jwt))
+        applied_at, note = _dt.datetime.utcnow(), " · ".join(notes)
+    values = dict(
+        badges=wanted,
+        young=want_young,
+        applied_at=applied_at,
+        note=note,
+        updated_by=R.s(jwt.get("sub")),
+        updated_at=_dt.datetime.utcnow(),
+    )
+    async with database.transaction():
+        await database.execute(delete(T).where(T.c.record_id == row["id"]))
+        await database.execute(T.insert().values(record_id=row["id"], **values))
+    return _badge_row({**values, "record_id": row["id"]})
+
+
+async def _upsert_judge_badges(nr: str, full_name: str, province: str, names: List[str]) -> None:
+    """Rejestr sędziów okręgu (`province_judges`): dopisuje badge, istniejących nie rusza."""
+    existing = await database.fetch_one(select(province_judges).where(province_judges.c.judge_id == nr))
+    now = _dt.datetime.now(_dt.timezone.utc)
+    if existing:
+        badges = existing["badges"]
+        if isinstance(badges, str):
+            import json
+
+            try:
+                badges = json.loads(badges)
+            except ValueError:
+                badges = {}
+        await database.execute(
+            update(province_judges)
+            .where(province_judges.c.judge_id == nr)
+            .values(badges=R.merge_badges(badges, names), updated_at=now)
+        )
+    else:
+        await database.execute(
+            province_judges.insert().values(
+                judge_id=nr,
+                full_name=full_name,
+                province=R.s(province).upper(),
+                badges=R.merge_badges({}, names),
+                photo_url="",
+                updated_at=now,
+            )
+        )
+    from app.assignment_board_cache import bump_all
+
+    bump_all()
+
+
+async def _add_young(nr: str, full_name: str, province: str, jwt: dict) -> str:
+    """Rejestr Młodych - z tymi samymi uprawnieniami co moduł Młodych (Teach Master okręgu / admin)."""
+    from app.young_referees import _ensure_young_referee_write
+
+    prov = R.s(province).upper()
+    try:
+        await _ensure_young_referee_write(jwt, province=prov, action="Dodanie młodego sędziego")
+    except HTTPException as exc:
+        return f"Młodzi: {exc.detail}"
+    exists = await database.fetch_one(
+        select(young_referees.c.id).where(
+            (young_referees.c.base_judge_id == nr) & (young_referees.c.province == prov)
+        )
+    )
+    if not exists:
+        await database.execute(
+            young_referees.insert().values(full_name=full_name, base_judge_id=nr, province=prov, is_active=True)
+        )
+    return "dodano do Młodych"
+
+
+def _badge_row(row) -> Dict[str, Any]:
+    d = dict(row)
+    at = d.get("applied_at")
+    return {
+        "badges": R.clean_badges(d.get("badges") or []),
+        "young": bool(d.get("young")),
+        "badges_applied_at": at.replace(microsecond=0).isoformat() + "Z" if at else None,
+        "badges_note": d.get("note"),
+    }
 
 
 def _province_keys(province: str) -> List[str]:
