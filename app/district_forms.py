@@ -231,6 +231,7 @@ async def pending(who: Who = Depends(who_dep)) -> Dict[str, Any]:
         if R.in_scope("todo", roles=ctx.roles, status=ctx.status, participant=me["participant"], filled=me["filled"],
                       web_review=me["web_review"]):
             item["status_column"] = R.status_column(ctx.columns) if ctx.kind == "list" else None
+            item["fields"] = R.my_fields(ctx.kind, ctx.form.get("schema_json"), ctx.columns)
             event = events.get(int(ctx.form["event_id"])) if ctx.form.get("event_id") else None
             item["info_countdown"] = INFO.first_countdown(S.resolved_info(ctx.form, event))
             out.append(item)

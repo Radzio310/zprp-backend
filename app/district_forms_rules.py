@@ -540,6 +540,22 @@ def self_editable(column: Mapping[str, Any]) -> bool:
     return column.get("editor") in ("self", "self_confirm")
 
 
+def my_fields(kind: str, schema: Any, columns: Sequence[Mapping[str, Any]]) -> List[str]:
+    """Tytuły pól, które uczestnik wypełnia sam (karta „Czeka na Ciebie": „Obecność, wpłata, menu")."""
+    if kind == "list":
+        titles = [_s(c.get("title")) for c in columns if self_editable(c)]
+    else:
+        sections = schema.get("sections") if isinstance(schema, Mapping) else None
+        titles = [
+            _s(q.get("title"))
+            for section in sections or []
+            if isinstance(section, Mapping)
+            for q in section.get("questions") or []
+            if isinstance(q, Mapping)
+        ]
+    return [t for t in titles if t]
+
+
 #: Tryby widoczności komórek: zarządzający, obserwator, mój wiersz, cudzy wiersz przy
 #: `roster_visible`, anonimowy web.
 VIEW_MODES = ("manager", "observer", "own", "roster", "web")

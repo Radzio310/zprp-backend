@@ -521,3 +521,17 @@ def test_grafika_wydarzenia_jako_tlo_bohatera():
     assert R.event_image_url('{"title_image": {"url": "https://x/y.png"}}') == "https://x/y.png"
     assert R.event_image_url({"title_image": None}) is None
     assert R.event_image_url(None) is None
+
+
+def test_my_fields_list_and_form():
+    columns = [
+        {"id": "a", "title": "Obecność", "editor": "self"},
+        {"id": "b", "title": "Wpłata", "editor": "self_confirm"},
+        {"id": "c", "title": "Uwagi komisji", "editor": "managers"},
+        {"id": "d", "title": "", "editor": "self"},
+    ]
+    assert R.my_fields("list", {"columns": columns}, columns) == ["Obecność", "Wpłata"]
+    schema = {"sections": [{"id": "s1", "questions": [{"id": "q1", "title": "Menu"}, {"id": "q2", "title": ""}]},
+                           {"id": "s2", "questions": [{"id": "q3", "title": "Rozmiar koszulki"}]}]}
+    assert R.my_fields("form", schema, []) == ["Menu", "Rozmiar koszulki"]
+    assert R.my_fields("form", None, []) == []
