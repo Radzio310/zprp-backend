@@ -12,3 +12,4 @@ service-account.json
 PUSH_ADMIN_KEY.txt
 # bastion_connector
 bastion_connector/.data/
+private_uploads/

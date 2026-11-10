@@ -86,7 +86,15 @@ WEB_SCOPE_PREFIX = "/exam-live"
 #: Egzamin na komputerze (`/exam-web`, BAZA_web /egzamin) - token tylko na tych trasach (24.10.2026).
 EXAM_WEB_SCOPE = "exam-web"
 EXAM_WEB_SCOPE_PREFIX = "/exam-web"
-_SCOPE_PREFIXES = {WEB_SCOPE: WEB_SCOPE_PREFIX, EXAM_WEB_SCOPE: EXAM_WEB_SCOPE_PREFIX}
+#: Formularz okręgowy na komputerze po logowaniu QR (BAZA_web /f/<kod>) - token tylko pod `/district-forms`
+#: (i tylko dla jednego formularza - pilnuje tego `app/district_forms.py`).
+FORM_WEB_SCOPE = "form-web"
+FORM_WEB_SCOPE_PREFIX = "/district-forms"
+_SCOPE_PREFIXES = {
+    WEB_SCOPE: WEB_SCOPE_PREFIX,
+    EXAM_WEB_SCOPE: EXAM_WEB_SCOPE_PREFIX,
+    FORM_WEB_SCOPE: FORM_WEB_SCOPE_PREFIX,
+}
 
 
 def scope_allows(payload: dict, request: Request | None) -> bool:

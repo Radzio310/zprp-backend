@@ -4955,6 +4955,18 @@ from app.exam_public_tables import define_tables as _define_exam_public_tables
 
 (exam_public_links,) = _define_exam_public_tables(metadata)
 
+# Formularze okręgowe i listy deklaracji (docs/formularze-okregowe.md) - schemat w osobnym module.
+from app.district_forms_tables import define_tables as _define_district_forms_tables
+
+(
+    district_forms,
+    district_form_entries,
+    district_form_log,
+    district_form_pairs,
+    district_form_notifications,
+    district_form_uploads,
+) = _define_district_forms_tables(metadata)
+
 # Atlas tras - wspolna pamiec odleglosci drogowych (km + polilinia) i porazek pomiaru.
 from app.route_atlas_tables import define_tables as _define_route_atlas_tables
 
@@ -5531,6 +5543,19 @@ for _statement in _CREW_MARKET_MIGRATIONS:
         import logging as _logging
 
         _logging.getLogger("app.db").warning("Migracja gieldy obsadowego nie przeszla: %s", _statement, exc_info=True)
+
+# Formularze okręgowe: indeks „jedno wydarzenie - jeden formularz" (`app/district_forms_tables.py`).
+from app.district_forms_tables import MIGRATIONS as _DISTRICT_FORMS_MIGRATIONS
+
+for _statement in _DISTRICT_FORMS_MIGRATIONS:
+    try:
+        with engine.connect() as _conn:
+            _conn.execute(text(_statement))
+            _conn.commit()
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("app.db").warning("Migracja formularzy okręgowych nie przeszła: %s", _statement, exc_info=True)
 
 # Indeksy wyszukiwarki publicznej (pg_trgm, numer meczu) - w tle, nie blokują startu.
 try:

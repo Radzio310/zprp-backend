@@ -231,6 +231,15 @@ OPEN_PATTERNS: Tuple[str, ...] = (
     r"^/api/v1/handball/teams/[^/]+/calendar\.ics$",
     r"^/api/v1/handball/crest$",
     r"^/proel/evidence/package/[^/]+/file$",
+    # Formularze okręgowe na stronie /f/<kod> (docs/formularze-okregowe.md §12): kod w adresie,
+    # zapisy z limitem na IP; plik eksportu z jednorazowym tokenem (15 minut).
+    r"^/public/forms/[^/]+$",
+    r"^/public/forms/[^/]+/rows/[^/]+$",
+    r"^/public/forms/[^/]+/responses$",
+    r"^/public/forms/[^/]+/qr$",
+    r"^/public/forms/[^/]+/files/[^/]+$",
+    r"^/public/forms/qr/[^/]+$",
+    r"^/district-forms/file/[^/]+$",
 )
 
 #: Rejestracja nowego konta: tylko POST (GET tej samej ścieżki to lista użytkowników).

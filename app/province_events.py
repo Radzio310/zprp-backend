@@ -222,7 +222,32 @@ async def _responses(event_ids: List[int]) -> Dict[int, Dict[str, Dict[str, Any]
     for raw in rows:
         row = _row(raw)
         out.setdefault(int(row["event_id"]), {})[_s(row["judge_id"])] = row
+    # Wydarzenie spięte z listą deklaracji (docs/formularze-okregowe.md §8): RSVP to
+    # kolumna statusu formularza - feed, licznik, przypomnienia i PDF czytają z niej.
+    for event_id, linked in (await _form_overlay(event_ids)).items():
+        if linked.get("column"):
+            out[event_id] = _forms().overlay_responses(linked, out.get(event_id, {}))
     return out
+
+
+def _forms():
+    from app import district_forms_service
+
+    return district_forms_service
+
+
+async def _form_overlay(event_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Formularze spięte z wydarzeniami; błąd formularzy nie może położyć wydarzeń."""
+    try:
+        return await _forms().event_overlay(event_ids)
+    except Exception:  # noqa: BLE001
+        logger.warning("wydarzenia: odczyt spiętych formularzy nieudany", exc_info=True)
+        return {}
+
+
+def _form_summary(overlay: Mapping[int, Mapping[str, Any]], event_id: int, invited: List[str], me: str) -> Optional[Dict[str, Any]]:
+    linked = overlay.get(int(event_id))
+    return _forms().event_form_summary(linked, invited=invited, me=me) if linked else None
 
 
 async def _attendance(event_ids: List[int]) -> Dict[int, Dict[str, Dict[str, Any]]]:
@@ -276,8 +301,12 @@ def _view(
     attendance: Mapping[str, Mapping[str, Any]],
     me: str,
     manager: bool,
+    form: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Wydarzenie dla aplikacji. Odmowy i ich powody widzi tylko komisja."""
+    """Wydarzenie dla aplikacji. Odmowy i ich powody widzi tylko komisja.
+
+    `form` - spięty formularz okręgowy (`docs/formularze-okregowe.md` §8) albo None.
+    """
     data = _data(event.get("data_json"))
     legacy_present = data.get("present_ids") or []
     invited_set = set(invited)
@@ -316,6 +345,7 @@ def _view(
             "attendance_source": _s((attendance.get(me) or {}).get("source")) or None,
         },
         "can_manage": manager,
+        "form": form,
     }
     if manager:
         view["invited_ids"] = invited
@@ -478,6 +508,12 @@ async def sweep_event_reminders(now: Optional[datetime] = None) -> int:
         row = _row(raw)
         sent.setdefault(int(row["event_id"]), set()).add((_s(row["judge_id"]), _s(row["kind"])))
 
+    try:
+        # Spięta lista deklaracji ma własne przypomnienia - ponaglenie RSVP wydarzenia milknie.
+        with_form = await _forms().linked_event_ids(ids)
+    except Exception:  # noqa: BLE001
+        logger.warning("wydarzenia: sprawdzenie spiętych formularzy nieudane", exc_info=True)
+        with_form = set()
     judges_cache: Dict[str, List[Dict[str, Any]]] = {}
     total = 0
     for event in events:
@@ -495,6 +531,8 @@ async def sweep_event_reminders(now: Optional[datetime] = None) -> int:
             responses=answers,
             sent=sent.get(int(event["id"]), set()),
         )
+        if int(event["id"]) in with_form:
+            due = [(kind, people) for kind, people in due if kind != "rsvp"]
         for kind, people in due:
             place = _place_label(event["data_json"])
             local = event["event_date"].astimezone(R.WARSAW)
@@ -527,6 +565,13 @@ async def run_event_reminder_sweep() -> None:
             await sweep_event_reminders()
         except Exception:  # noqa: BLE001
             logger.exception("wydarzenia: przejście przypomnień nie powiodło się")
+        # Formularze okręgowe (przypomnienia wg presetów, kosz po 30 dniach) - ta sama pętla.
+        try:
+            from app.district_forms_service import sweep_district_forms
+
+            await sweep_district_forms()
+        except Exception:  # noqa: BLE001
+            logger.exception("formularze: przejście przypomnień nie powiodło się")
         # Egzaminy z przepisów (przypomnienia do nieprzystąpionych, wyniki dostępne,
         # domknięcie spóźnionych podejść) jadą na tej samej pętli co przypomnienia.
         try:
@@ -559,6 +604,7 @@ async def feed(province: str = Query(""), actor: Actor = Depends(market_actor)) 
     events = [_row(r) for r in rows]
     ids = [int(e["id"]) for e in events]
     responses, attendance = await _responses(ids), await _attendance(ids)
+    forms = await _form_overlay(ids)
 
     out = []
     for event in events:
@@ -574,6 +620,7 @@ async def feed(province: str = Query(""), actor: Actor = Depends(market_actor)) 
                 attendance=attendance.get(int(event["id"]), {}),
                 me=who.judge_id,
                 manager=manager,
+                form=_form_summary(forms, int(event["id"]), invited, who.judge_id),
             )
         )
     return {
@@ -597,6 +644,7 @@ async def item(event_id: int, actor: Actor = Depends(market_actor)) -> Dict[str,
     if not manager and who.judge_id not in invited:
         raise HTTPException(403, "To wydarzenie nie jest skierowane do Ciebie")
     responses, attendance = await _responses([event_id]), await _attendance([event_id])
+    forms = await _form_overlay([event_id])
     return _view(
         event,
         judges_by_id={_s(j["judge_id"]): j for j in judges},
@@ -605,6 +653,7 @@ async def item(event_id: int, actor: Actor = Depends(market_actor)) -> Dict[str,
         attendance=attendance.get(event_id, {}),
         me=who.judge_id,
         manager=manager,
+        form=_form_summary(forms, event_id, invited, who.judge_id),
     )
 
 
@@ -1052,8 +1101,14 @@ async def rsvp(event_id: int, body: RsvpBody, actor: Actor = Depends(market_acto
     current = _s((responses.get(who.judge_id) or {}).get("status")) or None
     yes_count = sum(1 for jid, row in responses.items() if row.get("status") == "yes" and jid in invited)
     try:
+        linked = event_id in await _forms().linked_event_ids([event_id])
+    except Exception:  # noqa: BLE001 - bez formularzy RSVP działa po staremu
+        logger.warning("wydarzenia: sprawdzenie spiętego formularza nieudane", exc_info=True)
+        linked = False
+    try:
         reason = R.clean_reason(body.reason) if body.status == "no" else None
-        deadline = R.parse_iso(data.get("rsvp_deadline")) if data.get("rsvp_deadline") else None
+        # Przy spiętej liście termin odpowiedzi to termin formularza (pilnuje go formularz).
+        deadline = R.parse_iso(data.get("rsvp_deadline")) if data.get("rsvp_deadline") and not linked else None
     except R.Invalid as error:
         raise _bad(error)
     refusal = R.rsvp_refusal(
@@ -1069,6 +1124,16 @@ async def rsvp(event_id: int, body: RsvpBody, actor: Actor = Depends(market_acto
     )
     if refusal:
         raise HTTPException(409, refusal)
+    if linked:
+        # Jedna prawda: status w formularzu (źródło `app`). Stara aplikacja dostaje ten sam kształt odpowiedzi.
+        from app.district_forms_rules import FormError
+
+        try:
+            handled = await _forms().rsvp_through_form(event_id, who.judge_id, body.status)
+        except FormError as error:
+            raise HTTPException(409 if error.status in (409, 423) else error.status, error.message)
+        if handled:
+            return await item(event_id, actor)
     await database.execute(
         pg_insert(province_event_responses)
         .values(event_id=event_id, judge_id=who.judge_id, status=body.status, reason=reason, updated_at=_now())
