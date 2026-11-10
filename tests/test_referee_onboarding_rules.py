@@ -271,3 +271,25 @@ def test_xls_stary_format():
 def test_pusty_plik():
     with pytest.raises(SheetError):
         read_table(b"", "x.csv")
+
+
+# ---------------------------------------------------------------------------
+# Badge (10.11.2026)
+# ---------------------------------------------------------------------------
+
+
+def test_badge_bez_powtorek_i_bez_mlodych():
+    assert R.clean_badges(["Young 2028", "young 2028", " ", "Młodzi", "Stolikowi"]) == ["Young 2028", "Stolikowi"]
+
+
+def test_dopisanie_badge_nie_rusza_istniejacych():
+    assert R.merge_badges({"Delegaci": True}, ["delegaci", "Young 2028"]) == {"Delegaci": True, "Young 2028": True}
+    assert R.merge_badges(None, ["PRO 2028"]) == {"PRO 2028": True}
+
+
+def test_numer_z_rejestru_tylko_jednoznaczny():
+    rec = {"first_name": "Martyna", "last_name": "WIĄCKIEWICZ"}
+    reg = [{"nr": "5956", **R.split_full_name("Martyna Wiąckiewicz")}, {"nr": "1", **R.split_full_name("Jan Nowak")}]
+    assert R.resolve_nr(rec, reg) == "5956"
+    assert R.resolve_nr(rec, reg + [{"nr": "7", "first_name": "Martyna", "last_name": "Wiąckiewicz"}]) == ""
+    assert R.display_name("martyna", "WIĄCKIEWICZ") == "Martyna Wiąckiewicz"

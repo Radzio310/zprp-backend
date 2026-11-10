@@ -55,3 +55,15 @@ miasto, email, role, źródło, `batch_id`, kto i kiedy założył, kiedy oznacz
 - Duplikat w ZPRP blokuje z ręcznym obejściem.
 - PESEL tylko do walidacji, nigdzie nie zapisywany ani nie wysyłany w mailu.
 - Historia wspólna dla okręgu; adres maila do ZPRP wpisywany i pamiętany w przeglądarce.
+
+## Badge dla nowych osób (10.11.2026)
+
+`POST /province_referees/onboarding/badges {province, ids, badges, young}` oraz pola `badges`, `young`
+w `/create`. Badge trafiają do rejestru sędziów okręgu (`province_judges.badges`, dopisane – istniejących
+nie rusza; brak wiersza = nowy wiersz z NrSedzia), „Młodzi” do `young_referees` – z uprawnieniem
+kreatora (panel „Sędziowie wojewódzcy” okręgu), bez osobnego Teach Mastera: nowa osoba z kursu trafia do
+Młodych przy zakładaniu (decyzja właściciela 10.11.2026; oceny Młodych dalej należą do modułu Młodych).
+Zamówienie leży w `province_referee_onboarding_badges` (osobna tabela, bez migracji historii); osoba bez
+NrSedzia czeka – przy kolejnym „Nadaj badge” numer jest szukany w rejestrze okręgu po imieniu i nazwisku
+(tylko jednoznaczne trafienie). Kreator: zestaw dla grupy (domyślnie ostatnio użyty, zapamiętany
+w przeglądarce) z wyjątkami dla osoby, „Nadaj badge” na podsumowaniu i w historii (ekran maila).
