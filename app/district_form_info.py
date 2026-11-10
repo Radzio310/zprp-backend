@@ -22,7 +22,9 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from app.district_forms_rules import FormError, columns_of, iso, parse_iso
 
 ZONES = ("above", "below")
-BLOCK_TYPES = ("text", "callout", "countdown", "payment", "copy", "place", "contact", "links")
+BLOCK_TYPES = ("text", "callout", "countdown", "when", "payment", "copy", "place", "contact", "links")
+#: Blok „Kiedy": najdłużej tyle dni od początku do końca.
+WHEN_MAX_DAYS = 31
 CALLOUT_TONES = ("info", "warning", "success", "danger")
 COUNTDOWN_TARGETS = ("deadline", "event", "date")
 ZONE_MAX = 12
@@ -187,6 +189,24 @@ def _clean_block(raw: Mapping[str, Any], *, columns: Sequence[Mapping[str, Any]]
         if done:
             out["done_label"] = done
         out["show_date"] = raw.get("show_date") is not False
+    elif btype == "when":
+        try:
+            start = parse_iso(raw.get("start"))
+            end = parse_iso(raw.get("end")) if _s(raw.get("end")) else None
+        except FormError as error:
+            raise _Bad("Kiedy: niepoprawna data.") from error
+        if start is None:
+            raise _Bad("Kiedy: wybierz datę.")
+        out["start"] = start.isoformat()
+        out["all_day"] = raw.get("all_day") is True
+        if end is not None:
+            if end <= start and not out["all_day"]:
+                raise _Bad("Kiedy: koniec musi być po początku.")
+            if end < start:
+                raise _Bad("Kiedy: ostatni dzień nie może być przed pierwszym.")
+            if (end - start).days > WHEN_MAX_DAYS:
+                raise _Bad(f"Kiedy: najwyżej {WHEN_MAX_DAYS} dni.")
+            out["end"] = end.isoformat()
     elif btype == "payment":
         out["recipient"] = _text(raw, "recipient", RECIPIENT_MAX, required=True, what="Odbiorca")
         if not _s(raw.get("account")):
@@ -370,11 +390,11 @@ def _iso_text(value: Any) -> Optional[str]:
 
 
 def public_info(info: Mapping[str, Any], *, web_enabled: bool) -> Dict[str, List[Dict[str, Any]]]:
-    """Strona przy wyłączonym webie (karta „tylko w aplikacji") pokazuje tylko licznik i tekst."""
+    """Strona przy wyłączonym webie (karta „tylko w aplikacji") pokazuje tylko licznik, termin i tekst."""
     data = stored_info(info)
     if web_enabled:
         return data
-    return {zone: [b for b in data[zone] if b.get("type") in ("countdown", "text")] for zone in ZONES}
+    return {zone: [b for b in data[zone] if b.get("type") in ("countdown", "when", "text")] for zone in ZONES}
 
 
 def first_countdown(info: Mapping[str, Any]) -> Optional[Dict[str, Any]]:

@@ -202,3 +202,24 @@ def test_recall_sightings_newest_first_and_only_repeatable_blocks():
     assert pay["event"] == "Wigilia sędziów" and pay["form_title"] == "Wigilia 2025"
     assert pay["block"]["account"] == NRB and "id" not in pay["block"] and "resolved_amount" not in pay["block"]
     assert "amount_column" not in pay["block"]
+
+
+def test_blok_kiedy_czyszczenie_i_bledy():
+    out = I.clean_info({"above": [
+        {"id": "w1", "type": "when", "title": "Kiedy", "start": "2026-12-19T17:00:00Z", "end": "2026-12-19T21:00:00Z"},
+        {"id": "w2", "type": "when", "start": "2026-12-19T00:00:00+01:00", "end": "2026-12-21T00:00:00+01:00", "all_day": True},
+        {"id": "w3", "type": "when", "start": "2026-12-19T00:00:00+01:00", "end": "2026-12-19T00:00:00+01:00", "all_day": True},
+    ]})
+    w1, w2, w3 = out["above"]
+    assert w1["start"].startswith("2026-12-19T17:00") and w1["end"].startswith("2026-12-19T21:00") and w1["all_day"] is False
+    assert w2["all_day"] is True and "end" in w2
+    assert "end" in w3  # jeden dzień „cały dzień" - koniec = początek wolno
+    errors = errors_of({"above": [
+        {"id": "a", "type": "when"},
+        {"id": "b", "type": "when", "start": "2026-12-19T17:00:00Z", "end": "2026-12-19T16:00:00Z"},
+        {"id": "c", "type": "when", "start": "2026-12-01T17:00:00Z", "end": "2027-02-19T16:00:00Z"},
+        {"id": "d", "type": "when", "start": "jutro"},
+    ]})
+    assert set(errors) == {"a", "b", "c", "d"}
+    hidden = I.public_info({"above": [w1, {"id": "p", "type": "place", "name": "Hala"}], "below": []}, web_enabled=False)
+    assert [b["type"] for b in hidden["above"]] == ["when"]
