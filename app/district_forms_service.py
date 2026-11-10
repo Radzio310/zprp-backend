@@ -274,7 +274,8 @@ def summary(ctx: Ctx, *, event: Optional[Mapping[str, Any]] = None, moment: Opti
             "name": _s(form.get("created_by_name")) or judge_name(ctx.by_id, form.get("created_by")),
         },
         "event": (
-            {"id": int(event["id"]), "name": event.get("name"), "event_date": R.iso(event.get("event_date"))}
+            {"id": int(event["id"]), "name": event.get("name"), "event_date": R.iso(event.get("event_date")),
+             "image_url": R.event_image_url(event.get("data_json"))}
             if event
             else None
         ),
@@ -350,7 +351,7 @@ async def events_by_id(event_ids: Iterable[Any]) -> Dict[int, Dict[str, Any]]:
         return {}
     rows = await database.fetch_all(
         select(province_events.c.id, province_events.c.name, province_events.c.event_date, province_events.c.province,
-               province_events.c.deleted_at)
+               province_events.c.deleted_at, province_events.c.data_json)
         .where(province_events.c.id.in_(ids))
     )
     return {int(r["id"]): _row(r) for r in rows if r["deleted_at"] is None}

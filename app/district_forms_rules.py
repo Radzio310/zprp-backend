@@ -381,6 +381,14 @@ def silent_off_refusal(status: str, mode: str) -> Optional["FormError"]:
     return None
 
 
+def event_image_url(data_json: Any) -> Optional[str]:
+    """Grafika tytułowa spiętego wydarzenia (`data_json.title_image.url`) - tło bohatera formularza."""
+    data = loads(data_json, {})
+    image = data.get("title_image") if isinstance(data, Mapping) else None
+    url = _s(image.get("url")) if isinstance(image, Mapping) else ""
+    return url or None
+
+
 def silent_publish_slot(moment: datetime) -> str:
     """Slot powiadomienia o publikacji po trybie cichym - inny niż „1”, żeby dziennik go nie zdublował."""
     return f"loud-{moment.strftime('%Y%m%dT%H%M%S')}"

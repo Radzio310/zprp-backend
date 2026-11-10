@@ -474,3 +474,10 @@ def test_wylaczenie_trybu_cichego_tryby():
 def test_slot_publikacji_po_trybie_cichym_nie_dubluje_pierwszego():
     slot = R.silent_publish_slot(datetime(2026, 11, 10, 12, 30, tzinfo=UTC))
     assert slot != "1" and slot.startswith("loud-")
+
+
+def test_grafika_wydarzenia_jako_tlo_bohatera():
+    assert R.event_image_url({"title_image": {"url": "/province-events/img/a.png"}}) == "/province-events/img/a.png"
+    assert R.event_image_url('{"title_image": {"url": "https://x/y.png"}}') == "https://x/y.png"
+    assert R.event_image_url({"title_image": None}) is None
+    assert R.event_image_url(None) is None
