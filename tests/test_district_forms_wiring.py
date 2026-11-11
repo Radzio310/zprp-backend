@@ -65,7 +65,8 @@ def test_wszystkie_trasy_kontraktu_istnieja():
         ("POST", "/{form_id}/me/confirm"), ("GET", "/{form_id}/rows"), ("PATCH", "/{form_id}/rows/{judge_id}"),
         ("POST", "/{form_id}/rows/bulk"), ("GET", "/{form_id}/log"), ("GET", "/{form_id}/stats"),
         ("GET", "/{form_id}/responses"), ("GET", "/{form_id}/export"), ("POST", "/{form_id}/remind"),
-        ("POST", "/{form_id}/web"), ("POST", "/{form_id}/invite-to-event"), ("POST", "/{form_id}/uploads"),
+        ("POST", "/{form_id}/web"), ("POST", "/{form_id}/web/rotate"), ("POST", "/{form_id}/invite-to-event"),
+        ("POST", "/{form_id}/uploads"),
         ("GET", "/{form_id}/files/{token}"), ("POST", "/pair/{code}/approve"), ("GET", "/file/{token}"),
         ("GET", "/inbox"),
     }
@@ -286,3 +287,22 @@ def test_overlay_nie_chowa_rsvp_wydarzenia_i_reset_ich_nie_kasuje():
     assert S.overlay_responses({"column": column, "entries": {}}, original).keys() == original.keys()
     clear = ast.get_source_segment(text, funcs["clear_test_answers"])
     assert "updated_at >= form[\"published_at\"]" in clear
+
+
+def test_wycofany_link_to_410_z_wlasnym_kodem():
+    from app import district_forms_rules as R
+
+    err = R.link_retired()
+    assert err.status == 410 and err.code == "link_retired"
+    assert err.body()["message"] == R.LINK_RETIRED_MESSAGE
+
+
+def test_tabela_wycofanych_kodow_istnieje():
+    from sqlalchemy import MetaData
+
+    from app.district_forms_tables import define_tables
+
+    tables = define_tables(MetaData())
+    assert len(tables) == 7
+    cols = set(tables[-1].c.keys())
+    assert {"code", "form_id", "retired_by", "retired_at"} <= cols

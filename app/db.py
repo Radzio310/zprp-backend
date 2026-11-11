@@ -4965,6 +4965,7 @@ from app.district_forms_tables import define_tables as _define_district_forms_ta
     district_form_pairs,
     district_form_notifications,
     district_form_uploads,
+    district_form_retired_codes,
 ) = _define_district_forms_tables(metadata)
 
 # Atlas tras - wspolna pamiec odleglosci drogowych (km + polilinia) i porazek pomiaru.

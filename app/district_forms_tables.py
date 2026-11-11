@@ -154,7 +154,17 @@ def define_tables(metadata):
         Column("size_bytes", Integer, nullable=False, default=0),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
-    return forms, entries, log, pairs, notifications, uploads
+    #: Kody wycofane przez „Wygeneruj nowy link” (11.11.2026): stary link mówi, że jest
+    #: nieaktualny (410), zamiast udawać literówkę. Kod nigdy nie wraca do puli.
+    retired_codes = Table(
+        "district_form_retired_codes",
+        metadata,
+        Column("code", String(8), primary_key=True),
+        Column("form_id", String(16), nullable=False, index=True),
+        Column("retired_by", String, nullable=True),
+        Column("retired_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    return forms, entries, log, pairs, notifications, uploads, retired_codes
 
 
 #: Jedno wydarzenie ma najwyżej jeden żywy formularz. Każda instrukcja osobno - brak jednej nie zatrzymuje startu.

@@ -97,6 +97,15 @@ def test_karta_marki_dla_nieznanego_kodu():
     _jpeg(jpeg)
 
 
+def test_karta_wycofanego_linku_mowi_co_dalej():
+    card = SH.retired_card()
+    assert card.brand and card.title == SH.RETIRED_TITLE and "nowy link" in card.meta
+    assert SH.version(card) != SH.version(SH.brand_card()) if hasattr(SH, "version") else True
+    jpeg, full = C._render(card, None)
+    assert full
+    _jpeg(jpeg)
+
+
 def test_pamiec_lru_ma_limit():
     for i in range(C.CACHE_MAX + 5):
         C._CACHE[f"k{i}"] = b"x"

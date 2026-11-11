@@ -76,7 +76,7 @@ async def _form_by_code(code: str) -> Dict[str, Any]:
         raise R.not_found()
     row = await database.fetch_one(select(S.FORMS).where(S.FORMS.c.web_code == clean))
     if not row:
-        raise R.not_found()
+        raise R.link_retired() if await S.retired_code(clean) else R.not_found()
     form = S.parse_form(row)
     # Szkic też: strona działa w pełni przed publikacją (decyzja 10.11.2026), komisja
     # testuje link i QR, zanim lista pójdzie do sędziów. Kosz zostaje 404.
@@ -382,8 +382,8 @@ async def _share_target(code: str):
     """(formularz | None, karta, adres grafiki | None). Nieznany kod albo kosz -> karta marki."""
     try:
         form = await _form_by_code(code)
-    except R.FormError:
-        return None, SHARE.brand_card(), None
+    except R.FormError as err:
+        return None, SHARE.retired_card() if err.code == "link_retired" else SHARE.brand_card(), None
     event = (await S.events_by_id([form["event_id"]])).get(int(form["event_id"])) if form.get("event_id") else None
     photo_url = SHARE.event_photo_url(event)
     card = SHARE.form_card(form, province_label=R.province_label(display(form["province"])), now=S.now(),
@@ -402,5 +402,6 @@ async def public_form_share(code: str):
     from fastapi.responses import HTMLResponse
 
     form, card, _photo = await _share_target(code)
-    desc = SHARE.description(form, card) if form is not None else SHARE.BRAND_DESCRIPTION
+    desc = SHARE.description(form, card) if form is not None else (
+        R.LINK_RETIRED_MESSAGE if card.title == SHARE.RETIRED_TITLE else SHARE.BRAND_DESCRIPTION)
     return HTMLResponse(SHARE.page(code, card, desc), headers={"Cache-Control": "public, max-age=300"})

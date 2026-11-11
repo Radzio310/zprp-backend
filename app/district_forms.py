@@ -377,7 +377,7 @@ async def by_code(code: str, who: Who = Depends(who_dep)) -> Dict[str, Any]:
         raise R.not_found()
     row = await database.fetch_one(select(S.FORMS.c.id).where(S.FORMS.c.web_code == clean))
     if not row:
-        raise R.not_found()
+        raise R.link_retired() if await S.retired_code(clean) else R.not_found()
     await S.context(row["id"], who.viewer, with_entries=False)
     return {"id": row["id"]}
 
@@ -1093,18 +1093,33 @@ async def web_toggle(form_id: str, body: Dict[str, Any] = Body(...), who: Who = 
             raise refusal
     code = form.get("web_code")
     if enabled and not code:
-        for _ in range(8):
-            candidate = R.new_code()
-            if not await database.fetch_one(select(S.FORMS.c.id).where(S.FORMS.c.web_code == candidate)):
-                code = candidate
-                break
-        else:
-            raise R.FormError("code_unavailable", "Nie udało się nadać kodu - spróbuj ponownie.", 503)
+        code = await S.free_code()
     await database.execute(
         update(S.FORMS).where(S.FORMS.c.id == form_id).values(
             web_enabled=enabled, web_code=code, rev=int(form.get("rev") or 1) + 1, updated_at=S.now())
     )
     return {"web_enabled": enabled, "web_code": code, "web_url": R.web_url(code) if code else None}
+
+
+@router.post("/{form_id}/web/rotate", summary="Wygeneruj nowy link strony (stary przestaje działać)")
+async def web_rotate(form_id: str, who: Who = Depends(who_dep)) -> Dict[str, Any]:
+    """Nowy kod `/f/<kod>` na życzenie komisji. Stary trafia do `district_form_retired_codes`:
+    strona, aplikacja i karta komunikatora mówią „link nieaktualny” (410), nie „nie ma takiego”.
+    Stan strony (włączona albo wyłączona) zostaje bez zmian."""
+    ctx = await S.context(form_id, who.viewer, with_entries=False)
+    _manager(ctx)
+    form = ctx.form
+    old = form.get("web_code")
+    code = await S.free_code()
+    async with database.transaction():
+        if old:
+            await database.execute(insert(S.RETIRED).values(code=old, form_id=form_id, retired_by=who.judge_id, retired_at=S.now()))
+        await database.execute(
+            update(S.FORMS).where(S.FORMS.c.id == form_id).values(
+                web_code=code, rev=int(form.get("rev") or 1) + 1, updated_at=S.now())
+        )
+    enabled = bool(form.get("web_enabled"))
+    return {"web_enabled": enabled, "web_code": code, "web_url": R.web_url(code), "retired_code": old}
 
 
 @router.post("/{form_id}/invite-to-event", summary="Zaproś na wydarzenie sędziów z wyników (filtr)")

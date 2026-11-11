@@ -111,6 +111,14 @@ def not_found() -> FormError:
     return FormError("not_found", NOT_FOUND_MESSAGE, 404)
 
 
+LINK_RETIRED_MESSAGE = "Ten link jest nieaktualny - poproś komisję o nowy."
+
+
+def link_retired() -> FormError:
+    """Stary kod po „Wygeneruj nowy link” (410 Gone: był, już go nie ma)."""
+    return FormError("link_retired", LINK_RETIRED_MESSAGE, 410)
+
+
 # ---------------------------------------------------------------------------
 # Drobne
 # ---------------------------------------------------------------------------

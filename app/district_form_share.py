@@ -110,6 +110,14 @@ def brand_card() -> CardData:
     return CardData(title=BRAND_TITLE, meta="bazapodreka.app", brand=True)
 
 
+RETIRED_TITLE = "Ten link jest nieaktualny"
+
+
+def retired_card() -> CardData:
+    """Kod wycofany przez „Wygeneruj nowy link”: karta marki z jasnym zdaniem, co dalej."""
+    return CardData(title=RETIRED_TITLE, meta="Poproś komisję o nowy link", brand=True)
+
+
 def _clip(text: str, limit: int) -> str:
     text = " ".join(str(text or "").split())
     if len(text) <= limit:

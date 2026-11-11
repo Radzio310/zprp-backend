@@ -635,3 +635,13 @@ kieruje roboty komunikatorów (po `user-agent`) na serwer; ludzie dalej dostają
   przyjdzie, karta w barwie żyje w pamięci tylko 60 s - potem serwer próbuje grafiki jeszcze raz.
 - Kroje w `app/fonts/` (Geist - OFL; FontastiquePL - krój aplikacji, tylko do kart), znak marki
   w `app/data/baza-pod-reka-jasny.png`.
+
+## 20. Nowy link na życzenie (11.11.2026)
+
+`POST /district-forms/{id}/web/rotate` (zarządzający) nadaje nowy kod strony; stan strony (włączona albo wyłączona) zostaje. Odpowiedź: `{web_enabled, web_code, web_url, retired_code}`.
+
+- Stary kod trafia do tabeli `district_form_retired_codes` (`code` PK, `form_id`, `retired_by`, `retired_at`) i nigdy nie wraca do puli. Nowe kody (także przy pierwszym włączeniu strony) omijają wycofane.
+- Stary kod daje **410** `link_retired` („Ten link jest nieaktualny - poproś komisję o nowy.”) na `/public/forms/{kod}` i `/district-forms/by-code/{kod}`.
+- Karta i strona podglądu (§19) pokazują wtedy kartę marki „Ten link jest nieaktualny” z podpisem „Poproś komisję o nowy link”.
+- **Aplikacja:** w arkuszu „Strona WWW” jest przycisk „Wygeneruj nowy link” z potwierdzeniem w samym arkuszu. Link `/f/<stary>` otwarty w aplikacji pokazuje „Ten link jest nieaktualny”.
+- **Strona `/f/<stary>`** pokazuje to samo.

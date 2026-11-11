@@ -35,6 +35,7 @@ from app.db import (
     district_form_log,
     district_form_notifications,
     district_form_pairs,
+    district_form_retired_codes,
     district_form_uploads,
     district_forms,
     province_event_responses,
@@ -45,14 +46,31 @@ from app.settlement_province import canonical, display
 
 logger = logging.getLogger(__name__)
 
-FORMS, ENTRIES, LOG, NOTES, PAIRS, UPLOADS = (
+FORMS, ENTRIES, LOG, NOTES, PAIRS, UPLOADS, RETIRED = (
     district_forms,
     district_form_entries,
     district_form_log,
     district_form_notifications,
     district_form_pairs,
     district_form_uploads,
+    district_form_retired_codes,
 )
+
+
+async def free_code() -> str:
+    """Nowy kod strony: wolny wśród żywych i wycofanych (stary link nie może ożyć jako cudzy)."""
+    for _ in range(8):
+        candidate = R.new_code()
+        taken = await database.fetch_one(select(FORMS.c.id).where(FORMS.c.web_code == candidate))
+        retired = await database.fetch_one(select(RETIRED.c.code).where(RETIRED.c.code == candidate))
+        if not taken and not retired:
+            return candidate
+    raise R.FormError("code_unavailable", "Nie udało się nadać kodu - spróbuj ponownie.", 503)
+
+
+async def retired_code(clean: str) -> bool:
+    """Czy kod z adresu to link wycofany przez „Wygeneruj nowy link”."""
+    return bool(await database.fetch_one(select(RETIRED.c.code).where(RETIRED.c.code == clean)))
 
 PUSH_PREFERENCE = "province_events"
 PUSH_VARIANT = "baza"
