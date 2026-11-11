@@ -603,3 +603,35 @@ Logika: `app/district_form_info.py` (testy: `tests/test_district_form_info.py`).
   `later` - tylko odcisza (szkic odcisza się bez trybu).
 - Strona www działa w szkicu: `GET /public/forms/{kod}` nie wymaga publikacji (pole `draft`),
   zapis z `web`/`web_qr` w szkicu przechodzi (`R.DRAFT_WRITABLE_SOURCES`); aplikacja uczestnika czeka na publikację.
+
+## 19. Podgląd linku (11.11.2026)
+
+Link `https://www.bazapodreka.app/f/<kod>` wklejony w Messengerze, WhatsAppie, iMessage, Telegramie
+czy Signalu rozwija się w dużą kartę (wzór: karty linków Communio). Vercel (`BAZA_web/vercel.json`)
+kieruje roboty komunikatorów (po `user-agent`) na serwer; ludzie dalej dostają stronę www.
+
+| Metoda i ścieżka | Opis |
+|---|---|
+| `GET\|HEAD /public/forms/{code}/share` | Mała strona HTML (`lang="pl"`) z kompletem `og:*` i `twitter:*` (`summary_large_image`), `theme-color`, `robots: noindex`; w treści karta, tytuł i link do strony www. Bez `http-equiv="refresh"` i bez skryptów. `Cache-Control: public, max-age=300`. |
+| `GET\|HEAD /public/forms/{code}/card.jpg?v=<skrót>` | Karta JPEG 1200×630 (jakość 86). `v` służy tylko do odświeżenia pamięci komunikatora. `Cache-Control: public, max-age=86400`. |
+
+- Obie ścieżki w `OPEN_PATTERNS` (`client_key_rules.py`) - roboty nie wysyłają `X-Baza-Key`.
+- Nieznany kod, kosz albo literówka → 200 z kartą i stroną samej marki (BAZA pod RĘKĄ), nie 404.
+- `og:url` = `https://www.bazapodreka.app/f/<kod>`, `og:image` = `PUBLIC_API_HOST` (domyślnie
+  `https://api.bazapodreka.app`) + `/public/forms/<kod>/card.jpg?v=<skrót treści karty>` - nowy
+  tytuł, termin czy grafika zmieniają skrót, więc komunikator pobierze nową kartę.
+- Treść: tytuł (Fontastique PL; znak spoza kroju → cały tytuł Geist), POD nim „Lista deklaracji · Śląskie”
+  (bez nadtytułów), pigułka terminu („Zapisy do wt. 9 grudnia, 23:59” / „Odpowiedzi do …”, rok tylko
+  inny niż bieżący; „Zamknięte” z kłódką) i pigułka zachęty („Kliknij i odpowiedz” przy włączonym
+  webie, „Odpowiedz w aplikacji BAZA” bez niego). `og:description`: rodzaj i województwo, termin oraz
+  opis formularza (do 160 znaków) - opis tylko przy włączonym webie; bez weba zdanie o aplikacji.
+  Nigdy nazwisk, liczników ani odpowiedzi.
+- Układy (`app/district_form_card.py`): **okładka** - grafika tytułowa spiętego wydarzenia
+  (`/static/...` z dysku albo `https://` z zaporą SSRF z `link_preview_rules`, limit 12 MB i 4 s) na
+  całą kartę z welonem od lewej i od dołu; **barwa** - noc w tonie okładki (`cover_json.tone`) z
+  reflektorem, światłami hali i kaflem z emoji okładki (Noto Color Emoji z obrazu Dockera) albo
+  znakiem rodzaju rysowanym wektorowo; **marka** - nieznany kod.
+- Rysowanie w 2× poza pętlą zdarzeń, pamięć procesu LRU 64 kart po skrócie treści. Gdy grafika nie
+  przyjdzie, karta w barwie żyje w pamięci tylko 60 s - potem serwer próbuje grafiki jeszcze raz.
+- Kroje w `app/fonts/` (Geist - OFL; FontastiquePL - krój aplikacji, tylko do kart), znak marki
+  w `app/data/baza-pod-reka-jasny.png`.

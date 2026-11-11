@@ -21,8 +21,10 @@ from typing import Any, Dict, Mapping, Optional
 from fastapi import APIRouter, Body, Query, Request
 from sqlalchemy import and_, insert, select, update
 
+from app import district_form_card as CARD
 from app import district_form_info as INFO
 from app import district_form_schema as SC
+from app import district_form_share as SHARE
 from app import district_forms_rules as R
 from app import district_forms_service as S
 from app.db import database, province_events
@@ -369,3 +371,36 @@ async def qr_poll(pair_code: str, poll_token: str = Query("", max_length=200), w
         "form_id": pair["form_id"],
     }
 
+
+
+# ---------------------------------------------------------------------------
+# Podgląd linku (Open Graph) - docs/formularze-okregowe.md §19
+# ---------------------------------------------------------------------------
+
+
+async def _share_target(code: str):
+    """(formularz | None, karta, adres grafiki | None). Nieznany kod albo kosz -> karta marki."""
+    try:
+        form = await _form_by_code(code)
+    except R.FormError:
+        return None, SHARE.brand_card(), None
+    event = (await S.events_by_id([form["event_id"]])).get(int(form["event_id"])) if form.get("event_id") else None
+    photo_url = SHARE.event_photo_url(event)
+    card = SHARE.form_card(form, province_label=R.province_label(display(form["province"])), now=S.now(),
+                           photo=CARD.photo_key(photo_url))
+    return form, card, photo_url if card.photo else None
+
+
+@router.api_route("/{code}/card.jpg", methods=["GET", "HEAD"], summary="Karta podglądu linku (og:image, 1200×630 JPEG)")
+async def public_form_card(code: str):
+    _form, card, photo_url = await _share_target(code)
+    return await CARD.respond(card, photo_url)
+
+
+@router.api_route("/{code}/share", methods=["GET", "HEAD"], summary="Strona dla czytników kart komunikatorów (Open Graph)")
+async def public_form_share(code: str):
+    from fastapi.responses import HTMLResponse
+
+    form, card, _photo = await _share_target(code)
+    desc = SHARE.description(form, card) if form is not None else SHARE.BRAND_DESCRIPTION
+    return HTMLResponse(SHARE.page(code, card, desc), headers={"Cache-Control": "public, max-age=300"})

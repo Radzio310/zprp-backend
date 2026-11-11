@@ -238,6 +238,9 @@ OPEN_PATTERNS: Tuple[str, ...] = (
     r"^/public/forms/[^/]+/responses$",
     r"^/public/forms/[^/]+/qr$",
     r"^/public/forms/[^/]+/files/[^/]+$",
+    # Podgląd linku (§19): roboty komunikatorów przychodzą przez Vercel bez X-Baza-Key.
+    r"^/public/forms/[^/]+/share$",
+    r"^/public/forms/[^/]+/card\.jpg$",
     r"^/public/forms/qr/[^/]+$",
     r"^/district-forms/file/[^/]+$",
 )

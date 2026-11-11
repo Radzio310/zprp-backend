@@ -9,11 +9,14 @@ WORKDIR /app
 # - libreoffice + libreoffice-calc: konwersja XLSX->PDF
 # - fontconfig + fonts-dejavu-core: żeby PDF nie był "pusty"/z krzakami
 # - ca-certificates: często potrzebne do normalnych requestów TLS
+# - fonts-noto-color-emoji: emoji okładki na karcie podglądu linku formularza
+#   (app/district_form_card.py; bez niego kafel dostaje znak rysowany wektorowo)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice \
     libreoffice-calc \
     fontconfig \
     fonts-dejavu-core \
+    fonts-noto-color-emoji \
     ca-certificates \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
