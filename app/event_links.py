@@ -78,21 +78,27 @@ def apple_app_site_association(team_id: str) -> Dict[str, Any]:
     details = []
     for bundle in (APP_ID, DEV_APP_ID):
         app_id = f"{team_id}.{bundle}"
+        components = [
+            {"/": "/e/*", "comment": "Kod obecności na wydarzeniu okręgowym"},
+            # Ten sam plik podaje www.bazapodreka.app (rewrite na Vercelu, 24.10.2026):
+            # kody QR panelu Mentor i egzaminu na komputerze otwierają aplikację.
+            {"/": "/mentor/zaloguj/*", "comment": "Logowanie komputera do panelu Mentor"},
+            {"/": "/egzamin/p/*", "comment": "Egzamin na komputerze: logowanie i telefon-strażnik"},
+        ]
+        paths = ["/e/*", "/mentor/zaloguj/*", "/egzamin/p/*"]
+        # Formularze okręgowe: /f/<kod> (formularz) i /f/p/<kod> (logowanie strony kodem QR).
+        # Tylko BAZA ze sklepu (decyzja z 11.11.2026): link wysłany sędziom ma otwierać
+        # sklepową aplikację także na telefonie, na którym obok stoi BAZA dev.
+        if bundle == APP_ID:
+            components.append({"/": "/f/*", "comment": "Formularz okręgowy i logowanie strony formularza"})
+            paths.append("/f/*")
         details.append(
             {
                 "appIDs": [app_id],
-                "components": [
-                    {"/": "/e/*", "comment": "Kod obecności na wydarzeniu okręgowym"},
-                    # Ten sam plik podaje www.bazapodreka.app (rewrite na Vercelu, 24.10.2026):
-                    # kody QR panelu Mentor i egzaminu na komputerze otwierają aplikację.
-                    {"/": "/mentor/zaloguj/*", "comment": "Logowanie komputera do panelu Mentor"},
-                    {"/": "/egzamin/p/*", "comment": "Egzamin na komputerze: logowanie i telefon-strażnik"},
-                    # Formularze okręgowe: /f/<kod> (formularz) i /f/p/<kod> (logowanie strony kodem QR).
-                    {"/": "/f/*", "comment": "Formularz okręgowy i logowanie strony formularza"},
-                ],
+                "components": components,
                 # Stary zapis dla iOS 12 i starszych.
                 "appID": app_id,
-                "paths": ["/e/*", "/mentor/zaloguj/*", "/egzamin/p/*", "/f/*"],
+                "paths": paths,
             }
         )
     return {"applinks": {"apps": [], "details": details}}

@@ -106,11 +106,14 @@ def test_otwarte_sciezki_webu_i_pliku():
 def test_aasa_zawiera_formularze():
     from app import event_links as L
 
-    for detail in L.apple_app_site_association("TEAM")["applinks"]["details"]:
-        assert {"/": "/f/*", "comment": "Formularz okręgowy i logowanie strony formularza"} in detail["components"]
-        assert "/f/*" in detail["paths"]
-        # Stare ścieżki zostają.
-        assert detail["components"][0]["/"] == "/e/*"
+    details = {d["appIDs"][0]: d for d in L.apple_app_site_association("TEAM")["applinks"]["details"]}
+    prod, dev = details["TEAM.com.radzio.RefHandballApp"], details["TEAM.com.radzio.RefHandballApp.dev"]
+    assert {"/": "/f/*", "comment": "Formularz okręgowy i logowanie strony formularza"} in prod["components"]
+    assert "/f/*" in prod["paths"]
+    # Linki formularzy otwiera tylko BAZA ze sklepu, nie dev.
+    assert all(c["/"] != "/f/*" for c in dev["components"]) and "/f/*" not in dev["paths"]
+    # Stare ścieżki zostają w obu.
+    assert prod["components"][0]["/"] == "/e/*" and dev["components"][0]["/"] == "/e/*"
 
 
 @pytest.fixture()
