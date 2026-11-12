@@ -87,6 +87,7 @@ from app.extra_reports import (
     router as extra_report_router,
 )
 from app.young_referees import router as young_referees_router
+from app.young_rating_drafts import router as young_rating_drafts_router
 from app.agent_docs import router as agent_docs_router
 from app.agent_chat import router as agent_chat_router
 from app.upload_protocol import router as upload_protocol_router
@@ -456,6 +457,7 @@ from app.sms_config import router as sms_config_router, admin_router as sms_conf
 app.include_router(sms_config_router)
 app.include_router(sms_config_admin_router)
 app.include_router(young_referees_router)
+app.include_router(young_rating_drafts_router)
 app.include_router(agent_docs_router)
 app.include_router(agent_chat_router)
 app.include_router(upload_protocol_router)
