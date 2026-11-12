@@ -177,3 +177,16 @@ def test_osoby_jako_kropki_w_kolejnosci_statusu():
     assert [it["tone"] for it in pp["items"]] == ["positive", "positive", "negative", "neutral"]
     assert pp["items"][0]["ini"] == "ŁŻ" and pp["title"] == "Obecność"
     assert [(g["label"], g["count"]) for g in pp["legend"]] == [("Będę", 2), ("Nie będę", 1), ("Brak głosu", 1)]
+
+
+def test_zapis_pobiera_z_polska_nazwa():
+    from app import district_form_export as X
+    assert X.nice_filename("Zbiórka sędziów: 12/11", "pdf") == "Zbiórka sędziów 1211.pdf"
+    assert X.nice_filename("Raport.pdf", "pdf") == "Raport.pdf"
+    assert X.nice_filename("  ", "html") == "formularz.html"
+    head = X.content_disposition("Zbiórka sędziów.pdf", "pdf", True)
+    assert head.startswith('attachment; filename="Zbiorka_sedziow.pdf"; ')
+    assert "filename*=UTF-8''Zbi%C3%B3rka%20s%C4%99dzi%C3%B3w.pdf" in head
+    assert X.content_disposition("Lista", "html", False).startswith("inline;")
+    text = (ROOT / "app/district_forms.py").read_text(encoding="utf-8")
+    assert "download: int = Query(0)" in text

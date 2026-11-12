@@ -12,6 +12,7 @@ import html
 import io
 import os
 import re
+import urllib.parse
 import tempfile
 import time
 import uuid
@@ -274,6 +275,23 @@ def safe_filename(title: str, ext: str) -> str:
     table = str.maketrans("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ", "acelnoszzACELNOSZZ")
     base = re.sub(r"[^A-Za-z0-9_-]+", "_", _s(title).translate(table)).strip("_")[:60] or "formularz"
     return f"{base}.{ext}"
+
+
+def nice_filename(title: str, ext: str) -> str:
+    """Nazwa pliku z polskimi literami (do zapisu na telefonie): bez ścieżek, znaków sterujących i zakazanych w systemach plików."""
+    base = "".join(ch for ch in _s(title) if ch.isprintable() and ch not in '\\/:*?"<>|')
+    base = re.sub(r"\s+", " ", base).strip(" ._")[:80] or "formularz"
+    if base.lower().endswith(f".{ext}"):
+        base = base[: -len(ext) - 1].rstrip(" .") or "formularz"
+    return f"{base}.{ext}"
+
+
+def content_disposition(name: str, ext: str, attachment: bool) -> str:
+    """Nagłówek z nazwą w dwóch postaciach: ASCII dla starych pobieraczy i `filename*` (RFC 5987) z polskimi znakami."""
+    nice = nice_filename(name, ext)
+    ascii_name = safe_filename(nice.rsplit(".", 1)[0], ext)
+    kind = "attachment" if attachment else "inline"
+    return f"{kind}; filename=\"{ascii_name}\"; filename*=UTF-8''{urllib.parse.quote(nice, safe='')}"
 
 
 def store(data: bytes, ext: str) -> str:

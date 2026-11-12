@@ -384,15 +384,16 @@ async def by_code(code: str, who: Who = Depends(who_dep)) -> Dict[str, Any]:
 
 
 @router.get("/file/{token}", summary="Pobierz eksport (otwarta ścieżka, 15 minut)")
-async def export_file(token: str, filename: str = Query("")):
+async def export_file(token: str, filename: str = Query(""), download: int = Query(0)):
     found = X.find(token)
     if not found:
         raise R.FormError("file_expired", "Plik wygasł - wygeneruj eksport jeszcze raz.", 404)
     path, ext = found
-    name = X.safe_filename(filename.rsplit(".", 1)[0] if filename else "formularz", ext)
-    # HTML ze studia otwiera się w przeglądarce (wyszukiwarka działa od razu), reszta się pobiera.
-    return FileResponse(path, media_type=X.MEDIA[ext], filename=name, headers={"Cache-Control": "no-store"},
-                        content_disposition_type="inline" if ext in ("html", "pdf") else "attachment")
+    # HTML i PDF otwierają się w przeglądarce (wyszukiwarka działa od razu); `?download=1`
+    # („Zapisz” w studiu) wymusza pobranie przez systemowy menedżer, z polską nazwą w `filename*`.
+    attachment = bool(download) or ext not in ("html", "pdf")
+    disposition = X.content_disposition(filename or "formularz", ext, attachment)
+    return FileResponse(path, media_type=X.MEDIA[ext], headers={"Cache-Control": "no-store", "Content-Disposition": disposition})
 
 
 @router.post("/pair/{code}/approve", summary="Telefon zatwierdza logowanie przeglądarki (QR z /f/p/<kod>)")
@@ -1144,7 +1145,8 @@ async def studio_export(form_id: str, body: Dict[str, Any] = Body(...), who: Who
     filename = X.safe_filename(ctx.form["title"], fmt)
     expires = (S.now() + R.EXPORT_TTL).isoformat()
     return {
-        "url": f"/district-forms/file/{token}?filename={urllib.parse.quote(filename)}",
+        # w adresie nazwa z polskimi literami - trafia do `filename*` przy zapisie na telefon
+        "url": f"/district-forms/file/{token}?filename={urllib.parse.quote(X.nice_filename(ctx.form['title'], fmt))}",
         "filename": filename,
         "format": fmt,
         "rows": len(doc["table"]),
