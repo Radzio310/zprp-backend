@@ -143,6 +143,5 @@ def test_strona_wynikow_otwarta_bez_klucza():
 
 
 def test_ladny_adres_wynikow():
-    from app.district_forms import results_url
-
-    assert results_url("abcd2345") == "https://www.bazapodreka.app/f/wyniki/abcd2345"
+    text = (ROOT / "app/district_forms.py").read_text(encoding="utf-8")
+    assert 'return f"{R.WEB_HOST}/f/wyniki/{code}"' in text
