@@ -22,6 +22,8 @@ def test_ranking_mecz_kategoria_nazwa_i_dopelnienie():
     ids = [o["id"] for o in out]
     assert ids[0] == "z_has" and out[0]["has_clip"] is True
     assert ids[1] == "z_match" and out[1]["reasons"][0] == {"kind": "match", "count": 2}
+    # Zestawienie z tym klipem liczy też jego: „me” (m1) i „d” (m3) - jeden klip z tego meczu.
+    assert out[0]["reasons"][0] == {"kind": "match", "count": 1} and out[0]["items_count"] == 2
     assert ids[2] == "z_cat" and out[2]["reasons"][0]["in_name"] is True and out[2]["reasons"][0]["count"] == 1
     # Dopełnienie „ostatnio używane”, gdy pasujących (bez has_clip) jest mniej niż trzy.
     assert out[3]["reasons"] == [{"kind": "recent"}] and len([o for o in out if o["reasons"][:1] == [{"kind": "recent"}]]) <= 2
@@ -70,5 +72,5 @@ def test_trasa_podpowiada_i_usuwa_klip(e):
 
     sug, removed = e.run(go)
     first = sug["suggestions"][0]
-    assert first["id"] == "zm" and first["has_clip"] is True and "z tego meczu" in first["reason_text"]
+    assert first["id"] == "zm" and first["has_clip"] is True and first["reason_text"].startswith("2 klipy z tego meczu")
     assert [i["clip"]["id"] for i in removed["items"]] == ["c2"]
