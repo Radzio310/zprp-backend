@@ -648,6 +648,8 @@ async def queue_clip_file(ctx: Dict[str, Any], clip: Dict[str, Any], actor: Acto
     if not same:
         values.update(card_status="none", card_sig=None)
     await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip["id"]).values(**values))
+    # Ponowne zamówienie po nieudanym cięciu w tym procesie: kolejka ma go znowu widzieć.
+    _failed_here.discard(clip["id"])
     await C.touch(ctx, actor.judge_id, "clip_mp4", "clips", clip["match_id"], {"id": clip["id"]})
     wake_worker()
     return {"mp4_status": "queued"}
@@ -674,6 +676,7 @@ async def queue_clip_veo(ctx: Dict[str, Any], clip: Dict[str, Any], actor: Actor
     if not same:
         values.update(card_status="none", card_sig=None)
     await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip["id"]).values(**values))
+    _failed_here.discard(clip["id"])
     await C.touch(ctx, actor.judge_id, "clip_mp4", "clips", clip["match_id"], {"id": clip["id"], "source": "veo"})
     wake_worker()
     return {"mp4_status": "queued"}

@@ -7,6 +7,7 @@ Edytować i usuwać można tylko swoje (administrator wszystko); komisja ogląda
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -30,6 +31,8 @@ from app.db import (
     mentoring_pairs,
 )
 from app.mentor_panel_auth import mentor_actor
+
+logger = logging.getLogger("app.mentor_panel")
 
 router = APIRouter(prefix="/mentor-panel", tags=["Mentor"])
 Actor = C.MentorActor
@@ -653,6 +656,7 @@ def _cover(clip: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 async def compilation_summaries(ctx: Dict[str, Any], comp_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     names = await C.people({r.get("created_by") for r in comp_rows} | {r.get("acted_by") for r in comp_rows})
+    films = await _films([r["id"] for r in comp_rows])
     out = []
     for comp in comp_rows:
         items = await _items(comp["id"])
@@ -663,8 +667,21 @@ async def compilation_summaries(ctx: Dict[str, Any], comp_rows: List[Dict[str, A
             "items_count": len(live), "cover_clip": _cover(clips.get(live[0]["clip_id"])) if live else None,
             "created_by": C.person(names, comp.get("created_by")), **C.acted_fields(names, comp), "updated_at": comp.get("updated_at"),
             "public_url": R.public_url("compilation", comp.get("public_token")),
+            # Film z montażu (12.11.2026): ostatni gotowy albo w drodze; null = jeszcze nie było.
+            "film": films.get(comp["id"]),
         })
     return out
+
+
+async def _films(compilation_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Ostatni film zestawień (`mentor_montage.films_for`). Brak tabeli albo błąd = bez filmów, lista działa dalej."""
+    try:
+        from app.mentor_montage import films_for
+
+        return await films_for(compilation_ids)
+    except Exception:  # noqa: BLE001
+        logger.warning("mentor: filmy zestawień nieczytelne", exc_info=True)
+        return {}
 
 
 async def compilation_payload(ctx: Dict[str, Any], compilation_id: str) -> Dict[str, Any]:
@@ -685,6 +702,7 @@ async def compilation_payload(ctx: Dict[str, Any], compilation_id: str) -> Dict[
         "created_at": comp.get("created_at"), "updated_at": comp.get("updated_at"),
         "public_url": R.public_url("compilation", comp.get("public_token")),
         "can_edit": C.may(ctx, "edit", owner=R.s(comp.get("created_by")) == ctx["actor"].judge_id),
+        "film": (await _films([comp["id"]])).get(comp["id"]),
         "items": [{"clip": shaped[i["clip_id"]], "column": i.get("column"), "note": i.get("note"),
                    "label": R.legacy_label(i, comp.get("mode") or "free"), "position": n}
                   for n, i in enumerate(live)],
@@ -729,6 +747,51 @@ async def create_compilation(pair_id: str, body: CompilationBody, actor: Actor =
     await _write_items(row["id"], items)
     await C.touch(ctx, actor.judge_id, "compilation_created", "compilations", data={"id": row["id"]})
     return await compilation_payload(ctx, row["id"])
+
+
+@router.get("/pairs/{pair_id}/compilations/suggest")
+async def suggest_compilations(pair_id: str, match_id: Optional[str] = Query(None), category_ids: Optional[str] = Query(None),
+                               clip_id: Optional[str] = Query(None), actor: Actor = Depends(mentor_actor)):
+    """Podpowiedzi zestawień dla klipu (12.11.2026): z tego meczu, po kategorii, ostatnio używane (`mentor_compilation_suggest`).
+    `category_ids` po przecinku. Przy wycinaniu nowego klipu bez `clip_id` (nic jeszcze nie ma `has_clip`)."""
+    from app import mentor_compilation_suggest as S
+
+    ctx = await C.pair_context(pair_id, actor)
+    comps = await C.rows(select(mentor_compilations).where(mentor_compilations.c.pair_id == ctx["pair_id"])
+                         .order_by(mentor_compilations.c.updated_at.desc()))
+    if not comps:
+        return {"suggestions": []}
+    rows = await C.rows(select(mentor_compilation_items).where(mentor_compilation_items.c.compilation_id.in_([c["id"] for c in comps]))
+                        .order_by(mentor_compilation_items.c.position.asc()))
+    items: Dict[str, List[str]] = {}
+    for r in rows:
+        items.setdefault(r["compilation_id"], []).append(r["clip_id"])
+    clip_rows = await C.rows(select(mentor_clips.c.id, mentor_clips.c.match_id, mentor_clips.c.category_ids)
+                             .where(mentor_clips.c.pair_id == ctx["pair_id"]).where(mentor_clips.c.deleted_at.is_(None))
+                             .where(mentor_clips.c.id.in_(list({r["clip_id"] for r in rows}) or [""])))
+    clips = {r["id"]: {"match_id": r["match_id"], "category_ids": [R.s(x) for x in R.json_value(r.get("category_ids"), []) or []]} for r in clip_rows}
+    cats = [R.s(x) for x in (category_ids or "").split(",") if R.s(x)][:20]
+    names = {r["id"]: R.s(r.get("name")) for r in await C.categories(ctx, seed=False)}
+    for comp in comps:
+        comp["can_edit"] = C.may(ctx, "edit", owner=R.s(comp.get("created_by")) == actor.judge_id)
+    ranked = S.rank(comps, items, clips, match_id=R.s(match_id) or None, category_ids=cats, clip_id=R.s(clip_id) or None, category_names=names)
+    for item in ranked:
+        item["reason_text"] = " · ".join(S.reason_text(r) for r in item["reasons"]) or "W zestawieniu"
+    return {"suggestions": [i for i in ranked if i["can_edit"] or i["has_clip"]]}
+
+
+@router.delete("/compilations/{compilation_id}/items/{clip_id}")
+async def remove_item(compilation_id: str, clip_id: str, actor: Actor = Depends(mentor_actor)):
+    """Jeden klip z zestawienia (przełącznik „w zestawieniu” przy klipie); reszta kolejności bez zmian."""
+    ctx, row = await _editable_compilation(compilation_id, actor)
+    current = await _items(compilation_id)
+    left = [i for i in current if i["clip_id"] != clip_id]
+    if len(left) != len(current):
+        await _write_items(compilation_id, [{k: i.get(k) for k in ("clip_id", "position", "column", "note", "label")} | {"position": n}
+                                            for n, i in enumerate(left)])
+        await database.execute(update(mentor_compilations).where(mentor_compilations.c.id == compilation_id).values(updated_at=C.now()))
+        await C.touch(ctx, actor.judge_id, "compilation_items", "compilations", data={"id": compilation_id})
+    return await compilation_payload(ctx, compilation_id)
 
 
 @router.get("/compilations/{compilation_id}")
