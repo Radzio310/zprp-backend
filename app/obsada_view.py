@@ -197,15 +197,26 @@ def _day(value: Any) -> Optional[str]:
 async def view_payload(province: str, mode: str, date_from: Optional[str], date_to: Optional[str]) -> dict:
     data = await _season_payload(province)
     lo, hi = _day(date_from), _day(date_to)
+    # Widok (filtr dat + rev) liczony raz na okno i wersje danych: klienci pytaja co 60 s,
+    # a compute_rev to json.dumps calego sezonu. Cache zyje w `data`, wiec odswieza sie z nim.
+    views = data.setdefault("_views", {})
+    vkey = (mode, lo, hi)
+    hit = views.get(vkey)
+    if hit is not None:
+        return hit
     matches = [m for m in data["matches"]
                if not (lo or hi) or (m["match_at"] and (not lo or m["match_at"][:10] >= lo)
                                      and (not hi or m["match_at"][:10] <= hi))]
     used = {(m["hall"], m["city"]) for m in matches}
     halls = [h for h in data["halls"] if (h["hall"], h["city"]) in used]
-    return {"province": province, "mode": mode, "season": data["season"],
-            "updated_at": data["updated_at"],
-            "rev": R.compute_rev(matches, f"{data['updated_at']}|{mode}"),
-            "matches": matches, "halls": halls}
+    out = {"province": province, "mode": mode, "season": data["season"],
+           "updated_at": data["updated_at"],
+           "rev": R.compute_rev(matches, f"{data['updated_at']}|{mode}"),
+           "matches": matches, "halls": halls}
+    if len(views) >= 16:
+        views.clear()
+    views[vkey] = out
+    return out
 
 
 def _reply(request: Request, payload: dict) -> Response:
