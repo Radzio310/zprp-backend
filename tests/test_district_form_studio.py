@@ -140,3 +140,9 @@ def test_strona_wynikow_otwarta_bez_klucza():
 
     assert is_open_path("/public/forms/results/abcd2345")
     assert not is_open_path("/district-forms/abc/public-link")
+
+
+def test_ladny_adres_wynikow():
+    from app.district_forms import results_url
+
+    assert results_url("abcd2345") == "https://www.bazapodreka.app/f/wyniki/abcd2345"

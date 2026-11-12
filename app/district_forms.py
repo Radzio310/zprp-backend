@@ -1154,7 +1154,8 @@ async def studio_export(form_id: str, body: Dict[str, Any] = Body(...), who: Who
 
 
 def results_url(code: str) -> str:
-    return f"/public/forms/results/{code}"
+    """Ładny adres na domenie BAZA_web; Vercel przepisuje /f/wyniki/<kod> na /public/forms/results/<kod> backendu."""
+    return f"{R.WEB_HOST}/f/wyniki/{code}"
 
 
 async def _link_payload(ctx: S.Ctx) -> Dict[str, Any]:
