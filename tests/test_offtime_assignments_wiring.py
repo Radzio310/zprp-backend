@@ -21,7 +21,7 @@ def _calls(fn):
 
 def test_kazda_trasa_wymaga_tokenu_i_roli():
     fns = _fns("offtime_assignments.py")
-    for name in ("list_assigned", "create_assigned", "update_assigned", "delete_assigned"):
+    for name in ("assigned_access", "list_assigned", "create_assigned", "update_assigned", "delete_assigned"):
         defaults = [ast.unparse(d) for d in fns[name].args.defaults]
         assert "Depends(get_jwt_payload)" in defaults, name
         assert "_actor" in _calls(fns[name]), name

@@ -122,6 +122,21 @@ async def _notify(action: str, row: Any, actor: Dict[str, Any]) -> None:
         logger.warning("niedyspo od obsadowego: push nieudany", exc_info=True)
 
 
+@router.get("/access", summary="Czy piszący może wpisywać niedyspozycje w tym okręgu")
+async def assigned_access(
+    province: str = Query(...),
+    token_payload: dict = Depends(get_jwt_payload),
+):
+    """`{role}`: obsadowy | calendar_master | admin albo null. Apka z tego odsłania panel."""
+    try:
+        actor = await _actor(token_payload, province)
+    except HTTPException as err:
+        if err.status_code == 403:
+            return {"role": None}
+        raise
+    return {"role": actor["role"]}
+
+
 @router.get("", summary="Niedyspozycje wpisane sędziom (okręg, opcjonalnie sędzia)")
 async def list_assigned(
     province: str = Query(...),
