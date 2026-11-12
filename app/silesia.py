@@ -22,6 +22,7 @@ from fastapi import (
 )
 from sqlalchemy import select, insert, update, delete, func
 
+from app.offtime_slim import parse_window, slim_entries
 from app.db import (
     database,
     announcements,
@@ -1096,10 +1097,29 @@ async def delete_offtimes(
     response_model=ListAllOfftimesResponse,
     summary="Lista wszystkich niedyspozycji (opcjonalnie filtrowana po province)",
 )
-async def list_all_offtimes(province: Optional[str] = Query(None)):
-    return ListAllOfftimesResponse(
-        records=await _composed_offtime_records(province=province)
-    )
+async def list_all_offtimes(
+    province: Optional[str] = Query(None),
+    from_: Optional[str] = Query(
+        None, alias="from", description="ISO-data: tylko wpisy zahaczające o okno"
+    ),
+    to: Optional[str] = Query(None, description="ISO-data końca okna"),
+    lite: bool = Query(
+        False, description="Minimalne pola i mecze bez powtórek (Calendar Master)"
+    ),
+):
+    records = await _composed_offtime_records(province=province)
+    window = parse_window(from_, to)
+    if window is None and not lite:
+        return ListAllOfftimesResponse(records=records)
+    slimmed = []
+    for record in records:
+        items = record.data_json if isinstance(record.data_json, list) else []
+        slimmed.append(
+            record.model_copy(
+                update={"data_json": slim_entries(items, window, lite=lite)}
+            )
+        )
+    return ListAllOfftimesResponse(records=slimmed)
 
 
 @router_off.get(

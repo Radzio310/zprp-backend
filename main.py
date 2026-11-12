@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import os
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -278,6 +279,8 @@ app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
 from app import loop_lag as _loop_lag
 app.add_middleware(_loop_lag.RequestNoteMiddleware)
+# Odpowiedzi JSON (np. /silesia/offtimes/all) idą skompresowane; małe zostają bez zmian.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.include_router(_loop_lag.make_router())
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 install_google_refresh_handlers(app)
