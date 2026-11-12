@@ -37,7 +37,7 @@ import re
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app import district_forms_rules as R
-from app.exam_print_theme import brand_logo_uri, mix, theme_for
+from app.exam_print_theme import brand_logo_uri, contrast, mix, theme_for
 
 FORMATS = ("pdf", "xlsx", "html")
 LAYOUTS = ("checklist", "report")
@@ -485,70 +485,192 @@ def _dm(day: Any) -> str:
     return f"{text[8:10]}.{text[5:7]}" if len(text) >= 10 else text
 
 
-def svg_ring(th: Mapping[str, Any], share: float, size: int = 120, label: str = "") -> str:
-    r = size / 2 - 10
-    c = 2 * 3.14159265 * r
-    on = max(0.0, min(1.0, share)) * c
-    pct = round(share * 100)
-    cx = size / 2
-    arc = (f'<circle cx="{cx}" cy="{cx}" r="{r}" fill="none" stroke="{th["accent"]}" stroke-width="13" stroke-linecap="round" '
-           f'stroke-dasharray="{on:.1f} {c:.1f}" transform="rotate(-90 {cx} {cx})"/>') if on > 0.5 else ""
-    return (
-        f'<svg class="ring" width="{size}" height="{size}" viewBox="0 0 {size} {size}">'
-        f'<circle cx="{cx}" cy="{cx}" r="{r}" fill="none" stroke="{th["track"]}" stroke-width="13"/>{arc}'
-        f'<text x="{cx}" y="{cx}" text-anchor="middle" dy="0.12em" font-size="{size * 0.25:.0f}" font-weight="800" letter-spacing="-1" fill="{th["ink"]}">{pct}%</text>'
-        f'<text x="{cx}" y="{cx}" text-anchor="middle" dy="1.75em" font-size="{size * 0.085:.0f}" fill="{th["soft"]}">{esc(label)}</text>'
-        "</svg>"
-    )
+def _on(color: str) -> str:
+    """Napis na pełnej barwie: biały, jeśli czytelny, inaczej grafit."""
+    return "#FFFFFF" if contrast(color, "#FFFFFF") >= 2.6 else "#1E1A17"
 
 
-def html_bars(th: Mapping[str, Any], items: Sequence[Mapping[str, Any]]) -> str:
-    """Rozkład odpowiedzi: etykieta i liczba nad cienkim torem (jak słupki raportu sezonu Beach)."""
-    total = sum(int(i["count"]) for i in items)
-    out = ['<div class="bars">']
+def planes(th: Mapping[str, Any], theme: str) -> Dict[str, str]:
+    """Druga płaszczyzna kompozycji (skos okładki): barwa herbu nr 2, espresso albo błękit premium."""
+    if theme == "elegant":
+        return {"plane": "#2B2118", "ink": "#F3EAD8", "num": "#D9BE84", "soft": "#BFAF96"}
+    if theme == "premium":
+        return {"plane": th["accent"], "ink": "#0A0C10", "num": "#0A0C10", "soft": "#1E2A3A"}
+    b1, b2 = th.get("band") or th["accent"], th.get("band2") or th["accent"]
+    plane = b2 if b2.upper() != b1.upper() else mix(b1, "#000000", 0.38)
+    ink = _on(plane)
+    return {"plane": plane, "ink": ink, "num": ink, "soft": _rgba(ink, 0.78)}
+
+
+def people(doc: Mapping[str, Any], *, initials_ok: bool) -> Dict[str, Any]:
+    """Osoby jako wzór: kropka na osobę w barwie pierwszej kolumny ze statusem; pusta kropka = bez odpowiedzi."""
+    header, table, tones, names = doc["header"], doc["table"], doc["tones"], doc["names"]
+    col = None
+    if tones:
+        for j in range(len(header)):
+            if any(j < len(t) and t[j] in ("positive", "negative", "warning") for t in tones):
+                col = j
+                break
+    rank = {"positive": 0, "warning": 1, "negative": 2}
+    items = []
+    for i, row in enumerate(table):
+        if col is not None:
+            tone = (tones[i][col] if i < len(tones) and col < len(tones[i]) else "") or ""
+            label = _s(row[col]) if col < len(row) else ""
+        else:
+            tone, label = "fill", ""
+        hollow = tone in ("", "neutral")
+        ini = initials(names[i]).replace(".", "").replace(" ", "") if initials_ok and i < len(names) else ""
+        items.append({"tone": tone, "label": label, "hollow": hollow, "ini": ini,
+                      "rank": rank.get(tone, 4 if hollow else 3), "i": i})
+    items.sort(key=lambda x: (x["rank"], x["i"]))
+    legend: List[Dict[str, Any]] = []
     for it in items:
-        n = int(it["count"])
-        width = max(1.6, 100 * n / total) if total and n else 0
-        color = tone_color(th, it.get("tone", ""))
-        muted = " muted" if it.get("tone") == "empty" else ""
-        fill = f'<div class="bf" style="width:{width:.1f}%;background:{color}"></div>' if width else ""
-        out.append(
-            f'<div class="bar{muted}"><div class="bh"><span class="bv"><b>{n}</b> {_pct_text(n, total)}</span>'
-            f'<span class="bl">{esc(_s(it["label"])[:48])}</span></div><div class="bt">{fill}</div></div>'
-        )
-    out.append("</div>")
-    return "".join(out)
+        if col is None:
+            break
+        hit = next((g for g in legend if g["label"] == it["label"] and g["tone"] == it["tone"]), None)
+        if hit:
+            hit["count"] += 1
+        else:
+            legend.append({"label": it["label"] or "Brak", "tone": it["tone"], "hollow": it["hollow"], "count": 1})
+    return {"items": items, "legend": legend, "title": header[col] if col is not None else ""}
 
 
-def html_money(th: Mapping[str, Any], f: Mapping[str, Any]) -> str:
-    """Wpłaty: jeden tor podzielony na otrzymane / zgłoszone / brak, kwota-bohater nad nim."""
+def svg_dots(th: Mapping[str, Any], items: Sequence[Mapping[str, Any]], w: float, h: float, *, ink: str, fill: str,
+             max_cell: float = 13.0) -> str:
+    """Siatka osób w milimetrach: komórka tak duża, jak pozwala pudełko (do `max_cell`), inicjały od 6,5 mm."""
+    n = len(items)
+    if not n:
+        return ""
+    best = (0.0, 1, 1)
+    for cols in range(1, n + 1):
+        rows = -(-n // cols)
+        s = min(w / cols, h / rows, max_cell)
+        if s > best[0] + 1e-6:
+            best = (s, cols, rows)
+    s, cols, rows = best
+    r = s * 0.42
+    parts = []
+    for k, it in enumerate(items):
+        cx, cy = (k % cols + 0.5) * s, (k // cols + 0.5) * s
+        if it["hollow"]:
+            parts.append(f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r - s * 0.04:.2f}" fill="none" stroke="{ink}" stroke-opacity="0.5" stroke-width="{s * 0.07:.2f}"/>')
+            text_c = ink
+        else:
+            color = fill if it["tone"] == "fill" else tone_color(th, it["tone"])
+            parts.append(f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r:.2f}" fill="{color}"/>')
+            text_c = _on(color)
+        if it["ini"] and s >= 6.5:
+            parts.append(f'<text x="{cx:.2f}" y="{cy + s * 0.105:.2f}" text-anchor="middle" font-size="{s * 0.3:.2f}" font-weight="700" '
+                         f'fill="{text_c}"{" fill-opacity=" + chr(34) + "0.7" + chr(34) if it["hollow"] else ""}>{esc(it["ini"])}</text>')
+    W, H = cols * s, rows * s
+    return (f'<svg class="dots" width="{W:.1f}mm" height="{H:.1f}mm" viewBox="0 0 {W:.2f} {H:.2f}" '
+            f'font-family="DejaVu Sans, Segoe UI, sans-serif">{"".join(parts)}</svg>')
+
+
+def dots_legend(th: Mapping[str, Any], pp: Mapping[str, Any], ink: str) -> str:
+    if not pp["legend"]:
+        return ""
+    out = []
+    for g in pp["legend"]:
+        dot = (f'<i class="ho" style="border-color:{ink}"></i>' if g["hollow"]
+               else f'<i style="background:{tone_color(th, g["tone"])}"></i>')
+        out.append(f'<span class="lg">{dot}<b>{g["count"]}</b> {esc(g["label"])}</span>')
+    return '<div class="legend">' + "".join(out) + "</div>"
+
+
+def money_track(th: Mapping[str, Any], f: Mapping[str, Any]) -> str:
+    """Tor wpłat - bohater środka: kwota wielką cyfrą, tor do oczekiwanej sumy, segmenty z liczbą osób w środku."""
     confirmed, declared, none = int(f["confirmed"]), int(f["declared"]), int(f["none"])
-    base = confirmed + declared + none
-    has_amount = bool(f.get("amount"))
-    seg = []
-    for n, color in ((confirmed, th["pass"]), (declared, th["warn"])):
-        if base and n:
-            seg.append(f'<div class="ms" style="width:{100 * n / base:.2f}%;background:{color}"></div>')
-    amount = float(f["amount"]) if has_amount else 0.0
-    if has_amount:
-        missing = max(0.0, float(f.get("expected_total") or 0) - float(f.get("confirmed_total") or 0))
-        rest = f" · do zebrania {_money(missing)}" if missing else " · komplet"
-        hero = (f'<div class="mhero"><b>{esc(_money(f.get("confirmed_total")))}</b>'
-                f'<span>z {esc(_money(f.get("expected_total")))} oczekiwanych{esc(rest)}</span></div>')
+    amount = float(f["amount"]) if f.get("amount") else 0.0
+    if amount:
+        expected_people = round(float(f.get("expected_total") or 0) / amount)
+        denom = max(expected_people, confirmed + declared, 1)
+        missing = max(0, denom - confirmed - declared)
+        big = _money(f.get("confirmed_total"))
+        of = f"z {_money(f.get('expected_total'))}"
     else:
-        hero = f'<div class="mhero"><b>{confirmed} z {base}</b><span>potwierdzonych wpłat</span></div>'
+        denom = max(1, confirmed + declared + none)
+        missing = none
+        big = f"{confirmed}"
+        of = f"z {denom}"
+    segs = [(confirmed, th["pass"]), (declared, th["warn"])]
+    shown = [(n, c) for n, c in segs if n]
+    html_segs = []
+    for k, (n, color) in enumerate(shown):
+        width = 100 * n / denom
+        full = abs(sum(x for x, _ in shown) - denom) < 1e-9 and k == len(shown) - 1
+        radius = ("99px 0 0 99px" if k == 0 else "0") if not full else ("99px" if k == 0 else "0 99px 99px 0")
+        label = f"<span>{n}</span>" if width >= 5 else ""
+        html_segs.append(f'<div class="seg" style="width:{width:.2f}%;background:{color};color:{_on(color)};border-radius:{radius}">{label}</div>')
+    if missing and 100 * missing / denom >= 5:
+        html_segs.append(f'<div class="seg rest" style="width:{100 * missing / denom:.2f}%"><span>{missing}</span></div>')
+    def m(n: int) -> str:
+        return f" · {_money(n * amount)}" if amount and n else ""
     legend = [
-        (th["pass"], "Otrzymano", confirmed, f.get("confirmed_total")),
-        (th["warn"], "Zgłoszone, czeka na potwierdzenie", declared, declared * amount),
-        (th["line"], "Bez wpłaty", none, None),
+        f'<span class="lg"><i style="background:{th["pass"]}"></i>Otrzymano <b>{confirmed}</b>{esc(m(confirmed))}</span>',
+        f'<span class="lg"><i style="background:{th["warn"]}"></i>Zgłoszone <b>{declared}</b>{esc(m(declared))}</span>',
+        f'<span class="lg"><i class="ho"></i>{"Brakuje" if amount else "Bez wpłaty"} <b>{missing}</b>{esc(m(missing))}</span>',
     ]
-    rows = "".join(
-        f'<div class="ml"><span class="mv">{n} os.'
-        f'{(" · " + esc(_money(money))) if has_amount and money is not None and n else ""}</span>'
-        f'<i style="background:{color}"></i>{esc(label)}</div>'
-        for color, label, n, money in legend
-    )
-    return f'<div class="funnel">{hero}<div class="mt">{"".join(seg)}</div>{rows}</div>'
+    return (f'<section class="money funnel"><div class="mline"><span class="mname">{esc(f["title"])}</span>'
+            f'<span class="mbig">{esc(big)}</span><span class="mof">{esc(of)}</span></div>'
+            f'<div class="mtrack">{"".join(html_segs)}</div><div class="legend">{"".join(legend)}</div></section>')
+
+
+def strips(th: Mapping[str, Any], dists: Sequence[Mapping[str, Any]], skip: str) -> str:
+    """Rozkłady jako pasy 100%: pytanie po lewej, jeden pas z liczbami w środku, opis barw pod spodem."""
+    out = []
+    skipped = False
+    for d in dists:
+        if not skipped and skip and d["title"] == skip:
+            skipped = True
+            continue
+        items = [it for it in d["items"]]
+        total = sum(int(i["count"]) for i in items)
+        if not total:
+            continue
+        shades = [th["accent"], mix(th["accent"], th["card"], 0.3), mix(th["accent"], th["card"], 0.5),
+                  mix(th["accent"], th["card"], 0.65), mix(th["accent"], th["card"], 0.78)]
+        colors, k = [], 0
+        for it in items:
+            if it.get("tone") == "empty":
+                colors.append(th["track"])
+            elif it.get("tone") in ("positive", "negative", "warning"):
+                colors.append(tone_color(th, it["tone"]))
+            else:
+                colors.append(shades[k % len(shades)])
+                k += 1
+        live = [idx for idx, it in enumerate(items) if int(it["count"])]
+        segs, leg = [], []
+        for pos, idx in enumerate(live):
+            it, color = items[idx], colors[idx]
+            n = int(it["count"])
+            width = 100 * n / total
+            first, last = pos == 0, pos == len(live) - 1
+            radius = "99px" if first and last else ("99px 0 0 99px" if first else ("0 99px 99px 0" if last else "0"))
+            ink = th["soft"] if it.get("tone") == "empty" else _on(color)
+            label = f"<span>{n}</span>" if width >= 6 else ""
+            segs.append(f'<div class="seg" style="width:{width:.2f}%;background:{color};color:{ink};border-radius:{radius}">{label}</div>')
+        for idx, it in enumerate(items):
+            n = int(it["count"])
+            if not n:
+                continue
+            leg.append(f'<span class="lg"><i style="background:{colors[idx]}"></i>{esc(_s(it["label"])[:40])} <b>{n}</b>'
+                       f'<em>{_pct_text(n, total)}</em></span>')
+        out.append(f'<div class="strip"><div class="sq">{esc(d["title"])}</div><div class="sb"><div class="sbar">{"".join(segs)}</div>'
+                   f'<div class="legend">{"".join(leg)}</div></div></div>')
+    return f'<section class="strips">{"".join(out)}</section>' if out else ""
+
+
+def numbers_line(numbers: Sequence[Mapping[str, Any]]) -> str:
+    if not numbers:
+        return ""
+    out = []
+    for n in numbers:
+        avg = n.get("avg")
+        extra = f"<br/>średnio {esc(_num_text(round(float(avg), 1)).replace('.', ','))}" if avg is not None else ""
+        out.append(f'<span class="nu"><b>{esc(_num_text(n.get("sum")))}</b><span>{esc(n["title"])}{extra}</span></span>')
+    return f'<section class="nums">{"".join(out)}</section>'
 
 
 def svg_timeline(th: Mapping[str, Any], points: Sequence[Mapping[str, Any]], total: int, width: int = 640, height: int = 150) -> str:
@@ -556,7 +678,7 @@ def svg_timeline(th: Mapping[str, Any], points: Sequence[Mapping[str, Any]], tot
     if not points:
         return ""
     top = max(1, total, max(int(p["filled"]) for p in points))
-    left, right, ceil, floor = 6, width - 46, 14, height - 22
+    left, right, ceil, floor = 6, width - 56, 18, height - 22
     n = len(points)
     xs = [left + (right - left) * (i / (n - 1)) for i in range(n)] if n > 1 else [(left + right) / 2]
     ys = [floor - (floor - ceil) * int(p["filled"]) / top for p in points]
@@ -583,7 +705,7 @@ def svg_timeline(th: Mapping[str, Any], points: Sequence[Mapping[str, Any]], tot
         f'<polygon points="{area}" fill="{th["accent"]}" fill-opacity="0.14"/>'
         f'<polyline points="{line}" fill="none" stroke="{th["accent"]}" stroke-width="2.4" stroke-linejoin="round"/>'
         f'<circle cx="{right:.1f}" cy="{ys[-1]:.1f}" r="4.2" fill="{th["accent"]}"/>'
-        f'<text x="{right + 6}" y="{ys[-1] + 4:.1f}" font-size="12" font-weight="800" fill="{th["ink"]}">{int(points[-1]["filled"])}</text>'
+        f'<text x="{right + 6}" y="{ys[-1] + 4:.1f}" font-size="22" font-weight="800" fill="{th["ink"]}">{int(points[-1]["filled"])}</text>'
         f"{ticks}</svg>"
     )
 
@@ -739,9 +861,14 @@ def render_html(
     crest: str = "",
     level: str = "full",
 ) -> str:
-    """`mode`: print (PDF) | file (HTML z wyszukiwarką) | public (strona z linku, przycięta do `level`)."""
+    """`mode`: print (PDF) | file (HTML z wyszukiwarką) | public (strona z linku, przycięta do `level`).
+
+    Kompozycja (13.11.2026, druga runda): zero kafli. Okładka to dwie płaszczyzny barw herbu ze skosem,
+    osoby jako siatka kropek w barwach statusu, odsetek wielką cyfrą na skosie, duże logo na białym krążku.
+    Środek: tor wpłat jako bohater, rozkłady jako pasy 100%, sumy wielką cyfrą, narastanie na całą szerokość.
+    """
     th = theme_for(theme, province_key, {"paper": theme_for("elegant", None, {})})
-    dark = bool(th.get("dark"))
+    pl = planes(th, theme)
     interactive = mode in ("file", "public")
     printing = not interactive
     report = layout == "report"
@@ -749,67 +876,74 @@ def render_html(
     show_table = not (mode == "public" and level == "stats") and bool(doc["table"])
     show_charts = report or (mode == "public" and level == "stats")
     cover_page = printing and report
-    logo = brand_logo_uri(240)
+    logo = brand_logo_uri(420)
     title_font = "Georgia, 'DejaVu Serif', serif" if th.get("serif") else "'DejaVu Sans', 'Segoe UI', system-ui, -apple-system, sans-serif"
-    tint = mix(th["accent"], th["card"], 0.82 if dark else 0.9)
-    zebra = mix(th["ink"], th["card"], 0.95 if dark else 0.975)
+    tint = mix(th["accent"], th["card"], 0.82 if th.get("dark") else 0.9)
+    zebra = mix(th["ink"], th["card"], 0.95 if th.get("dark") else 0.975)
     participants, filled = int(doc["participants"]), int(doc["filled"])
     share = filled / participants if participants else 0.0
-    header = list(doc["header"])
-    table = doc["table"]
-    tones = doc["tones"]
-    names = doc["names"]
+    header, table, tones, names = list(doc["header"]), doc["table"], doc["tones"], doc["names"]
     wide = len(header) > 6
     page_w, page_h = (297, 210) if wide else (210, 297)
-    cover_end = {"province": mix(th["cover"], "#000000", 0.16), "elegant": mix(th["cover"], th["gold"], 0.22),
-                 "premium": mix(th["cover"], th["accent"], 0.16)}.get(theme, th["cover"])
-    ink_c = th["cover_ink"] if th["cover_ink"].startswith("#") else "#FFFFFF"
-    facts = doc_facts(doc)
+    cover_ink = th["cover_ink"] if th["cover_ink"].startswith("#") else "#FFFFFF"
     view_text = _view_text(doc)
-
-    # ── liczba-bohater i fakty (okładka druku, nagłówek pliku) ──
-    hero_num = f"{round(share * 100)}%"
-    hero_cap = f"{filled} z {participants} " + ("odpowiedziało" if doc["kind"] == "list" else "wysłało odpowiedź")
     empty = empty_state(doc)
     if empty:
         show_charts = False
-    fact_html = "".join(f'<div class="f"><b>{esc(v)}</b><span>{esc(k)}</span></div>' for v, k in facts)
-    when_bits = []
-    if doc.get("closes"):
-        when_bits.append(f"zapisy do {_local_date(doc['closes'])}")
+    pct = f"{round(share * 100)}"
+    cap = f"{filled} z {participants} " + ("odpowiedziało" if doc["kind"] == "list" else "wysłało odpowiedź")
+    when_bits = [f"zapisy do {_local_date(doc['closes'])}"] if doc.get("closes") else []
     stamp = ("Stan na " if mode == "public" else "Wygenerowano ") + doc["generated"]
     sub = " · ".join([x for x in [doc["province"], *when_bits] if x])
     crest_img = f'<img class="crest" src="{crest}" alt="Herb okręgu"/>' if crest else ""
-    # Logo na białym krążku: czytelne na żółtym, kremowym i grafitowym tle tak samo.
+    # Logo na białym krążku: czytelne na żółtym, kremowym, granatowym i grafitowym tle tak samo.
     logo_img = f'<span class="lpad"><img class="logo" src="{logo}" alt="BAZA"/></span>' if logo else ""
+    pp = people(doc, initials_ok=not (mode == "public" and level == "stats"))
     empty_html = ""
     if empty:
         empty_html = (f'<div class="estate">{empty_art(empty["kind"])}<div class="etext"><b>{esc(empty["title"])}</b>'
                       f'<span>{esc(empty["hint"])}</span></div></div>')
-    lens_html = '<div class="lenses">' + "".join(f'<span class="lens">{esc(x)}</span>' for x in view_text) + "</div>"
+    big_pct = f'<div class="pct"><b>{pct}</b><i>%</i></div><div class="pcap">{esc(cap)}</div>'
 
+    # ── okładka druku / pas listy / scena pliku ──
     if cover_page:
+        W, H = page_w, page_h
+        slab = ([(W * 0.66, 0), (W, 0), (W, H), (W * 0.5, H)] if wide else [(0, 0), (W, 0), (W, H * 0.33), (0, H * 0.42)])
+        poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in slab)
+        box_w, box_h = ((W * 0.5) - 24, H - 130) if wide else (W - 32, 64)
+        dots = svg_dots(th, pp["items"], box_w, box_h, ink=cover_ink, fill=cover_ink, max_cell=14.0)
+        body_left = empty_html if empty else f'<div class="cdots">{dots}{dots_legend(th, pp, cover_ink)}</div>'
         head = (
-            f'<section class="cover"><div class="cstripes"></div>'
-            f'<div class="ctop">{crest_img}{logo_img}</div>'
-            f'<div class="ctitle"><h1>{esc(doc["title"])}</h1><div class="csub">{esc(sub)}</div></div>'
-            + (f'<div class="chero cempty">{empty_html}</div>' if empty else
-               f'<div class="chero"><div class="cnum">{esc(hero_num)}</div><div class="ccap">{esc(hero_cap)}</div>'
-               f'<div class="crule"><div style="width:{max(0.0, min(1.0, share)) * 100:.1f}%"></div></div></div>'
-               f'<div class="cfacts">{fact_html}</div>') +
-            f'<div class="cfoot"><span class="cview">Widok: {esc(" · ".join(view_text))}</span>'
-            f'<span class="cstamp">{esc(stamp)} · BAZA</span></div></section>'
+            f'<section class="cover {"land" if wide else "port"}">'
+            f'<svg class="slab" width="{W}mm" height="{H}mm" viewBox="0 0 {W} {H}"><polygon points="{poly}" fill="{pl["plane"]}"/></svg>'
+            f'<div class="clogo">{logo_img}</div>'
+            f'<div class="ctitle">{crest_img}<h1>{esc(doc["title"])}</h1><div class="csub">{esc(sub)}</div></div>'
+            f'<div class="cbody">{body_left}</div>'
+            f'{"" if empty else f"<div class=cpct>{big_pct}</div>"}'
+            f'<div class="cfoot">{esc(" · ".join(view_text))}<br/>{esc(stamp)}</div></section>'
+        )
+    elif printing:
+        cw = page_w - 24
+        bh = 44
+        poly = f"{cw * 0.62:.1f},0 {cw:.1f},0 {cw:.1f},{bh} {cw * 0.55:.1f},{bh}"
+        right = "" if empty else f'<div class="bpct"><b>{filled}</b><i>/{participants}</i><span>odpowiedzi</span></div>'
+        head = (
+            f'<header class="band"><svg class="slab" width="{cw}mm" height="{bh}mm" viewBox="0 0 {cw} {bh}">'
+            f'<polygon points="{poly}" fill="{pl["plane"]}"/></svg>'
+            f'<div class="btitle">{crest_img}<div class="bt"><h1>{esc(doc["title"])}</h1><div class="bsub">{esc(sub)}</div></div></div>'
+            f'{right}<div class="blogo">{logo_img}</div></header>'
+            + (f'<div class="bempty">{empty_html}</div>' if empty else "")
+            + f'<div class="viewline">{esc(" · ".join(view_text))}<span class="vstamp">{esc(stamp)}</span></div>'
         )
     else:
+        dots = svg_dots(th, pp["items"], 170, 70, ink=cover_ink, fill=cover_ink, max_cell=13.0)
+        left = empty_html if empty else f'<div class="hdots">{dots}{dots_legend(th, pp, cover_ink)}</div>'
         head = (
-            f'<header class="mast"><div class="mstripes"></div><div class="mrow">'
-            f'<div class="mid">{crest_img}<div class="mtext"><h1>{esc(doc["title"])}</h1><div class="msub">{esc(sub)}</div></div></div>'
-            f'<div class="mlogo">{logo_img}</div></div>'
-            + (f'<div class="mhero mempty">{empty_html}</div></header>' if empty else
-               f'<div class="mhero"><div class="mnum"><b>{esc(hero_num)}</b><span>{esc(hero_cap)}</span>'
-               f'<div class="mrule"><div style="width:{max(0.0, min(1.0, share)) * 100:.1f}%"></div></div></div>'
-               f'<div class="mfacts">{fact_html}</div></div></header>') +
-            f'<div class="viewline"><span class="vlabel">Widok</span>{lens_html}<span class="vstamp">{esc(stamp)}</span></div>'
+            f'<header class="hero"><svg class="hslab" viewBox="0 0 100 100" preserveAspectRatio="none">'
+            f'<polygon points="63,0 100,0 100,100 54,100" fill="{pl["plane"]}"/></svg>'
+            f'<div class="hl"><div class="htitle">{crest_img}<h1>{esc(doc["title"])}</h1><div class="hsub">{esc(sub)}</div></div>{left}</div>'
+            f'<div class="hr"><div class="hlogo">{logo_img}</div>{"" if empty else big_pct}</div></header>'
+            f'<div class="viewline">{esc(" · ".join(view_text))}<span class="vstamp">{esc(stamp)}</span></div>'
         )
 
     # ── przelew ──
@@ -819,33 +953,21 @@ def render_html(
         for k, v in doc["payment"]:
             cls = " acct" if re.fullmatch(r"[\d ]{16,}", _s(v)) else ""
             cells.append(f'<div class="pc{cls}"><span>{esc(k)}</span><b>{esc(v)}</b></div>')
-        pay = f'<section class="pay"><div class="ptitle">Dane do przelewu</div>{"".join(cells)}</section>'
+        pay = f'<section class="pay">{"".join(cells)}</section>'
 
-    # ── wykresy ──
-    charts_html = ""
+    # ── środek: dane jako grafika ──
+    middle = ""
     if show_charts:
-        cards = [
-            f'<div class="card ringcard"><h3>Wypełnienie</h3><div class="ringbox">{svg_ring(th, share, 132, "wypełnienia")}</div>'
-            f'<div class="cap"><b>{filled}</b> z {participants} odpowiedziało'
-            f'{f"<br/><b>{participants - filled}</b> bez odpowiedzi" if participants - filled > 0 else ""}</div></div>'
-        ]
-        for f in doc["charts"].get("funnels") or []:
-            cards.append(f'<div class="card"><h3>{esc(f["title"])}</h3>{html_money(th, f)}</div>')
-        for d in doc["charts"].get("dists") or []:
-            cards.append(f'<div class="card"><h3>{esc(d["title"])}</h3>{html_bars(th, d["items"])}</div>')
-        for n in doc["charts"].get("numbers") or []:
-            avg = n.get("avg")
-            cards.append(
-                f'<div class="card numcard"><h3>{esc(n["title"])}</h3><div class="big">{esc(_num_text(n.get("sum")))}</div>'
-                f'<div class="cap">razem z {int(n.get("count") or 0)} odpowiedzi'
-                f'{f" · średnio {esc(_num_text(round(float(avg), 1)))}" if avg is not None else ""}</div></div>'
-            )
-        tl = svg_timeline(th, doc["timeline"], participants, *((1040, 200) if interactive else (560, 190)))
-        if tl:
-            cards.append(f'<div class="card tlcard"><h3>Narastanie odpowiedzi</h3>{tl}</div>')
-        title = "Odpowiedzi w liczbach"
-        charts_html = (f'<section class="charts{" newpage" if cover_page else ""}"><h2>{title}</h2>'
-                       f'<div class="cards">{"".join(cards)}</div></section>')
+        charts = doc["charts"]
+        money = "".join(money_track(th, f) for f in charts.get("funnels") or [])
+        tl = svg_timeline(th, doc["timeline"], participants, *((1040, 210) if interactive else (1000, 136)))
+        tl_html = f'<section class="tl"><div class="tlabel">Narastanie odpowiedzi</div>{tl}</section>' if tl else ""
+        middle = (f'<div class="middle{" newpage" if cover_page else ""}">{money}{pay if printing else ""}'
+                  f'{strips(th, charts.get("dists") or [], pp["title"])}<div class="duo">{numbers_line(charts.get("numbers") or [])}{tl_html}</div></div>')
+        if interactive:
+            middle += pay
+    else:
+        middle = pay
 
     # ── tabela ──
     name_col = header.index("Sędzia") if "Sędzia" in header else (header.index("Osoba") if "Osoba" in header else -1)
@@ -865,10 +987,10 @@ def render_html(
             rows_html = []
             if g.get("label") is not None:
                 aggs = "".join(f'<span class="agg">{esc(a)}</span>' for a in g.get("aggs") or [])
+                gc = tone_color(th, g.get("tone") or "neutral")
                 rows_html.append(
-                    f'<tr class="grp"><td colspan="{span_all}">'
-                    f'<span class="gdot" style="background:{tone_color(th, g.get("tone") or "neutral")}"></span>'
-                    f'<b class="glabel">{esc(g["label"])}</b><span class="gcount">{size}</span>'
+                    f'<tr class="grp"><td colspan="{span_all}" style="border-left-color:{gc}">'
+                    f'<b class="glabel">{esc(g["label"])}</b><span class="gcount" style="color:{gc}">{size}</span>'
                     f'{f"<span class=gaggs>{aggs}</span>" if aggs else ""}</td></tr>'
                 )
             for i in range(start, min(len(table), start + size)):
@@ -890,17 +1012,13 @@ def render_html(
                 rows_html.append("<tr>" + "".join(cells) + "</tr>")
             start += size
             bodies.append("<tbody>" + "".join(rows_html) + "</tbody>")
-        if not table:
-            bodies = [f'<tbody><tr><td class="empty" colspan="{span_all}"><b>Nikt nie pasuje do tego widoku</b>'
-                      "Plik jest pusty, ale gotowy do uzupełnienia - zmień filtr w aplikacji albo wygeneruj cały formularz.</td></tr></tbody>"]
         search = ""
-        if interactive and table:
+        if interactive:
             search = (f'<div class="search"><label class="sbox">{_SEARCH_ICON}<input id="q" type="search" '
                       f'placeholder="Szukaj w {len(table)} wierszach" autocomplete="off"/></label>'
                       f'<span class="found"><b id="count">{len(table)}</b> z {len(table)}</span></div>'
                       '<div class="nohit-msg">Nic nie pasuje do wpisanego tekstu.</div>')
-        list_title = f'<h2 class="ltitle">Lista <span>{len(table)}</span></h2>' if report or interactive else ""
-        table_html = (f'<section class="tablewrap{" newpage" if cover_page and not show_charts else ""}">{list_title}{search}'
+        table_html = (f'<section class="tablewrap">{search}'
                       f'<div class="tscroll"><table class="data"><thead><tr>{heads}</tr></thead>{"".join(bodies)}</table></div></section>')
         if checklist:
             table_html += (
@@ -910,223 +1028,228 @@ def render_html(
                 '<div class="sg"><div class="sline"></div><span>Data i podpis</span></div></section>'
             )
 
-    # ── stopka pliku (ekran) ──
     foot = ""
     if interactive:
-        note = "Strona publiczna, dane na żywo." if mode == "public" else "Plik z wyszukiwarką: stuknij nagłówek kolumny, żeby sortować."
-        foot = (f'<footer class="foot">{f"<img src={chr(34)}{logo}{chr(34)} alt=BAZA/>" if logo else ""}'
-                f'<span>BAZA · Formularze okręgu · {esc(note)}</span></footer>')
+        note = "Strona publiczna, dane na żywo." if mode == "public" else "Stuknij nagłówek kolumny, żeby sortować."
+        foot = f'<footer class="foot">{logo_img}<span>BAZA · Formularze okręgu · {esc(note)}</span></footer>'
 
-    css = _css(th, theme=theme, mode=mode, interactive=interactive, checklist=checklist, cover_page=cover_page, wide=wide,
-               page_w=page_w, page_h=page_h, title_font=title_font, tint=tint, zebra=zebra, cover_end=cover_end, ink_c=ink_c,
+    css = _css(th, pl, theme=theme, interactive=interactive, checklist=checklist, wide=wide, page_w=page_w, page_h=page_h,
+               title_font=title_font, tint=tint, zebra=zebra, cover_ink=cover_ink,
                foot_left=f"{doc['province']} · {doc['title'][:70]}")
     robots = '<meta name="robots" content="noindex,nofollow"/>' if mode == "public" else ""
-    body = head + (pay if not cover_page else "") + charts_html + (pay if cover_page else "") + table_html + foot
-    if cover_page and not show_charts and not show_table:
-        body = head
-    script = f"<script>{_JS}</script>" if interactive and show_table and table else ""
+    body = head + middle + table_html + foot
+    script = f"<script>{_JS}</script>" if interactive and show_table else ""
     return (f'<!DOCTYPE html><html lang="pl"><head><meta charset="utf-8"/>'
             f'<meta name="viewport" content="width=device-width, initial-scale=1"/>{robots}'
             f'<title>{esc(doc["title"])}</title><style>{css}</style></head><body class="{mode} {layout}">{body}{script}</body></html>')
 
 
-def _css(th: Mapping[str, Any], *, theme: str, mode: str, interactive: bool, checklist: bool, cover_page: bool, wide: bool,
-         page_w: int, page_h: int, title_font: str, tint: str, zebra: str, cover_end: str, ink_c: str, foot_left: str) -> str:
-    """Arkusz stylów. Druk: inline-block zamiast grid/flex w układzie (weasyprint), jednostki pt/mm."""
-    dark = bool(th.get("dark"))
+def _css(th: Mapping[str, Any], pl: Mapping[str, str], *, theme: str, interactive: bool, checklist: bool, wide: bool,
+         page_w: int, page_h: int, title_font: str, tint: str, zebra: str, cover_ink: str, foot_left: str) -> str:
+    """Arkusz stylów. Druk: pozycje bezwzględne na okładce, inline-block i float w środku (weasyprint: bez grid i flex)."""
     px = interactive
-    base = "14px" if px else ("8.4pt" if wide else "8.6pt")
+
+    def u(screen: str, paper: str) -> str:
+        return screen if px else paper
+
     heavy = "800"
-    track_c = _rgba(ink_c, 0.22)
+    track_c = _rgba(cover_ink, 0.22)
     page = "A4 landscape" if wide else "A4"
-    foot_txt = foot_left.replace('"', "'")
-    row_pad = ("9px 10px" if px else ("6.2pt 5pt" if checklist else "4.4pt 5pt"))
-    title_track = "-0.3pt" if th.get("serif") else "-0.9pt"
+    foot_txt = esc(foot_left.replace('"', "'"))
+    row_pad = u("9px 10px", "6.2pt 5pt" if checklist else "4.4pt 5pt")
+    title_track = "-0.3pt" if th.get("serif") else "-1pt"
+    land = wide
     return f"""
 @page {{ size: {page}; margin: 13mm 12mm 15mm 12mm; background: {th['bg']};
-  @bottom-left {{ content: "{esc(foot_txt)}"; font-size: 7pt; color: {th['soft']}; font-family: 'DejaVu Sans', sans-serif; }}
-  @bottom-right {{ content: "Strona " counter(page) " z " counter(pages); font-size: 7pt; color: {th['soft']}; font-family: 'DejaVu Sans', sans-serif; }} }}
+  @bottom-left {{ content: "{foot_txt}"; font-size: 7pt; color: {th['soft']}; font-family: 'DejaVu Sans', sans-serif; }}
+  @bottom-right {{ content: counter(page) " / " counter(pages); font-size: 7pt; color: {th['soft']}; font-family: 'DejaVu Sans', sans-serif; }} }}
 @page cover {{ margin: 0; background: {th['cover']}; @bottom-left {{ content: none; }} @bottom-right {{ content: none; }} }}
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 html {{ background: {th['bg']}; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
 body {{ font-family: 'DejaVu Sans', 'Segoe UI', system-ui, -apple-system, sans-serif; color: {th['ink']}; background: {th['bg']};
-  font-size: {base}; line-height: 1.38; {'max-width: 1120px; margin: 0 auto; padding: 20px 16px 48px;' if px else ''} }}
-h1, h2, h3 {{ font-family: {title_font}; }}
+  font-size: {u('14px', '8.4pt' if wide else '8.6pt')}; line-height: 1.38; {'max-width: 1160px; margin: 0 auto; padding: 20px 16px 48px;' if px else ''} }}
+h1 {{ font-family: {title_font}; font-weight: {heavy}; letter-spacing: {title_track}; line-height: 1.02; }}
 b {{ font-weight: {heavy}; }}
+.lpad {{ display: inline-block; background: #FFFFFF; border-radius: 50%; line-height: 0; }}
+.lpad img {{ display: block; width: auto; }}
+.legend {{ font-size: 0; }}
+.lg {{ display: inline-block; margin: 0 {u('18px', '5mm')} {u('6px', '1.4mm')} 0; font-size: {u('14px', '8.6pt')}; white-space: nowrap; }}
+.lg i {{ display: inline-block; width: {u('12px', '2.8mm')}; height: {u('12px', '2.8mm')}; border-radius: 50%; margin-right: {u('7px', '1.6mm')}; vertical-align: -1px; }}
+.lg i.ho {{ border: 1.4px solid {th['soft']}; background: transparent; }}
+.lg b {{ margin-right: 2px; }}
+.lg em {{ font-style: normal; color: {th['soft']}; margin-left: 4px; }}
 
-/* ── okładka druku (raport) ── */
+/* ── okładka druku: dwie płaszczyzny, skos, kropki osób, odsetek wielką cyfrą ── */
 .cover {{ page: cover; position: relative; overflow: hidden; width: {page_w}mm; height: {page_h - 0.6}mm; page-break-after: always;
-  color: {th['cover_ink']}; background: {th['cover']}; background: linear-gradient(155deg, {th['cover']} 0%, {th['cover']} 45%, {cover_end} 100%); }}
-.cstripes {{ position: absolute; right: -46mm; top: -52mm; width: 150mm; height: 150mm; transform: rotate(28deg);
-  background: repeating-linear-gradient(90deg, {th['band2']} 0, {th['band2']} 7mm, transparent 7mm, transparent 15mm); opacity: {0.2 if theme == 'province' else 0.16}; }}
-.ctop {{ position: absolute; top: {16 if wide else 20}mm; left: 20mm; right: 20mm; height: 34mm; }}
-.ctop .crest {{ height: {30 if wide else 34}mm; width: auto; float: left; }}
-.ctop .lpad {{ float: right; padding: 2.2mm; }}
-.ctop .logo {{ height: {22 if wide else 26}mm; width: auto; display: block; }}
-.lpad {{ display: inline-block; background: #FFFFFF; border-radius: 50%; line-height: 0; border: 0.8pt solid rgba(0,0,0,0.08); }}
+  color: {cover_ink}; background: {th['cover']}; }}
+.cover .slab {{ position: absolute; left: 0; top: 0; }}
+.clogo {{ position: absolute; {'right: 16mm; top: 14mm' if land else 'right: 15mm; top: 13mm'}; }}
+.clogo .lpad {{ padding: {'3.5mm' if land else '3mm'}; }}
+.clogo .logo {{ height: {'58mm' if land else '50mm'}; }}
+.ctitle {{ position: absolute; left: 16mm; {'top: 16mm; width: 128mm' if land else 'top: 18mm; width: 112mm'}; {'' if land else 'color: ' + pl['ink'] + ';'} }}
+.ctitle .crest {{ height: {'19mm' if land else '17mm'}; width: auto; display: block; margin-bottom: 6mm; }}
+.ctitle h1 {{ font-size: {'34pt' if land else '32pt'}; }}
+.csub {{ margin-top: 3.5mm; font-size: 10.5pt; color: {th['cover_soft'] if land else pl['soft']}; }}
+.cbody {{ position: absolute; left: 16mm; {'top: 90mm; width: 130mm' if land else 'top: 192mm; right: 16mm'}; }}
+.cdots svg {{ display: block; }}
+.cdots .legend {{ margin-top: 4mm; }}
+.cover .lg {{ color: {cover_ink}; }}
+.cover .lg i.ho {{ border-color: {track_c}; }}
+.cpct {{ position: absolute; {'right: 14mm; bottom: 22mm; width: 150mm; text-align: right; color: ' + pl['num'] if land else 'left: 13mm; top: 132mm; color: ' + cover_ink}; }}
+.pct {{ line-height: 0.8; white-space: nowrap; }}
+.pct b {{ font-size: {u('150px', '150pt' if land else '120pt')}; letter-spacing: {u('-8px', '-7pt')}; }}
+.pct i {{ font-style: normal; font-weight: {heavy}; font-size: {u('64px', '58pt' if land else '48pt')}; margin-left: {u('4px', '1.5mm')}; }}
+.pcap {{ margin-top: {u('10px', '3mm')}; font-size: {u('16px', '12pt')}; font-weight: 700; opacity: 0.86; }}
+.cfoot {{ position: absolute; left: 16mm; bottom: 11mm; {'width: 130mm' if land else 'right: 16mm'}; font-size: 8pt; line-height: 1.5; color: {th['cover_soft']}; }}
+
+/* ── pas listy do odhaczania ── */
+.band {{ position: relative; height: 44mm; overflow: hidden; background: {th['cover']}; color: {cover_ink}; border-radius: 3mm; }}
+.band .slab {{ position: absolute; left: 0; top: 0; }}
+.btitle {{ position: absolute; left: 7mm; top: 7mm; width: {'150mm' if wide else '96mm'}; }}
+.btitle .crest {{ float: left; height: 15mm; width: auto; margin-right: 4.5mm; }}
+.bt {{ overflow: hidden; }}
+.bt h1 {{ font-size: {'21pt' if wide else '17pt'}; }}
+.bsub {{ margin-top: 1.6mm; font-size: 8.6pt; color: {th['cover_soft']}; }}
+.bpct {{ position: absolute; right: 47mm; bottom: 6mm; text-align: right; color: {pl['num']}; line-height: 0.9; }}
+.bpct b {{ font-size: 34pt; letter-spacing: -1.5pt; }}
+.bpct i {{ font-style: normal; font-weight: {heavy}; font-size: 15pt; }}
+.bpct span {{ display: block; font-size: 7.6pt; color: {pl['soft']}; margin-top: 1.2mm; }}
+.blogo {{ position: absolute; right: 6mm; top: 5mm; }}
+.blogo .lpad {{ padding: 1.6mm; }}
+.blogo .logo {{ height: 30.5mm; }}
+.bempty {{ margin-top: 6mm; color: {th['ink']}; }}
+.bempty .estate svg {{ color: {th['accent']}; }}
+.bempty .etext span {{ color: {th['soft']}; }}
+
+/* ── scena pliku i strony publicznej ── */
+.hero {{ position: relative; overflow: hidden; background: {th['cover']}; color: {cover_ink}; border-radius: 28px; padding: 34px 34px 30px; font-size: 0; }}
+.hslab {{ position: absolute; left: 0; top: 0; width: 100%; height: 100%; }}
+.hl {{ position: relative; display: inline-block; vertical-align: top; width: 56%; font-size: 14px; }}
+.hr {{ position: relative; display: inline-block; vertical-align: top; width: 44%; text-align: right; color: {pl['num']}; font-size: 14px; }}
+.htitle .crest {{ height: 58px; width: auto; display: block; margin-bottom: 18px; }}
+.htitle h1 {{ font-size: 40px; }}
+.hsub {{ margin-top: 10px; font-size: 15px; color: {th['cover_soft']}; }}
+.hdots {{ margin-top: 30px; }}
+.hdots svg {{ display: block; width: 100%; height: auto; max-width: 620px; }}
+.hdots .legend {{ margin-top: 16px; }}
+.hero .lg {{ color: {cover_ink}; }}
+.hero .lg i.ho {{ border-color: {track_c}; }}
+.hlogo .lpad {{ padding: 10px; }}
+.hlogo .logo {{ height: 150px; }}
+.hr .pct {{ margin-top: 60px; }}
+.hr .pcap {{ color: {pl['ink']}; }}
+.hero .estate {{ margin-top: 34px; }}
+.viewline {{ margin: {u('14px 4px 0', '3mm 0.5mm 0')}; overflow: hidden; font-size: {u('13px', '7.8pt')}; color: {th['soft']}; }}
+.vstamp {{ float: right; }}
+
+/* ── pusty stan ── */
 .estate {{ overflow: hidden; }}
-.estate svg {{ float: left; width: {'92px' if px else ('46mm' if cover_page else '22mm')}; height: auto; margin-right: {'22px' if px else ('8mm' if cover_page else '5mm')}; color: {th['cover_ink']}; }}
-.etext {{ overflow: hidden; padding-top: {'10px' if px else ('8mm' if cover_page else '2mm')}; }}
-.etext b {{ display: block; font-family: {title_font}; font-size: {'26px' if px else ('24pt' if cover_page else '15pt')}; line-height: 1.12; letter-spacing: -0.4px; }}
-.etext span {{ display: block; margin-top: {'8px' if px else '2mm'}; max-width: {'560px' if px else '150mm'}; color: {th['cover_soft']}; font-size: {'15px' if px else ('11pt' if cover_page else '9pt')}; line-height: 1.45; }}
-.chero.cempty {{ right: 20mm; width: auto; }}
-.ctitle {{ position: absolute; left: 20mm; right: {110 if wide else 20}mm; top: {58 if wide else 74}mm; }}
-.ctitle h1 {{ font-size: {32 if wide else 36}pt; font-weight: {heavy}; line-height: 1.04; letter-spacing: {title_track}; }}
-.csub {{ margin-top: 4mm; font-size: 11pt; color: {th['cover_soft']}; }}
-.chero {{ position: absolute; left: 20mm; {'right: 20mm; top: 118mm' if not wide else 'width: 120mm; top: 104mm'}; }}
-.cnum {{ font-size: {96 if wide else 120}pt; font-weight: {heavy}; line-height: 0.9; letter-spacing: -5pt; }}
-.ccap {{ margin-top: 3mm; font-size: 12pt; font-weight: 700; color: {th['cover_soft']}; }}
-.crule {{ margin-top: 5mm; height: 2.2mm; border-radius: 1.1mm; background: {track_c}; {'width: 120mm;' if not wide else ''} overflow: hidden; }}
-.crule div {{ height: 2.2mm; border-radius: 1.1mm; background: {th['cover_ink']}; }}
-.cfacts {{ position: absolute; {'left: 20mm; right: 20mm; bottom: 42mm' if not wide else 'left: 158mm; right: 20mm; top: 104mm'}; font-size: 0; }}
-.cfacts .f {{ display: inline-block; vertical-align: top; {'width: 25%; padding: 0 3mm 0 4mm; border-left: 0.8pt solid ' + track_c + ';' if not wide else 'width: 50%; padding: 0 3mm 7mm 4mm; border-left: 0.8pt solid ' + track_c + ';'} }}
-.cfacts .f b {{ display: block; font-size: 21pt; font-weight: {heavy}; letter-spacing: -0.8pt; line-height: 1.1; }}
-.cfacts .f span {{ display: block; font-size: 8pt; color: {th['cover_soft']}; margin-top: 1mm; }}
-.cfoot {{ position: absolute; left: 20mm; right: 20mm; bottom: 16mm; padding-top: 4mm; border-top: 0.8pt solid {track_c};
-  font-size: 8.4pt; color: {th['cover_soft']}; }}
-.cfoot .cstamp {{ float: right; }}
+.estate svg {{ float: left; width: {u('104px', '40mm')}; height: auto; margin-right: {u('24px', '7mm')}; color: currentColor; }}
+.etext {{ overflow: hidden; padding-top: {u('12px', '5mm')}; }}
+.etext b {{ display: block; font-family: {title_font}; font-size: {u('28px', '22pt')}; line-height: 1.12; letter-spacing: -0.4px; }}
+.etext span {{ display: block; margin-top: {u('8px', '2.4mm')}; max-width: {u('520px', '120mm')}; opacity: 0.82; font-size: {u('15px', '10.5pt')}; line-height: 1.45; }}
 
-/* ── nagłówek (lista do odhaczania i plik na ekranie) ── */
-.mast {{ position: relative; overflow: hidden; color: {th['cover_ink']}; background: {th['cover']};
-  background: linear-gradient(150deg, {th['cover']} 0%, {th['cover']} 50%, {cover_end} 100%);
-  border-radius: {'22px' if px else '4mm'}; padding: {'26px 28px 24px' if px else '6mm 7mm 5.5mm'}; }}
-.mstripes {{ position: absolute; right: {'-120px' if px else '-30mm'}; top: {'-170px' if px else '-50mm'}; width: {'420px' if px else '110mm'}; height: {'420px' if px else '110mm'};
-  transform: rotate(28deg); background: repeating-linear-gradient(90deg, {th['band2']} 0, {th['band2']} {'22px' if px else '5mm'}, transparent {'22px' if px else '5mm'}, transparent {'46px' if px else '11mm'});
-  opacity: {(0.12 if px else 0.2) if theme == 'province' else (0.09 if px else 0.15)}; }}
-.mrow {{ position: relative; overflow: hidden; }}
-.mid {{ float: left; width: 78%; }}
-.mid .crest {{ float: left; height: {'64px' if px else '17mm'}; width: auto; margin-right: {'16px' if px else '4.5mm'}; }}
-.mtext {{ overflow: hidden; }}
-.mtext h1 {{ font-size: {'34px' if px else '20pt'}; font-weight: {heavy}; line-height: 1.06; letter-spacing: {title_track}; }}
-.msub {{ margin-top: {'6px' if px else '1.5mm'}; color: {th['cover_soft']}; font-size: {'15px' if px else '9pt'}; }}
-.mlogo {{ float: right; text-align: right; }}
-.mlogo .lpad {{ padding: {'6px' if px else '1.5mm'}; }}
-.mlogo .logo {{ height: {'58px' if px else '15mm'}; width: auto; display: block; }}
-.mhero {{ position: relative; margin-top: {'24px' if px else '4.5mm'}; overflow: hidden; }}
-.mnum {{ float: left; width: {'34%' if px else '30%'}; }}
-.mnum b {{ display: block; font-size: {'64px' if px else '30pt'}; line-height: 0.95; letter-spacing: {'-3px' if px else '-1.4pt'}; }}
-.mnum span {{ display: block; margin-top: {'6px' if px else '1.2mm'}; color: {th['cover_soft']}; font-size: {'14px' if px else '8.4pt'}; font-weight: 700; }}
-.mrule {{ margin-top: {'10px' if px else '2mm'}; height: {'6px' if px else '1.6mm'}; border-radius: 4px; background: {track_c}; width: 88%; overflow: hidden; }}
-.mrule div {{ height: 100%; border-radius: 4px; background: {th['cover_ink']}; }}
-.mfacts {{ float: left; width: {'66%' if px else '70%'}; font-size: 0; padding-top: {'6px' if px else '1mm'}; }}
-.mfacts .f {{ display: inline-block; vertical-align: top; width: 25%; padding: 0 {'10px' if px else '2.5mm'}; border-left: 1px solid {track_c}; }}
-.mfacts .f b {{ display: block; font-size: {'26px' if px else '15pt'}; line-height: 1.1; letter-spacing: -0.6px; }}
-.mfacts .f span {{ display: block; font-size: {'12.5px' if px else '7.4pt'}; color: {th['cover_soft']}; margin-top: 2px; }}
-.viewline {{ margin: {'14px 2px 4px' if px else '3mm 0.5mm 1mm'}; overflow: hidden; font-size: {'13px' if px else '7.8pt'}; color: {th['soft']}; }}
-.vlabel {{ float: left; font-weight: 700; color: {th['ink']}; margin: {'4px 8px 0 0' if px else '0.6mm 2mm 0 0'}; }}
-.viewline .lenses {{ float: left; }}
-.vstamp {{ float: right; margin-top: {'4px' if px else '0.6mm'}; }}
-.lens {{ display: inline-block; margin: 0 4px 4px 0; font-size: 0.95em; border: 1px solid {th['line']}; background: {tint}; color: {th['ink']};
-  border-radius: 99px; padding: {'3px 11px' if px else '0.5mm 2.6mm'}; }}
-
-/* ── dane do przelewu ── */
-.pay {{ margin: {'14px 0 4px' if px else '3.5mm 0 1mm'}; border: 1px dashed {th['line']}; border-radius: {'14px' if px else '3mm'};
-  padding: {'12px 16px' if px else '2.6mm 4mm'}; background: {th['card']}; font-size: 0; page-break-inside: avoid; }}
-.ptitle {{ font-size: {'13px' if px else '8pt'}; font-weight: {heavy}; color: {th['accent']}; margin-bottom: {'6px' if px else '1.2mm'}; }}
-.pc {{ display: inline-block; vertical-align: top; margin-right: {'26px' if px else '7mm'}; margin-bottom: 2px; }}
-.pc span {{ display: block; font-size: {'11.5px' if px else '6.8pt'}; color: {th['soft']}; }}
-.pc b {{ display: block; font-size: {'14px' if px else '8.6pt'}; }}
-.pc.acct b {{ font-family: 'DejaVu Sans Mono', Consolas, monospace; letter-spacing: 0.4px; }}
-
-/* ── wykresy ── */
+/* ── środek ── */
 .newpage {{ page-break-before: always; }}
-h2 {{ font-size: {'22px' if px else '15pt'}; font-weight: {heavy}; letter-spacing: {'-0.5px' if px else '-0.4pt'}; margin: {'26px 0 12px' if px else '5mm 0 3mm'}; }}
-.charts.newpage h2 {{ margin-top: 0; }}
-.cards {{ font-size: 0; orphans: 1; widows: 1; }}  /* rząd kart to linia - domyślne widows: 2 spychało dwa rzędy naraz */
-.card {{ display: inline-block; vertical-align: top; width: {'calc(50% - 7px)' if px else '48.8%'}; margin: 0 {'14px 14px 0' if px else '2.4% 3.2mm 0'};
-  background: {th['card']}; border: 1px solid {th['line']}; border-radius: {'16px' if px else '3.2mm'}; padding: {'16px 18px' if px else '3.6mm 4.2mm'};
-  font-size: {base}; page-break-inside: avoid; }}
-.card:nth-child(2n) {{ margin-right: 0; }}
-.card.full {{ display: block; width: 100%; margin-right: 0; }}
-{'.card.tlcard, body.' + mode + ' .card.tlcard { display: block; width: 100%; margin-right: 0; }' if px else ''}
-.card h3 {{ font-size: {'16px' if px else '10.5pt'}; font-weight: {heavy}; margin-bottom: {'12px' if px else '2.6mm'}; letter-spacing: -0.2px; }}
-.ringcard .ringbox {{ float: left; margin-right: {'16px' if px else '4mm'}; }}
-.ringcard .cap {{ padding-top: {'34px' if px else '8mm'}; font-size: {'14px' if px else '9pt'}; color: {th['soft']}; line-height: 1.6; }}
-.ringcard .cap b {{ color: {th['ink']}; font-size: 1.25em; }}
-.ringcard:after {{ content: ""; display: block; clear: both; }}
-.numcard .big {{ font-size: {'40px' if px else '26pt'}; font-weight: {heavy}; color: {th['accent']}; letter-spacing: -1px; line-height: 1.05; }}
-.cap {{ color: {th['soft']}; font-size: 0.92em; margin-top: 4px; }}
-.bar {{ margin-bottom: {'10px' if px else '2.2mm'}; page-break-inside: avoid; }}
-.bh {{ overflow: hidden; margin-bottom: {'4px' if px else '0.9mm'}; }}
-.bl {{ display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }}
-.bv {{ float: right; margin-left: 8px; color: {th['soft']}; font-variant-numeric: tabular-nums; }}
-.bv b {{ color: {th['ink']}; margin-right: 3px; }}
-.bt {{ height: {'8px' if px else '2.1mm'}; border-radius: 99px; background: {th['track']}; overflow: hidden; }}
-.bf {{ height: 100%; border-radius: 99px; }}
-.bar.muted .bl {{ color: {th['soft']}; font-weight: 400; }}
-.funnel .mhero b {{ display: block; font-size: {'34px' if px else '22pt'}; letter-spacing: -1px; line-height: 1.05; color: {th['pass']}; }}
-.funnel .mhero span {{ color: {th['soft']}; }}
-.funnel .mt {{ margin: {'12px 0 10px' if px else '2.6mm 0 2.4mm'}; height: {'12px' if px else '3mm'}; border-radius: 99px; background: {th['track']}; overflow: hidden; font-size: 0; }}
-.funnel .ms {{ float: left; height: 100%; }}
-.funnel .ml {{ overflow: hidden; padding: {'3px 0' if px else '0.7mm 0'}; border-top: 1px solid {th['line']}; }}
-.funnel .ml i {{ display: inline-block; width: {'10px' if px else '2.4mm'}; height: {'10px' if px else '2.4mm'}; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }}
-.funnel .mv {{ float: right; font-weight: 700; font-variant-numeric: tabular-nums; }}
-svg {{ max-width: 100%; height: auto; display: block; }}
-svg.timeline {{ width: 100%; }}
+.middle {{ {'margin-top: 40px;' if px else 'margin-bottom: 8mm;'} }}
+.money {{ margin-bottom: {u('40px', '11mm')}; page-break-inside: avoid; }}
+.mline {{ line-height: 1; }}
+.mname {{ float: right; font-weight: 700; color: {th['soft']}; font-size: {u('15px', '10pt')}; margin-top: {u('34px', '9mm')}; }}
+.mbig {{ font-family: {title_font}; font-weight: {heavy}; font-size: {u('84px', '62pt')}; letter-spacing: {u('-4px', '-2.6pt')}; color: {th['pass']}; }}
+.mof {{ font-weight: {heavy}; font-size: {u('34px', '24pt')}; letter-spacing: -1px; color: {th['soft']}; margin-left: {u('16px', '4mm')}; }}
+.mtrack {{ margin: {u('18px 0 14px', '5mm 0 4mm')}; height: {u('54px', '14mm')}; border-radius: 99px; background: {th['track']}; font-size: 0; }}
+.seg {{ float: left; height: 100%; text-align: center; font-weight: {heavy}; font-size: {u('20px', '14pt')}; }}
+.seg span {{ display: block; line-height: {u('54px', '14mm')}; }}
+.money .seg span {{ font-size: {u('20px', '14pt')}; }}
+.seg.rest {{ color: {th['soft']}; }}
+.strips {{ margin-bottom: {u('30px', '8mm')}; }}
+.strip {{ font-size: 0; padding: {u('18px 0 10px', '4.6mm 0 2.4mm')}; border-top: 1px solid {th['line']}; page-break-inside: avoid; }}
+.sq {{ display: inline-block; vertical-align: top; width: 24%; padding-right: {u('16px', '4mm')}; font-family: {title_font}; font-weight: {heavy};
+  font-size: {u('19px', '13pt')}; line-height: 1.15; letter-spacing: -0.3px; }}
+.sb {{ display: inline-block; vertical-align: top; width: 76%; }}
+.sbar {{ height: {u('34px', '9mm')}; border-radius: 99px; background: {th['track']}; margin-bottom: {u('10px', '2.6mm')}; }}
+.sbar .seg {{ border-right: {u('3px', '0.8mm')} solid {th['bg']}; font-size: {u('15px', '10pt')}; }}
+.sbar .seg span {{ line-height: {u('34px', '9mm')}; }}
+.sbar .seg:last-child {{ border-right: 0; }}
+.nums {{ font-size: 0; padding: {u('20px 0', '4mm 0 5mm')}; border-top: 1px solid {th['line']}; page-break-inside: avoid; }}
+.nu {{ display: inline-block; vertical-align: bottom; margin-right: {u('44px', '13mm')}; }}
+.nu b {{ font-family: {title_font}; font-size: {u('72px', '50pt')}; line-height: 0.9; letter-spacing: -2px; color: {th['accent']}; vertical-align: bottom; }}
+.nu span {{ display: inline-block; vertical-align: bottom; margin-left: {u('10px', '3mm')}; font-size: {u('14px', '9pt')}; color: {th['soft']}; line-height: 1.35; }}
+.tl {{ padding-top: {u('18px', '4mm')}; border-top: 1px solid {th['line']}; page-break-inside: avoid; }}
+{'' if px else '.duo { font-size: 0; border-top: 1px solid ' + th['line'] + '; page-break-inside: avoid; } .duo .nums, .duo .tl { display: inline-block; vertical-align: top; border-top: 0; font-size: 8.6pt; } .duo .nums { width: 30%; padding-right: 5mm; } .duo .nums .nu { display: block; margin: 0 0 4mm; } .duo .tl { width: 70%; } .duo .nums + .tl { border-left: 1px solid ' + th['line'] + '; padding-left: 5mm; }'}
+.tlabel {{ font-family: {title_font}; font-weight: {heavy}; font-size: {u('19px', '13pt')}; margin-bottom: {u('8px', '2mm')}; }}
+svg {{ max-width: 100%; }}
+svg.timeline {{ width: 100%; height: auto; display: block; }}
+
+/* ── przelew ── */
+.pay {{ margin: {u('30px 0 6px', '0 0 8mm')}; border-left: {u('6px', '1.6mm')} solid {th['accent']}; padding: {u('6px 0 6px 18px', '1mm 0 1mm 5mm')}; font-size: 0; page-break-inside: avoid; }}
+.pc {{ display: inline-block; vertical-align: top; margin-right: {u('30px', '9mm')}; margin-bottom: 4px; }}
+.pc span {{ display: block; font-size: {u('12px', '7pt')}; color: {th['soft']}; }}
+.pc b {{ display: block; font-size: {u('16px', '10pt')}; }}
+.pc.acct b {{ font-family: 'DejaVu Sans Mono', Consolas, monospace; letter-spacing: 0.4px; }}
+.band ~ .pay {{ margin-top: 4mm; margin-bottom: 0; }}
 
 /* ── tabela ── */
-.ltitle span {{ font-size: 0.6em; color: {th['soft']}; font-weight: 700; margin-left: 4px; letter-spacing: 0; }}
-.tscroll {{ {'overflow-x: auto; border: 1px solid ' + th['line'] + '; border-radius: 16px; background: ' + th['card'] + ';' if px else ''} }}
-table.data {{ width: 100%; border-collapse: collapse; background: {th['card']}; {'margin-top: 3mm;' if checklist else ''} }}
+.tscroll {{ {'overflow-x: auto; border: 1px solid ' + th['line'] + '; border-radius: 18px; background: ' + th['card'] + ';' if px else ''} }}
+table.data {{ width: 100%; border-collapse: collapse; background: {th['card']}; {'margin-top: 4mm;' if checklist else ''} }}
 thead {{ display: table-header-group; }}
-th {{ text-align: left; font-size: 0.86em; font-weight: {heavy}; color: {th['ink']}; padding: {'11px 10px' if px else '3.2pt 5pt 3.6pt'};
-  border-bottom: {'2px' if px else '1.3pt'} solid {th['ink']}; white-space: nowrap;
+th {{ text-align: left; font-size: 0.86em; font-weight: {heavy}; color: {th['ink']}; padding: {u('12px 10px', '3.2pt 5pt 3.6pt')};
+  border-bottom: {u('2px', '1.3pt')} solid {th['ink']}; white-space: nowrap;
   {'cursor: pointer; user-select: none; position: sticky; top: 0; z-index: 2; background: ' + th['card'] + ';' if px else ''} }}
 th[data-dir=asc]::after {{ content: " ▲"; color: {th['accent']}; }} th[data-dir=desc]::after {{ content: " ▼"; color: {th['accent']}; }}
-td {{ padding: {row_pad}; border-bottom: {'1px' if px else '0.5pt'} solid {th['line']}; vertical-align: middle; }}
+td {{ padding: {row_pad}; border-bottom: {u('1px', '0.5pt')} solid {th['line']}; vertical-align: middle; }}
 tbody tr:nth-child(even) td {{ background: {zebra}; }}
 tr {{ page-break-inside: avoid; }}
-td.lp, th.lp {{ width: {'34px' if px else '7mm'}; color: {th['soft']}; font-variant-numeric: tabular-nums; }}
+td.lp, th.lp {{ width: {u('34px', '7mm')}; color: {th['soft']}; }}
 td.num, th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
-td.when {{ color: {th['soft']}; white-space: nowrap; font-size: 0.92em; font-variant-numeric: tabular-nums; }}
+td.when {{ color: {th['soft']}; white-space: nowrap; font-size: 0.92em; }}
 td.name {{ font-weight: 700; white-space: nowrap; }}
-td.txt {{ max-width: {'280px' if px else '60mm'}; }}
-.pill {{ display: inline-block; border-radius: 99px; padding: {'2px 10px 2px 8px' if px else '0.3mm 2.4mm 0.3mm 1.8mm'}; font-weight: 700; font-size: 0.9em; white-space: nowrap; }}
-.pill i {{ display: inline-block; width: {'7px' if px else '1.5mm'}; height: {'7px' if px else '1.5mm'}; border-radius: 50%; margin-right: {'6px' if px else '1.3mm'}; vertical-align: 1px; }}
-tr.grp td {{ background: {tint} !important; padding: {'12px 10px 10px' if px else '4.6pt 5pt 4pt'}; border-bottom: 1px solid {th['line']}; border-top: {'10px' if px else '2.4mm'} solid {th['card']}; }}
-tbody:first-of-type tr.grp td {{ border-top: 0; }}
+td.txt {{ max-width: {u('280px', '60mm')}; }}
+.pill {{ display: inline-block; border-radius: 99px; padding: {u('2px 10px 2px 8px', '0.3mm 2.4mm 0.3mm 1.8mm')}; font-weight: 700; font-size: 0.9em; white-space: nowrap; }}
+.pill i {{ display: inline-block; width: {u('7px', '1.5mm')}; height: {u('7px', '1.5mm')}; border-radius: 50%; margin-right: {u('6px', '1.3mm')}; vertical-align: 1px; }}
+tr.grp td {{ background: {th['card']} !important; padding: {u('22px 12px 8px', '7pt 5pt 3pt')}; border-bottom: {u('2px', '1pt')} solid {th['line']};
+  border-left: {u('6px', '1.6mm')} solid {th['accent']}; }}
 tr.grp {{ page-break-after: avoid; }}
-.gdot {{ display: inline-block; width: {'11px' if px else '2.6mm'}; height: {'11px' if px else '2.6mm'}; border-radius: 50%; margin-right: {'8px' if px else '2mm'}; vertical-align: -1px; }}
-.glabel {{ font-size: 1.12em; }}
-.gcount {{ display: inline-block; margin-left: 7px; padding: 0 7px; border-radius: 99px; background: {th['card']}; color: {th['accent']}; font-weight: {heavy}; font-size: 0.9em; }}
-.gaggs {{ float: right; color: {th['soft']}; font-size: 0.9em; }}
+.glabel {{ font-family: {title_font}; font-size: {u('22px', '14pt')}; letter-spacing: -0.4px; }}
+.gcount {{ font-weight: {heavy}; font-size: {u('22px', '14pt')}; margin-left: {u('10px', '2.4mm')}; }}
+.gaggs {{ float: right; color: {th['soft']}; font-size: 0.92em; margin-top: {u('8px', '2.4mm')}; }}
 .agg {{ margin-left: 12px; }}
-th.tick, td.tick {{ width: {'34px' if px else '8mm'}; text-align: center; }}
-.box {{ display: inline-block; width: 4.2mm; height: 4.2mm; border: 1.1pt solid {th['ink']}; border-radius: 1mm; background: {th['card']}; vertical-align: middle; }}
-td.empty {{ text-align: center; color: {th['soft']}; padding: {'48px 20px' if px else '14mm 6mm'}; background: {th['card']} !important; }}
-td.empty b {{ display: block; color: {th['ink']}; font-size: 1.3em; margin-bottom: 6px; }}
+th.tick, td.tick {{ width: {u('34px', '8mm')}; text-align: center; }}
+.box {{ display: inline-block; width: 4.4mm; height: 4.4mm; border: 1.2pt solid {th['ink']}; border-radius: 1mm; background: {th['card']}; vertical-align: middle; }}
 .sign {{ margin-top: 10mm; font-size: 0; page-break-inside: avoid; }}
 .sg {{ display: inline-block; vertical-align: bottom; width: 30%; margin-right: 5%; font-size: 8pt; color: {th['soft']}; }}
 .sg:last-child {{ margin-right: 0; }}
 .sline {{ height: 9mm; border-bottom: 0.9pt solid {th['ink']}; margin-bottom: 1.4mm; color: {th['ink']}; font-size: 10pt; padding-top: 3mm; }}
 .sline b {{ color: {th['line']}; letter-spacing: 1px; }}
 
-/* ── ekran: plik z wyszukiwarką i strona publiczna ── */
-.search {{ position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px; padding: 10px 0 12px; background: {th['bg']}; }}
+/* ── ekran ── */
+.search {{ position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px; padding: 30px 0 12px; background: {th['bg']}; }}
 .sbox {{ flex: 1; position: relative; display: block; }}
-.sicon {{ position: absolute; left: 14px; top: 50%; margin-top: -9px; color: {th['soft']}; }}
-.search input {{ width: 100%; font-size: 16px; padding: 13px 16px 13px 44px; border-radius: 99px; border: 1.5px solid {th['line']};
+.sicon {{ position: absolute; left: 16px; top: 50%; margin-top: -9px; color: {th['soft']}; }}
+.search input {{ width: 100%; font-size: 16px; padding: 14px 16px 14px 46px; border-radius: 99px; border: 1.5px solid {th['line']};
   background: {th['card']}; color: {th['ink']}; outline: none; font-family: inherit; }}
 .search input:focus {{ border-color: {th['accent']}; }}
 .found {{ font-size: 13px; color: {th['soft']}; white-space: nowrap; }}
-.found b {{ color: {th['ink']}; font-size: 16px; }}
+.found b {{ color: {th['ink']}; font-size: 18px; }}
 .nohit-msg {{ display: none; text-align: center; color: {th['soft']}; padding: 30px 0; }}
 body.nohit .nohit-msg {{ display: block; }}
 body.nohit .tscroll {{ display: none; }}
-.foot {{ margin-top: 36px; padding-top: 16px; border-top: 1px solid {th['line']}; font-size: 12.5px; color: {th['soft']}; text-align: center; }}
-.foot img {{ height: 28px; width: auto; display: block; margin: 0 auto 8px; opacity: {0.9 if dark else 1}; }}
-@media (min-width: 900px) {{ body.{mode} .card {{ width: calc(33.33% - 10px); }} body.{mode} .card:nth-child(2n) {{ margin-right: 14px; }}
-  body.{mode} .card:nth-child(3n) {{ margin-right: 0; }} }}
-@media (max-width: 720px) {{
+.foot {{ margin-top: 44px; padding-top: 22px; border-top: 1px solid {th['line']}; font-size: 12.5px; color: {th['soft']}; text-align: center; }}
+.foot .lpad {{ display: block; width: 76px; margin: 0 auto 10px; padding: 6px; border: 1px solid {th['line']}; }}
+.foot .lpad img {{ height: 64px; }}
+@media (max-width: 760px) {{
   body {{ padding: 12px 10px 40px; }}
-  .mast {{ padding: 20px 18px 18px; border-radius: 18px; }}
-  .mid {{ width: 100%; }} .mlogo {{ position: absolute; right: 0; top: 0; }} .mlogo .logo {{ height: 42px; }} .estate svg {{ width: 70px; margin-right: 14px; }} .etext b {{ font-size: 21px; }}
-  .mid .crest {{ height: 44px; margin-right: 12px; }}
-  .mtext h1 {{ font-size: 25px; padding-right: 30px; }} .msub {{ font-size: 13.5px; }}
-  .mnum, .mfacts {{ float: none; width: 100%; }} .mnum b {{ font-size: 54px; }}
-  .mfacts {{ margin-top: 16px; }} .mfacts .f {{ width: 50%; margin-bottom: 12px; }}
-  .vstamp {{ float: none; display: block; clear: both; }}
-  .card, body.{mode} .card {{ width: 100%; margin-right: 0; }}
+  .hero {{ padding: 22px 20px; border-radius: 22px; }}
+  .hslab {{ display: none; }}
+  .hl, .hr {{ display: block; width: 100%; }}
+  .hr {{ margin: 22px -20px -22px; width: auto; padding: 22px 20px 24px; background: {pl['plane']}; text-align: left; }}
+  .hlogo {{ float: right; }} .hlogo .logo {{ height: 92px; }} .hlogo .lpad {{ padding: 6px; }}
+  .hr .pct {{ margin-top: 6px; }} .pct b {{ font-size: 104px; }} .pct i {{ font-size: 44px; }}
+  .htitle h1 {{ font-size: 28px; }} .htitle .crest {{ height: 44px; }}
+  .mbig {{ font-size: 54px; }} .mof {{ font-size: 24px; }} .mname {{ float: none; display: block; margin: 0 0 8px; }}
+  .sq, .sb {{ display: block; width: 100%; }} .sq {{ margin-bottom: 10px; }}
+  .nu b {{ font-size: 54px; }}
+  .vstamp {{ float: none; display: block; }}
   td.name, th.name {{ position: sticky; left: 0; z-index: 1; background: {th['card']}; }}
   th.name {{ z-index: 3; }}
 }}

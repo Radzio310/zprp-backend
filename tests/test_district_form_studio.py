@@ -86,14 +86,14 @@ def test_html_lista_do_odhaczania_i_raport():
     assert 'class="box"' in checklist and "Sprawdził" in checklist and 'id="q"' not in checklist
     assert "Wigilia &lt;okręgu&gt;" in checklist and "Obecność: Będę" in checklist and "Wpłata: 50 zł" in checklist
     report = ST.render_html(doc, theme="premium", province_key=None, layout="report", mode="file")
-    assert 'class="ring"' in report and 'class="funnel"' in report and 'id="q"' in report and "<script>" in report
+    assert 'class="dots"' in report and 'money funnel' in report and 'id="q"' in report and "<script>" in report
     assert 'class="box"' not in report
 
 
 def test_strona_publiczna_przycina_do_poziomu():
     doc = _doc()
     stats = ST.render_html(doc, theme="elegant", province_key="SLASKIE", layout="report", mode="public", level="stats")
-    assert "Łukasz Żak" not in stats and 'class="ring"' in stats and "noindex" in stats
+    assert "Łukasz Żak" not in stats and 'class="dots"' in stats and "noindex" in stats and "ŁŻ" not in stats
     initials = ST.render_html(doc, theme="elegant", province_key="SLASKIE", layout="report", mode="public", level="initials")
     assert "Łukasz Żak" not in initials and "Ł. Ż." in initials
 
@@ -149,9 +149,10 @@ def test_ladny_adres_wynikow():
 
 def test_sklad_kolumn_i_wplaty_bez_narastania():
     assert ST.column_kinds(["Lp.", "Sędzia", "Osoby", "Zmiana"], [["1", "A", "2", "10.11.2026 12:00"], ["2", "B", "", ""]]) == ["lp", "txt", "num", "when"]
-    money = ST.html_money({"pass": "#000000", "warn": "#111111", "line": "#222222", "track": "#333333", "soft": "#444444"},
-                          {"confirmed": 1, "declared": 1, "none": 2, "amount": 50, "expected_total": 100, "confirmed_total": 50, "declared_total": 100})
-    assert "1 os. · 50 zł" in money and "100 zł" in money and "do zebrania 50 zł" in money
+    money = ST.money_track({"pass": "#000000", "warn": "#111111", "line": "#222222", "track": "#333333", "soft": "#444444"},
+                           {"title": "Wpłata", "confirmed": 1, "declared": 1, "none": 2, "amount": 50, "expected_total": 150,
+                            "confirmed_total": 50, "declared_total": 100})
+    assert "Zgłoszone <b>1</b> · 50 zł" in money and "z 150 zł" in money and "Brakuje <b>1</b> · 50 zł" in money
 
 
 def test_excel_liczby_jako_liczby_i_zamrozone_nazwisko():
@@ -169,3 +170,10 @@ def test_pusty_stan_bez_zer():
     assert "Nikt jeszcze nie odpowiedział" in out and 'class="cnum"' not in out and 'class="cfacts"' not in out
     empty = ST.render_html(_doc(rows=[]), theme="province", province_key=None, layout="report", mode="file")
     assert "Nikt nie pasuje" in empty and "Obecność: Będę" in empty and 'class="mfacts"' not in empty
+
+
+def test_osoby_jako_kropki_w_kolejnosci_statusu():
+    pp = ST.people(_doc(), initials_ok=True)
+    assert [it["tone"] for it in pp["items"]] == ["positive", "positive", "negative", "neutral"]
+    assert pp["items"][0]["ini"] == "ŁŻ" and pp["title"] == "Obecność"
+    assert [(g["label"], g["count"]) for g in pp["legend"]] == [("Będę", 2), ("Nie będę", 1), ("Brak głosu", 1)]
