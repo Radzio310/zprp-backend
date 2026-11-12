@@ -174,6 +174,11 @@ STRIP_TOP, STRIP_H = 822, 218
 FRAME_X, FRAME_W, FRAME_H, FRAME_GAP = 110, 235, 132, 16
 FRAME_SLOTS = 7
 GRID_MAX = 12
+#: Tło: ciepły koral z lewej, granat z prawej, niezależnie od drużyn (podgląd w aplikacji ma to samo, `POSTER_GRADIENT`).
+BG_WARM, BG_NAVY = CORAL, (43, 76, 155)
+#: Do tylu klipów nie ma taśmy: kadry stają się tłem całej okładki (pionowe pasy), panel i tytuł zajmują pełną wysokość.
+BACKDROP_MAX = 3
+PANEL_FULL_BOTTOM_X = 952
 STONE_LIGHT = ((255, 251, 248), (226, 214, 207))
 STONE_DARK = ((43, 35, 32), (20, 16, 16))
 
@@ -185,6 +190,19 @@ def match_hue(index: int) -> Tuple[int, int, int]:
 def frame_count(clips: int) -> int:
     """Ile kadrów pokazuje taśma: wszystkie, gdy się mieszczą, inaczej o jeden mniej, a ostatnie okienko to „+N”."""
     return clips if clips <= FRAME_SLOTS else FRAME_SLOTS - 1
+
+
+STRIP_SPAN = FRAME_SLOTS * FRAME_W + (FRAME_SLOTS - 1) * FRAME_GAP
+
+
+def frame_box(index: int, slots: int) -> Tuple[float, float]:
+    """(x, szerokość) okienka taśmy: okienka wypełniają taśmę, ile by ich nie było (bez pustych miejsc); przy 7 = 235 jednostek."""
+    w = (STRIP_SPAN - (slots - 1) * FRAME_GAP) / float(max(1, slots))
+    return FRAME_X + index * (w + FRAME_GAP), w
+
+
+def backdrop(clips: int) -> bool:
+    return clips <= BACKDROP_MAX
 
 
 def cover_layout(matches: int) -> str:
@@ -342,15 +360,32 @@ def _grid_cell(match: Optional[Mapping[str, Any]], hue: Sequence[int], u: float,
     return out
 
 
-def _frame_cell(frame: Optional[Any], number: int, hue: Sequence[int], u: float) -> Any:
+def _placeholder(w: int, h: int, hue: Sequence[int], u: float) -> Any:
+    """Kadr, którego nie udało się wyjąć: barwa meczu w ukośnych pasach i znak odtwarzania (nie czarna dziura)."""
+    from PIL import Image, ImageDraw
+
+    art = _vertical(w, h, K._mix(hue, (12, 10, 8), 0.45), K._mix(hue, (12, 10, 8), 0.82))
+    lines = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(lines)
+    step = max(6, int(22 * u))
+    for x in range(-h, w, step):
+        draw.line([(x, h), (x + h, 0)], fill=(255, 255, 255, 18), width=max(1, int(3 * u)))
+    art.alpha_composite(lines)
+    r = min(w, h) * 0.16
+    cx, cy = w / 2, h / 2
+    ImageDraw.Draw(art).polygon([(cx - r * 0.6, cy - r), (cx - r * 0.6, cy + r), (cx + r, cy)], fill=(255, 255, 255, 150))
+    return art
+
+
+def _frame_cell(frame: Optional[Any], number: int, hue: Sequence[int], u: float, box_w: float = FRAME_W) -> Any:
     """Okienko taśmy: kadr klipu przycięty do 16:9, barwa meczu na dole, numer klipu w rogu. Bez kadru: ciemne okienko z numerem."""
     from PIL import Image, ImageDraw, ImageOps
 
-    w, h = int(FRAME_W * u), int(FRAME_H * u)
+    w, h = int(box_w * u), int(FRAME_H * u)
     if frame is not None:
         art = ImageOps.fit(frame.convert("RGB"), (w, h), Image.LANCZOS).convert("RGBA")
     else:
-        art = _vertical(w, h, K._mix(hue, (12, 10, 8), 0.72), (12, 10, 8))
+        art = _placeholder(w, h, hue, u)
     art.alpha_composite(Image.new("RGBA", (w, int(9 * u) or 1), _rgba(hue, 255)), (0, h - (int(9 * u) or 1)))
     font = _font(BOLD, 22 * u)
     probe = ImageDraw.Draw(art)
@@ -375,13 +410,14 @@ def _more_frames(more: int, u: float) -> Any:
     return out
 
 
-def _cover_art(width: int, height: int, hues: Sequence[Sequence[int]], frames_used: int, u: float) -> Any:
+def _cover_art(width: int, height: int, hues: Sequence[Sequence[int]], frames_used: int, u: float, full: bool = False) -> Any:
     """Nieruchoma grafika: skośny panel w kropki z pasem barw meczów na krawędzi i taśma filmowa z perforacją."""
     from PIL import Image, ImageChops, ImageDraw
 
     k = 2
+    bottom, bottom_x = (1080, PANEL_FULL_BOTTOM_X) if full else (PANEL_BOTTOM, PANEL_BOTTOM_X)
     art = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    panel = [(PANEL_TOP_X * u * k, 0), (width * k, 0), (width * k, PANEL_BOTTOM * u * k), (PANEL_BOTTOM_X * u * k, PANEL_BOTTOM * u * k)]
+    panel = [(PANEL_TOP_X * u * k, 0), (width * k, 0), (width * k, bottom * u * k), (bottom_x * u * k, bottom * u * k)]
     mask = Image.new("L", (width * k, height * k), 0)
     ImageDraw.Draw(mask).polygon(panel, fill=255)
     mask = mask.resize((width, height), Image.LANCZOS)
@@ -391,8 +427,8 @@ def _cover_art(width: int, height: int, hues: Sequence[Sequence[int]], frames_us
     draw = ImageDraw.Draw(dots)
     step, r = 34 * u, max(1.0, 2.6 * u)
     y = step / 2
-    while y < PANEL_BOTTOM * u:
-        x = PANEL_BOTTOM_X * u
+    while y < bottom * u:
+        x = bottom_x * u
         while x < width:
             draw.ellipse([x - r, y - r, x + r, y + r], fill=(255, 255, 255, 30))
             x += step
@@ -403,13 +439,15 @@ def _cover_art(width: int, height: int, hues: Sequence[Sequence[int]], frames_us
     layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     for i, hue in enumerate(list(hues)[:len(MATCH_HUES)] or [CORAL]):
         right, left = PANEL_TOP_X - 14 * i - 4, PANEL_TOP_X - 14 * (i + 1)
-        shift = PANEL_BOTTOM_X - PANEL_TOP_X
+        shift = bottom_x - PANEL_TOP_X
         one = Image.new("L", (width * k, height * k), 0)
-        ImageDraw.Draw(one).polygon([(left * u * k, 0), (right * u * k, 0), ((right + shift) * u * k, PANEL_BOTTOM * u * k),
-                                     ((left + shift) * u * k, PANEL_BOTTOM * u * k)], fill=255)
+        ImageDraw.Draw(one).polygon([(left * u * k, 0), (right * u * k, 0), ((right + shift) * u * k, bottom * u * k),
+                                     ((left + shift) * u * k, bottom * u * k)], fill=255)
         one = one.resize((width, height), Image.LANCZOS)
         layer.paste(Image.new("RGBA", (width, height), _rgba(hue, 255)), (0, 0), one)
     art.alpha_composite(layer)
+    if full:
+        return art
     band = ImageDraw.Draw(art)
     band.rectangle([0, STRIP_TOP * u, width, (STRIP_TOP + STRIP_H) * u], fill=(8, 6, 5, 150))
     hole_w, hole_h, pitch = 20 * u, 12 * u, 40 * u
@@ -419,13 +457,33 @@ def _cover_art(width: int, height: int, hues: Sequence[Sequence[int]], frames_us
         for hy in (STRIP_TOP + 14, STRIP_TOP + STRIP_H - 26):
             art.alpha_composite(hole, (int(x), int(hy * u)))
         x += pitch
-    empty = _pill((int(FRAME_W * u), int(FRAME_H * u)), (255, 255, 255, 20), int(10 * u))
-    slot = 0
-    while (FRAME_X + slot * (FRAME_W + FRAME_GAP) + FRAME_W) * u <= width:
-        if slot >= frames_used:
-            art.alpha_composite(empty, (int((FRAME_X + slot * (FRAME_W + FRAME_GAP)) * u), int((STRIP_TOP + (STRIP_H - FRAME_H) / 2) * u)))
-        slot += 1
     return art
+
+
+def _backdrop(background: Any, frames: Sequence[Any], hues: Sequence[Sequence[int]], u: float) -> Any:
+    """Kilka klipów: kadry jako tło całej okładki (pionowe pasy w kolejności filmu), przykryte gradientem tła tak, żeby tytuł
+    i panel były czytelne; pod każdym pasem barwa jego meczu, a przy 2-3 klipach numer klipu."""
+    from PIL import Image, ImageDraw, ImageOps
+
+    width, height = background.size
+    n = max(1, len(frames))
+    photo = Image.new("RGB", (width, height))
+    for i, frame in enumerate(frames):
+        x0, x1 = int(width * i / n), int(width * (i + 1) / n)
+        part = ImageOps.fit(frame.convert("RGB"), (x1 - x0, height), Image.LANCZOS) if frame is not None else             _placeholder(x1 - x0, height, hues[i], u).convert("RGB")
+        photo.paste(part, (x0, 0))
+    out = Image.blend(photo, background.convert("RGB"), 0.74).convert("RGBA")
+    draw = ImageDraw.Draw(out)
+    font = _font(BOLD, 24 * u)
+    for i, hue in enumerate(hues):
+        x0, x1 = int(width * i / n), int(width * (i + 1) / n)
+        draw.rectangle([x0, height - int(12 * u), x1 - (int(4 * u) if i < n - 1 else 0), height], fill=_rgba(hue, 255))
+        if n > 1:
+            label = str(i + 1)
+            pill = _pill((int(max(38 * u, _text_w(draw, label, font) + 20 * u)), int(38 * u)), (12, 10, 8, 190), int(10 * u))
+            ImageDraw.Draw(pill).text((pill.width / 2, pill.height / 2), label, font=font, fill=_rgba(INK, 255), anchor="mm")
+            out.alpha_composite(pill, (x0 + int(24 * u), height - int(70 * u)))
+    return out.convert("RGB")
 
 
 def compose_cover(data: Mapping[str, Any], width: int, height: int) -> Dict[str, Any]:
@@ -436,12 +494,20 @@ def compose_cover(data: Mapping[str, Any], width: int, height: int) -> Dict[str,
     u = unit(width, height)
     matches = list(data.get("matches") or [])
     hues = [match_hue(i) for i in range(len(matches))]
-    first = matches[0] if matches else {}
-    accent = K.parse_color((first.get("colors") or {}).get("home")) or K.parse_color((first.get("colors") or {}).get("away"))
-    background = _bg(width, height, CORAL, accent or (61, 117, 133), [])
+    background = _bg(width, height, BG_WARM, BG_NAVY, [])
     clips = int(data.get("clips") or 0)
+    full = clips > 0 and backdrop(clips)
     shown_frames = frame_count(clips)
-    art = _cover_art(width, height, hues, shown_frames + (1 if clips > shown_frames else 0), u)
+    frames = list(data.get("frames") or [])
+    owners = list(data.get("clip_matches") or [])
+
+    def hue_of(i: int) -> Tuple[int, int, int]:
+        return hues[owners[i]] if i < len(owners) and 0 <= owners[i] < len(hues) else CORAL
+
+    if full:
+        background = _backdrop(background, [frames[i] if i < len(frames) else None for i in range(clips)], [hue_of(i) for i in range(clips)], u)
+    art = _cover_art(width, height, hues, shown_frames + (1 if clips > shown_frames else 0), u, full)
+    column_h = 1080 if full else PANEL_BOTTOM
 
     text = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(text)
@@ -462,7 +528,7 @@ def compose_cover(data: Mapping[str, Any], width: int, height: int) -> Dict[str,
     desc_font = _font(REGULAR, 34 * u)
     desc_rows = K.wrap_lines(draw, desc, desc_font, col_w, 2) if desc else []
     block = line * len(rows) + 40 * u + sentence_line * len(sentence_lines) + (24 * u + len(desc_rows) * desc_font.size * 1.3 if desc_rows else 0)
-    y = max(96 * u, (PANEL_BOTTOM * u - block) / 2.0)
+    y = max(96 * u, (column_h * u - block) / 2.0)
     for row in rows:
         draw.text((left, y + title_font.size * 0.86), row, font=title_font, fill=_rgba(INK, 255), anchor="ls")
         y += line
@@ -483,7 +549,7 @@ def compose_cover(data: Mapping[str, Any], width: int, height: int) -> Dict[str,
     draw.text(((STAGE_X + STAGE_W) * u, 70 * u), "BAZA Mentor", font=brand, fill=_rgba(INK, 120), anchor="rs")
 
     layers: List[Dict[str, Any]] = []
-    sx, sy = STAGE_X * u, STAGE_Y * u
+    sx, sy = STAGE_X * u, (STAGE_Y + (1080 - PANEL_BOTTOM) / 2 if full else STAGE_Y) * u
     kind = cover_layout(len(matches))
     if matches and kind == "duel":
         home, away, mid = _duel_parts(matches[0], hues[0], u)
@@ -508,16 +574,15 @@ def compose_cover(data: Mapping[str, Any], width: int, height: int) -> Dict[str,
             img = _grid_cell(m, hue, u, cw, ch, len(matches) - shown)
             layers.append({"image": img, "x": int(sx + c * cw), "y": int(y0 + r * ch), "delay": min(0.6, 0.08 + i * 0.045)})
 
-    frames = list(data.get("frames") or [])
-    owners = list(data.get("clip_matches") or [])
     fy = (STRIP_TOP + (STRIP_H - FRAME_H) / 2) * u
-    for i in range(shown_frames):
-        hue = hues[owners[i]] if i < len(owners) and 0 <= owners[i] < len(hues) else CORAL
-        img = _frame_cell(frames[i] if i < len(frames) else None, i + 1, hue, u)
-        layers.append({"image": img, "x": int((FRAME_X + i * (FRAME_W + FRAME_GAP)) * u), "y": int(fy), "motion": "rise",
+    slots = shown_frames + (1 if clips > shown_frames else 0)
+    for i in range(0 if full else shown_frames):
+        x, box_w = frame_box(i, slots)
+        img = _frame_cell(frames[i] if i < len(frames) else None, i + 1, hue_of(i), u, box_w)
+        layers.append({"image": img, "x": int(x * u), "y": int(fy), "motion": "rise",
                        "delay": 0.30 + i * 0.06})
-    if clips > shown_frames:
-        layers.append({"image": _more_frames(clips - shown_frames, u), "x": int((FRAME_X + shown_frames * (FRAME_W + FRAME_GAP)) * u),
+    if not full and clips > shown_frames:
+        layers.append({"image": _more_frames(clips - shown_frames, u), "x": int(frame_box(shown_frames, slots)[0] * u),
                        "y": int(fy), "motion": "rise", "delay": 0.30 + shown_frames * 0.06})
 
     art.alpha_composite(_shadowed(text, u, 0.5))

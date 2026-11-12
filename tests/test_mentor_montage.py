@@ -440,9 +440,11 @@ def test_cover_scales_with_matches_and_clips():
     assert [MC.cover_layout(n) for n in (0, 1, 2, 4, 5, 13)] == ["duel", "duel", "rows", "rows", "grid", "grid"]
     assert MC.grid_shape(8) == (4, 2, 8) and MC.grid_shape(14) == (4, 3, 11)
     assert MC.frame_count(3) == 3 and MC.frame_count(7) == 7 and MC.frame_count(20) == 6
+    assert MC.backdrop(3) and not MC.backdrop(4)
+    assert MC.frame_box(6, 7) == (110 + 6 * 251, 235) and MC.frame_box(3, 4)[0] + MC.frame_box(3, 4)[1] == 110 + MC.STRIP_SPAN
     assert MC.cover_sentence(1, 1, 23) == [[("1", "n"), (" klip", "w")], [("23", "n"), (" s filmu", "w")]]
     assert MC.cover_sentence(9, 3, 161)[0] == [("9", "n"), (" klipów", "w"), (" z ", "w"), ("3", "n"), (" meczów", "w")]
-    for n_matches, clips in ((1, 1), (3, 9), (8, 24), (14, 30)):
+    for n_matches, clips in ((1, 1), (2, 3), (3, 5), (8, 24), (14, 30)):
         matches = [{"home": f"Gospodarz {i}", "away": f"Gość {i}", "code": f"SPR/{i}", "code_color": "#d32f2f", "date": "10.10.2026",
                     "crests": {}, "colors": {}} for i in range(n_matches)]
         frames = [Image.new("RGB", (320, 180), (180, 120, 70)) if i % 2 else None for i in range(MC.frame_count(clips))]
