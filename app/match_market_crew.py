@@ -503,6 +503,7 @@ def _offer_view(
         "createdBy": creator,
         "createdAt": _iso(offer.get("created_at")),
         "claimCount": len(_active(claims)),
+        "namesHidden": bool(hide_names),
         "myRoles": my_roles,
         "myClaim": my_claim,
         "canManage": can_manage,

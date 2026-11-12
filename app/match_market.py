@@ -2137,6 +2137,8 @@ async def _offer_payload(
         # i tak nie przyjmie serwer (`create_claim`).
         "myCrewLabel": _s(my_crew_label),
         "claimCount": len([c for c in claims if _s(c.get("status")) == "pending"]),
+        # Okręg ukrył zgłoszonych przed tym widzem: klient rysuje anonimowe żetony.
+        "namesHidden": bool(hide_names),
         # Najkrótszy znany dojazd spośród chętnych i mój własny - liczby bez
         # nazwisk, więc idą do KAŻDEGO, kto ofertę widzi (kafel na liście).
         "nearestKm": nearest_km(bench, pending_ids),
