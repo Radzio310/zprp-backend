@@ -30,7 +30,7 @@ from app import obsada_view_rules as R
 from app.db import database, province_judges
 from app.deps import _beach_auth_secret, get_jwt_payload
 from app.obsada_view_tables import obsada_changes, obsada_view
-from app.settlement_province import DISPLAY, canonical
+from app.settlement_province import DISPLAY, canonical, spellings
 
 log = logging.getLogger(__name__)
 
@@ -159,10 +159,16 @@ async def _season_payload(province: str) -> dict:
             select(obsada_changes.c.match_id, obsada_changes.c.at)
             .where(obsada_changes.c.province == province)
             .where(obsada_changes.c.at >= datetime.now(timezone.utc) - timedelta(days=30))))
+        roster = R.Roster(await database.fetch_all(
+            select(province_judges.c.judge_id, province_judges.c.full_name, province_judges.c.photo_url)
+            .where(province_judges.c.province.in_(spellings(province)))))
         matches, halls = [], {}
         stamp = ""
         for item in base["matches"]:
             crew = item["crew"]
+            # Cudze mecze (np. Liga Juniorow z innego okregu) tylko z naszym sedzia w obsadzie.
+            if not R.keep_match((item.get("access") or {}).get("organizer_kind"), crew, roster):
+                continue
             row = {
                 "match_id": item["match_id"], "code": item["code"],
                 "competition": item["competition"],
@@ -175,7 +181,7 @@ async def _season_payload(province: str) -> dict:
                 "score": item["score"], "status_live": None,
                 "hall": item["hall"], "city": item["city"], "address": item["address"],
                 "lat": None, "lng": None,
-                "crew": R.crew_view(crew), "needs": R.needs_view(crew, item["needs"]),
+                "crew": R.crew_view(crew, roster), "needs": R.needs_view(crew, item["needs"]),
                 "changed_at": changed.get(item["match_id"]),
             }
             matches.append(row)

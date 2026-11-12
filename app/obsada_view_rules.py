@@ -70,13 +70,59 @@ def judge_key(name: Any) -> str:
     return person_name_key(name).replace(" ", "-")
 
 
-def crew_view(crew: Mapping[str, Any]) -> dict:
-    """Obsada dla klienta: samo nazwisko i klucz. Bez numerow."""
+class Roster:
+    """Sedziowie okregu: po numerze (judge_id) i po kluczu nazwiska. Namesaki = brak zdjecia."""
+
+    def __init__(self, rows: Iterable[Mapping[str, Any]] = ()):
+        self.by_id: dict[str, str] = {}
+        self.by_key: dict[str, Optional[str]] = {}
+        for row in rows:
+            photo = _s(row.get("photo_url"))
+            photo = photo if photo.lower().startswith("https://") else ""
+            jid = _s(row.get("judge_id"))
+            if jid:
+                self.by_id[jid] = photo
+            key = judge_key(row.get("full_name"))
+            if not key:
+                continue
+            # Ten sam klucz u dwoch osob: zdjecie niczyje (nigdy cudza twarz).
+            self.by_key[key] = None if key in self.by_key else (photo or None)
+
+    def knows(self, person: Optional[Mapping[str, Any]]) -> bool:
+        """Czy osoba z obsady jest sedzia tego okregu (numer albo klucz nazwiska)."""
+        if not isinstance(person, Mapping):
+            return False
+        number = _s(person.get("number"))
+        if number and number in self.by_id:
+            return True
+        return judge_key(person.get("name")) in self.by_key
+
+    def photo(self, person: Optional[Mapping[str, Any]]) -> Optional[str]:
+        if not isinstance(person, Mapping):
+            return None
+        number = _s(person.get("number"))
+        if number:
+            if number in self.by_id:
+                return self.by_id[number] or None
+            return None
+        return self.by_key.get(judge_key(person.get("name"))) or None
+
+
+def keep_match(organizer_kind: Any, crew: Mapping[str, Any], roster: Roster) -> bool:
+    """Mecz organizowany przez okreg (albo DRK) albo cudzy z naszym sedzia w obsadzie."""
+    if _s(organizer_kind) in ("own", "drk"):
+        return True
+    return any(roster.knows(person) for person in crew.values())
+
+
+def crew_view(crew: Mapping[str, Any], roster: Optional[Roster] = None) -> dict:
+    """Obsada dla klienta: nazwisko, klucz i zdjecie (tylko sedziowie okregu). Bez numerow."""
     out: dict = {}
     for slot_out, slot_zprp in SLOT_MAP.items():
         person = crew.get(slot_zprp)
         name = _s(person.get("name")) if isinstance(person, Mapping) else ""
-        out[slot_out] = {"name": name, "key": judge_key(name)} if name else None
+        out[slot_out] = ({"name": name, "key": judge_key(name),
+                          "photo": roster.photo(person) if roster else None} if name else None)
     return out
 
 

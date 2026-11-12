@@ -96,3 +96,47 @@ def test_app_mode_row_always_has_token():
     assert R.valid_token(token)
     sig = R.sign_ics("s", "SLASKIE", "u1", "k", token)
     assert R.verify_ics("s", "SLASKIE", "u1", "k", token, sig)
+
+
+def _roster():
+    return R.Roster([
+        {"judge_id": "101", "full_name": "NALEŻNY Adam", "photo_url": "https://x/a.jpg"},
+        {"judge_id": "102", "full_name": "WRONA Marcin", "photo_url": ""},
+        {"judge_id": "103", "full_name": "KOWAL Jan", "photo_url": "https://x/k1.jpg"},
+        {"judge_id": "104", "full_name": "Jan Kowal", "photo_url": "https://x/k2.jpg"},
+        {"judge_id": "105", "full_name": "HTTP Piotr", "photo_url": "http://x/p.jpg"},
+    ])
+
+
+def test_keep_match_foreign_without_our_referee_is_dropped():
+    r = _roster()
+    foreign = {"pierwszy": {"number": "900", "name": "OBCY Ktos"}, "drugi": None}
+    assert not R.keep_match("foreign", foreign, r)
+    assert R.keep_match("own", foreign, r)
+    assert R.keep_match("foreign", {"pierwszy": {"number": "", "name": "Adam Należny"}}, r)
+    assert R.keep_match("foreign", {"drugi": {"number": "102", "name": "inaczej"}}, r)
+    assert not R.keep_match("foreign", {}, r)
+
+
+def test_crew_view_photo():
+    r = _roster()
+    crew = {"pierwszy": {"number": "101", "name": "NALEŻNY Adam"},
+            "drugi": {"number": "", "name": "Marcin Wrona"},
+            "sekretarz": {"number": "", "name": "KOWAL Jan"},
+            "czas": {"number": "900", "name": "OBCY Ktos"},
+            "delegat": {"number": "105", "name": "HTTP Piotr"}}
+    v = R.crew_view(crew, r)
+    assert v["first"]["photo"] == "https://x/a.jpg"
+    assert v["second"]["photo"] is None      # brak zdjecia
+    assert v["secretary"]["photo"] is None   # namesaki
+    assert v["time"]["photo"] is None        # nie nasz
+    assert v["delegate"]["photo"] is None    # nie https
+    assert v["delegate2"] is None
+    assert R.crew_view(crew)["first"]["photo"] is None
+
+
+def test_rev_changes_with_photo():
+    crew = {"pierwszy": {"number": "101", "name": "NALEŻNY Adam"}}
+    a = R.compute_rev([{"crew": R.crew_view(crew, _roster())}])
+    r2 = R.Roster([{"judge_id": "101", "full_name": "NALEŻNY Adam", "photo_url": "https://x/b.jpg"}])
+    assert a != R.compute_rev([{"crew": R.crew_view(crew, r2)}])
