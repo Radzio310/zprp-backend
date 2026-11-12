@@ -4745,6 +4745,10 @@ mentor_drive_connections, mentor_drive_files, mentor_drive_folders, mentor_drive
 from app.mentor_shot_tables import define_tables as _define_mentor_shot_tables
 (mentor_shots,) = _define_mentor_shot_tables(metadata)
 
+# Montaż zestawienia w jeden film (12.11.2026): zamówienia i księga odcinków (`app/mentor_montage_tables.py`, sekcja 15 kontraktu).
+from app.mentor_montage_tables import define_tables as _define_mentor_montage_tables
+mentor_montages, mentor_montage_assets = _define_mentor_montage_tables(metadata)
+
 # Mecze ręczne wspólne (31.10.2026) i ręczne podpięcie ProEla w panelu pary (`app/shared_match_tables.py`, kontrakt `docs/mecze-wspolne-api.md`).
 from app.shared_match_tables import define_tables as _define_shared_match_tables
 (
@@ -5508,6 +5512,19 @@ for _statement in _MENTOR_SHOT_MIGRATIONS:
         import logging as _logging
 
         _logging.getLogger("app.db").warning("Migracja zrzutow klatek nie przeszla: %s", _statement, exc_info=True)
+
+# Montaż zestawień: indeksy `mentor_montages` i `mentor_montage_assets` - idempotentne, każda migracja osobno.
+from app.mentor_montage_tables import MIGRATIONS as _MENTOR_MONTAGE_MIGRATIONS
+
+for _statement in _MENTOR_MONTAGE_MIGRATIONS:
+    try:
+        with engine.connect() as _conn:
+            _conn.execute(text(_statement))
+            _conn.commit()
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("app.db").warning("Migracja montażu zestawień nie przeszła: %s", _statement, exc_info=True)
 
 # Trybuna: klucz idempotencji nagrań i jego unikalny indeks (`app/mentor_trybuna_tables.py`) - kazda migracja osobno.
 from app.mentor_trybuna_tables import MIGRATIONS as _MENTOR_TRYBUNA_MIGRATIONS

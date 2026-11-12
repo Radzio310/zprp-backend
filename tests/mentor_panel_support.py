@@ -19,6 +19,7 @@ from app.mentor_auto_found_tables import define_tables as define_auto_found
 from app.mentor_bastion_tables import define_tables as define_bastion
 from app.mentor_drive_tables import define_tables as define_drive
 from app.mentor_evaluation_tables import define_tables as define_evaluations
+from app.mentor_montage_tables import define_tables as define_montages
 from app.mentor_panel_tables import define_tables as define_panel
 from app.mentor_shot_tables import define_tables as define_shots
 from app.mentor_trybuna_tables import define_tables as define_trybuna
@@ -36,6 +37,7 @@ MODULES = (
     "app.delegate_sharing", "app.mentor_auto_found", "app.mentor_auto_found_rules",
     "app.mentor_drive", "app.mentor_drive_google", "app.mentor_drive_transfer", "app.mentor_shots",
     "app.shared_matches", "app.shared_match_pdf", "app.shared_match_pair", "app.shared_match_link", "app.shared_match_notify", "app.shared_match_rules", "app.mentor_proel_link", "app.mentor_veo",
+    "app.mentor_montage",
 )
 
 PAIR = "pair-1"
@@ -92,6 +94,8 @@ class Env:
         for table in define_panel(metadata):
             tables[table.name] = table
         for table in define_shots(metadata):
+            tables[table.name] = table
+        for table in define_montages(metadata):
             tables[table.name] = table
         for table in define_bastion(metadata):
             tables[table.name] = table
@@ -168,6 +172,7 @@ class Env:
         self.proel_link = importlib.import_module("app.mentor_proel_link")
         self.veo = importlib.import_module("app.mentor_veo")
         self.shots = importlib.import_module("app.mentor_shots")
+        self.montage = importlib.import_module("app.mentor_montage")
         self.sent = []
 
         async def fake_notify(ctx, actor_id, title, body, **kwargs):

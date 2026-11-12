@@ -7,6 +7,7 @@ Edytować i usuwać można tylko swoje (administrator wszystko); komisja ogląda
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -30,6 +31,8 @@ from app.db import (
     mentoring_pairs,
 )
 from app.mentor_panel_auth import mentor_actor
+
+logger = logging.getLogger("app.mentor_panel")
 
 router = APIRouter(prefix="/mentor-panel", tags=["Mentor"])
 Actor = C.MentorActor
@@ -653,6 +656,7 @@ def _cover(clip: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 async def compilation_summaries(ctx: Dict[str, Any], comp_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     names = await C.people({r.get("created_by") for r in comp_rows} | {r.get("acted_by") for r in comp_rows})
+    films = await _films([r["id"] for r in comp_rows])
     out = []
     for comp in comp_rows:
         items = await _items(comp["id"])
@@ -663,8 +667,21 @@ async def compilation_summaries(ctx: Dict[str, Any], comp_rows: List[Dict[str, A
             "items_count": len(live), "cover_clip": _cover(clips.get(live[0]["clip_id"])) if live else None,
             "created_by": C.person(names, comp.get("created_by")), **C.acted_fields(names, comp), "updated_at": comp.get("updated_at"),
             "public_url": R.public_url("compilation", comp.get("public_token")),
+            # Film z montażu (12.11.2026): ostatni gotowy albo w drodze; null = jeszcze nie było.
+            "film": films.get(comp["id"]),
         })
     return out
+
+
+async def _films(compilation_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Ostatni film zestawień (`mentor_montage.films_for`). Brak tabeli albo błąd = bez filmów, lista działa dalej."""
+    try:
+        from app.mentor_montage import films_for
+
+        return await films_for(compilation_ids)
+    except Exception:  # noqa: BLE001
+        logger.warning("mentor: filmy zestawień nieczytelne", exc_info=True)
+        return {}
 
 
 async def compilation_payload(ctx: Dict[str, Any], compilation_id: str) -> Dict[str, Any]:
@@ -685,6 +702,7 @@ async def compilation_payload(ctx: Dict[str, Any], compilation_id: str) -> Dict[
         "created_at": comp.get("created_at"), "updated_at": comp.get("updated_at"),
         "public_url": R.public_url("compilation", comp.get("public_token")),
         "can_edit": C.may(ctx, "edit", owner=R.s(comp.get("created_by")) == ctx["actor"].judge_id),
+        "film": (await _films([comp["id"]])).get(comp["id"]),
         "items": [{"clip": shaped[i["clip_id"]], "column": i.get("column"), "note": i.get("note"),
                    "label": R.legacy_label(i, comp.get("mode") or "free"), "position": n}
                   for n, i in enumerate(live)],

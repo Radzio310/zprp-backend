@@ -863,6 +863,58 @@ Decyzja właściciela (07.11.2026, wersja ostateczna): link do transmisji **na �
 - Koszt YouTube API: przy uzbrojonych filmach jedno `videos.list` (1 jednostka na 50 filmów) co 2 minuty; bez klucza strona filmu najwyżej co 5 minut na film.
 - **Nie sprawdzono na prawdziwym YouTube** (jak 14.6): przebieg sprawdzony na atrapach yt-dlp, ffmpeg, R2 i stanu transmisji.
 
+## 15. Montaż zestawienia w jeden film (12.11.2026)
+
+Zestawienie (całe albo wybrane N klipów w dowolnej kolejności) albo dowolne zaznaczenie klipów (Biblioteka, pokój meczu) staje się
+jednym plikiem MP4. Decyzje właściciela 12.11.2026: „Rozdziały” (okładka-plakat 4 s, plansza herbów 3 s tylko przy zmianie meczu,
+belka 1,5 s przed każdym klipem: minuta, etykieta, tytuł), na końcu spis klipów jak napisy końcowe; dodatki: rozdziały w pliku MP4,
+wypalona ścieżka zoomu, licznik „3/12” z etykietą i notatka jako napis na klipie, płynne przenikania (zmiana meczu: miękkie
+przetarcie). Limity: 60 klipów, 30 minut filmu; 1080p, gdy wszystkie pliki klipów mają ≥1080 linii, inaczej 720p; film żyje 30 dni.
+
+### 15.1 Model
+- `mentor_montages`: `id`, `pair_id`, `compilation_id` (NULL = szybki montaż), `name`, `description`, `items_json`
+  (`[{clip_id, label, note}]` w kolejności filmu - migawka), `states_json` (gotowość pozycji), `skip_missing`, `status`
+  (`preparing|queued|rendering|ready|failed|expired|cancelled`), `stage`, `progress`, `message`, `request_sig`, `film_key`,
+  `poster_key`, `size`, `duration_s`, `width`, `height`, `chapters_json`, `rendered_json`, `estimate_s`, `attempts`, `created_by`,
+  `acted_by`, znaczniki czasu, `ready_at`, `expires_at`.
+- `mentor_montage_assets`: księga odcinków w R2 po odcisku treści (`sig`, `pair_id`, `kind`, `key`, `size`, `used_at`). Odcinek z tą
+  samą treścią (klip, sąsiad, plansza, numer/liczba) nie renderuje się drugi raz; nieużywane od 30 dni znikają.
+
+### 15.2 Trasy (`app/mentor_montage.py`)
+- `POST /pairs/{p}/montages/preflight` `{compilation_id?, clip_ids?, name?, description?}` → `{name, description, compilation_id,
+  items:[MontageItem], counts, film_s, matches, estimate_s, can_create, limits}` (bez zamawiania).
+- `POST /pairs/{p}/montages` `{compilation_id?, clip_ids?, name?, description?, skip_missing}` → `Montage` (akcja `create`). Z
+  zestawienia: `clip_ids` = podzbiór w kolejności filmu (klip spoza zestawienia: 422 `MONTAGE_ITEM_UNKNOWN`); bez zestawienia:
+  `clip_ids` wymagane. Błędy: `MONTAGE_EMPTY`, `MONTAGE_TOO_MANY` (>60), `MONTAGE_TOO_LONG` (>30 min), `CLIP_NOT_FOUND`,
+  429 `MONTAGE_BUSY` (3 filmy w drodze na parę). To samo zamówienie (klipy z treścią, kolejność, etykiety, notatki, nazwa) zwraca
+  istniejący film z `reused: true`.
+- `GET /pairs/{p}/montages?compilation_id=&limit=` → `{montages:[Montage bez items]}`; `GET /montages/{id}` → `Montage`
+  (odpytywać co 2-3 s; odpytanie w przygotowaniu budzi przegląd).
+- `PATCH /montages/{id}` `{skip_missing}` - „Pomiń brakujące” w trakcie przygotowania.
+- `POST /montages/{id}/retry` - ponowienie po błędzie albo wygaśnięciu (ponawia też nieudane pliki klipów).
+- `DELETE /montages/{id}` - anuluj i usuń (autor albo administrator).
+- `Compilation.film` i `CompilationSummary.film` = skrót ostatniego filmu `{id, status, name, duration_s, progress, items_count,
+  updated_at, ready_at, poster_url}` albo null.
+
+`Montage = {id, pair_id, compilation_id, name, description, status, stage, progress, message, skip_missing, counts:{total, ready,
+cutting, waiting, copying, blocked, failed, skipped}, items_count, duration_s, width, height, size, estimate_s, filename,
+chapters:[{kind: cover|clip|end, clip_id, match_id, title, start_s, end_s, clip_start_s, chapter}], play_url, download_url,
+poster_url, created_by, created_at, updated_at, ready_at, expires_at, can_delete, items:[MontageItem]}`.
+`MontageItem = {clip_id, position, label, note, title, match_id, video_id, start_s, end_s, state, reason, hint, action,
+copy_progress, missing}`; `state`: `ready|cutting|waiting|copying|blocked|failed|skipped`; `action`: `copy` (mecz tylko na
+YouTube - `POST .../videos/{video_id}/copy`, po kopii klip odblokowuje się sam), `sync` (brak gwizdków, `missing` jak w planie
+pobrania), `retry` albo null. `stage` w renderze: `prepare|zoom|cover|clips|end|join|upload`.
+
+### 15.3 Worker
+Osobna pętla (`run_montage_worker`, 1 film naraz, osobno od ffmpeg klipów): przegląd przygotowań co 8 s (zamawia zwykłe MP4 klipów
+tą samą drogą co pobieranie, z limitem kolejki Bastionu), render kolejki, retencja co godzinę. Render: odcinki (okładka | klip i:
+ogon klipu i-1 → plansza meczu → belka → klip | koniec), każdy z tymi samymi parametrami strumieni, sklejka `concat` bez ponownego
+kodowania obrazu + rozdziały FFMETADATA. Belka ma tło z pierwszej klatki klipu (rozmyte), więc przenikanie „wyostrza” obraz.
+Zoom: klatki źródła cięte z dokładnością podpiksela według `zoom_track` (ten sam model co `zoomTrack.ts`). Po restarcie render w toku
+wraca do kolejki (odcinki z księgi wracają od razu). Gotowy film: push „Film gotowy” do zamawiającego (`target=montage`,
+`montageId`, `compilationId`). Moduły: `mentor_montage_rules` (oś czasu, stany, rozdziały), `mentor_montage_cards` (Pillow),
+`mentor_montage_render` (argumenty ffmpeg), `mentor_montage_tables`. Testy: `tests/test_mentor_montage.py` (w tym prawdziwy render).
+
 ## Poprawki pokoju meczu (08.11.2026)
 
 - **Stan wgrywania niesie nagranie.** `GET .../uploads/{id}` i `GET .../upload-groups/{id}` mają dodatkowe pole `video: Video | null`: nagranie w przetwarzaniu (`upload_status: "processing"`) i gotowe (`ready`, z `play_url`). `null` przed złożeniem pliku, po błędzie i gdy nagranie usunięto. Klient wkłada je do pokoju sam: przedtem stan miał tylko `video_id`, a pokój stał na „Serwer przetwarza nagranie” do ręcznego odświeżenia strony.
