@@ -158,124 +158,370 @@ def _bg(width: int, height: int, left: Optional[Sequence[int]], right: Optional[
 
 
 # ─── Okładka-plakat ─────────────────────────────────────────────────────────
+#
+# Plakat 13.11.2026 (zamiast koła-poświaty i liczb z kapitalikowymi podpisami): po lewej nazwa i jedno zdanie z liczbami
+# wpisanymi w tekst, po prawej skośny panel w kropki z pasem barw meczów na krawędzi, a w nim mecze w układzie zależnym od ich
+# liczby (1: pojedynek dwóch kamyków z herbami, 2-4: pas pojedynków, 5+: siatka par), na dole taśma filmowa z kadrami klipów,
+# każdy kadr podkreślony barwą swojego meczu (ta sama paleta co przebieg filmu w aplikacji).
+# Geometria w jednostkach kadru 1920x1080 jest lustrem `POSTER` w BAZA/components/mentorPanel/montage/MontageStudio.tsx.
+
+#: Barwy meczów w kolejności pierwszego pojawienia się - lustro `MATCH_HUES` (BAZA components/mentorPanel/theme.ts).
+MATCH_HUES = ("#FF7A59", "#8FBCC8", "#E9C46A", "#6CC79A", "#B4A3E8", "#EE8CB0", "#7FC0E4", "#F4A26B")
+PANEL_TOP_X, PANEL_BOTTOM_X, PANEL_BOTTOM = 1090, 990, 780
+STAGE_X, STAGE_Y, STAGE_W, STAGE_H = 1110, 110, 740, 620
+TITLE_X, TITLE_W = 110, 840
+STRIP_TOP, STRIP_H = 822, 218
+FRAME_X, FRAME_W, FRAME_H, FRAME_GAP = 110, 235, 132, 16
+FRAME_SLOTS = 7
+GRID_MAX = 12
+STONE_LIGHT = ((255, 251, 248), (226, 214, 207))
+STONE_DARK = ((43, 35, 32), (20, 16, 16))
 
 
-def cover_data(name: str, description: str, matches: Sequence[Mapping[str, Any]], clips: int, film_s: float) -> Dict[str, Any]:
-    """`matches`: [{home, away, code, code_color, date, crests:{home,away}, colors:{home,away}}] w kolejności filmu."""
+def match_hue(index: int) -> Tuple[int, int, int]:
+    return K.parse_color(MATCH_HUES[index % len(MATCH_HUES)]) or CORAL
+
+
+def frame_count(clips: int) -> int:
+    """Ile kadrów pokazuje taśma: wszystkie, gdy się mieszczą, inaczej o jeden mniej, a ostatnie okienko to „+N”."""
+    return clips if clips <= FRAME_SLOTS else FRAME_SLOTS - 1
+
+
+def cover_layout(matches: int) -> str:
+    return "duel" if matches <= 1 else "rows" if matches <= 4 else "grid"
+
+
+def grid_shape(matches: int) -> Tuple[int, int, int]:
+    """(kolumny, wiersze, ile meczów rysujemy); przy więcej niż 12 ostatnia komórka to „+N”."""
+    cols = 3 if matches <= 6 else 4
+    cells = min(matches, GRID_MAX)
+    shown = matches if matches <= GRID_MAX else GRID_MAX - 1
+    return cols, -(-cells // cols), shown
+
+
+def cover_sentence(clips: int, matches: int, film_s: float) -> List[List[Tuple[str, str]]]:
+    """Liczby wpisane w zdanie: grupy przebiegów (tekst, „n” = liczba głosem / „w” = słowo treścią)."""
+    first = [(str(clips), "n"), (" " + MR.plural(clips, "klip", "klipy", "klipów"), "w")]
+    if matches > 1:
+        first += [(" z ", "w"), (str(matches), "n"), (" meczów", "w")]
+    seconds = max(0, int(round(film_s)))
+    second = [(str(seconds), "n"), (" s filmu", "w")] if seconds < 60 else [(MR.duration_label(seconds), "n"), (" min filmu", "w")]
+    return [first, second]
+
+
+def cover_data(name: str, description: str, matches: Sequence[Mapping[str, Any]], clips: int, film_s: float,
+               clip_matches: Optional[Sequence[int]] = None, frames: Optional[Sequence[Any]] = None) -> Dict[str, Any]:
+    """`matches`: [{home, away, code, code_color, date, competition, crests:{home,away}, colors:{home,away}}] w kolejności filmu;
+    `clip_matches`: numer meczu (0..) każdego klipu w kolejności filmu; `frames`: kadry (PIL albo None) pierwszych klipów."""
     return {"name": MR.clean_text(name, MR.MAX_NAME) or "Zestawienie", "description": MR.clean_text(description, MR.MAX_DESCRIPTION),
-            "matches": list(matches), "clips": int(clips), "film_s": float(film_s)}
+            "matches": list(matches), "clips": int(clips), "film_s": float(film_s), "clip_matches": list(clip_matches or []),
+            "frames": list(frames or [])}
 
 
-def _stat(draw: Any, x: float, base: float, number: str, word: str, u: float) -> float:
-    """Liczba (głos) z podpisem pod spodem; zwraca szerokość bloku."""
-    big = _font(VOICE, 104 * u)
-    small = _font(MEDIUM, 27 * u)
-    tracking = small.size * 0.14
-    draw.text((x, base), number, font=big, fill=_rgba(INK, 255), anchor="ls")
-    K._draw_tracked(draw, x + 2 * u, base + 46 * u, word.upper(), small, _rgba(INK, 190), tracking)
-    return max(_text_w(draw, number, big), K._tracked_width(draw, word.upper(), small, tracking))
+def _rounded_mask(w: int, h: int, radius: float) -> Any:
+    from PIL import Image, ImageDraw
+
+    k = 3
+    mask = Image.new("L", (w * k, h * k), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, w * k - 1, h * k - 1], radius=int(radius * k), fill=255)
+    return mask.resize((w, h), Image.LANCZOS)
+
+
+def _vertical(w: int, h: int, top: Sequence[int], bottom: Sequence[int]) -> Any:
+    from PIL import Image, ImageDraw
+
+    out = Image.new("RGBA", (w, h))
+    rows = ImageDraw.Draw(out)
+    for y in range(h):
+        rows.line([(0, y), (w, y)], fill=_rgba(K._mix(top, bottom, y / float(max(1, h - 1))), 255))
+    return out
+
+
+def stone(raw: Optional[bytes], name: str, color: Any, size: float, u: float) -> Any:
+    """Herb na kamyku jak `Pebble` w aplikacji: jasny ciepły kamień pod logo (herby projektuje się na biel), bez logo ciemny
+    kamyk z tarczą z inicjałami. Cień pod spodem, żadnej poświaty. Mały herb zostaje mały - nie rozciągamy źródeł 50x50."""
+    from PIL import Image
+
+    s = max(12, int(size))
+    crest = K.prepare_crest(raw, int(s * 0.74)) if raw else None
+    top, bottom = STONE_LIGHT if crest is not None else STONE_DARK
+    plate = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    plate.paste(_vertical(s, s, top, bottom), (0, 0), _rounded_mask(s, s, s * 0.30))
+    if crest is None:
+        crest = K.shield_crest(name, K.parse_color(color), int(s * 0.64))
+    plate.alpha_composite(crest, (int(s / 2 - crest.width / 2), int(s / 2 - crest.height / 2)))
+    pad = int(max(6, s * 0.16))
+    out = Image.new("RGBA", (s + 2 * pad, s + 2 * pad), (0, 0, 0, 0))
+    out.alpha_composite(plate, (pad, pad))
+    return K._shadow(out, max(2.0, s * 0.06), max(1, int(s * 0.05)), 0.55)
+
+
+def _place(canvas: Any, layer: Any, cx: float, cy: float) -> None:
+    canvas.alpha_composite(layer, (int(cx - layer.width / 2), int(cy - layer.height / 2)))
+
+
+def _hue_bar(w: float, h: float, hue: Sequence[int]) -> Any:
+    return _pill((int(w), int(max(2, h))), _rgba(hue, 255))
+
+
+def _team_stone(match: Mapping[str, Any], side: str, size: float, u: float) -> Any:
+    return stone((match.get("crests") or {}).get(side), str(match.get(side) or ""), (match.get("colors") or {}).get(side), size, u)
+
+
+def _duel_parts(match: Mapping[str, Any], hue: Sequence[int], u: float) -> Tuple[Any, Any, Any]:
+    """Jeden mecz: kamyki gospodarza i gościa (osobne warstwy, dojeżdżają z boków) i nieruchomy środek (numer, nazwy, data)."""
+    from PIL import Image, ImageDraw
+
+    w, h = int(STAGE_W * u), int(STAGE_H * u)
+    size = 240 * u
+    home = _team_stone(match, "home", size, u)
+    away = _team_stone(match, "away", size, u)
+    mid = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(mid)
+    tile = code_tile(str(match.get("code") or ""), match.get("code_color"), u, 44)
+    if tile is not None:
+        _place(mid, tile, w / 2, 70 * u)
+    _place(mid, _hue_bar(84 * u, 12 * u, hue), w / 2, 290 * u)
+    name_font = _font(BOLD, 34 * u)
+    for side, cx in (("home", 170 * u), ("away", 570 * u)):
+        rows = K.wrap_lines(draw, str(match.get(side) or ""), name_font, 330 * u, 2)
+        for i, row in enumerate(rows):
+            draw.text((cx, 470 * u + i * name_font.size * 1.16), row, font=name_font, fill=_rgba(INK, 240), anchor="ms")
+    info = "  ·  ".join(p for p in (str(match.get("competition") or ""), str(match.get("date") or "")) if p)
+    if info:
+        font = _font(MEDIUM, 28 * u)
+        draw.text((w / 2, 600 * u), K._ellipsize(draw, info, font, 700 * u), font=font, fill=_rgba(INK, 190), anchor="ms")
+    return home, away, mid
+
+
+def _duel_row(match: Mapping[str, Any], hue: Sequence[int], u: float, row_h: float) -> Any:
+    """Pas pojedynków: barwa meczu z lewej, kamyk - numer z datą - kamyk."""
+    from PIL import Image, ImageDraw
+
+    w, h = int(STAGE_W * u), int(row_h)
+    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    out.alpha_composite(_hue_bar(10 * u, h * 0.6, hue), (0, int(h * 0.2)))
+    size = h * 0.64
+    home_cx, away_cx = 60 * u + size / 2, w - size / 2 - 6 * u
+    _place(out, _team_stone(match, "home", size, u), home_cx, h / 2)
+    _place(out, _team_stone(match, "away", size, u), away_cx, h / 2)
+    mid = (home_cx + away_cx) / 2
+    tile = code_tile(str(match.get("code") or ""), match.get("code_color"), u, 36)
+    date = str(match.get("date") or "")
+    draw = ImageDraw.Draw(out)
+    if tile is not None:
+        _place(out, tile, mid, h / 2 - (16 * u if date else 0))
+    if date:
+        font = _font(MEDIUM, 25 * u)
+        draw.text((mid, h / 2 + (44 if tile is not None else 10) * u), date, font=font, fill=_rgba(INK, 200), anchor="ms")
+    return out
+
+
+def _grid_cell(match: Optional[Mapping[str, Any]], hue: Sequence[int], u: float, cw: float, ch: float, more: int = 0) -> Any:
+    """Komórka siatki: para kamyków na zakładkę, pod nią barwa meczu i numer; albo „+N meczów”."""
+    from PIL import Image, ImageDraw
+
+    w, h = int(cw), int(ch)
+    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(out)
+    if match is None:
+        big = _font(VOICE, 84 * u)
+        small = _font(MEDIUM, 26 * u)
+        draw.text((w / 2, h / 2 + 8 * u), f"+{more}", font=big, fill=_rgba(INK, 235), anchor="ms")
+        draw.text((w / 2, h / 2 + 48 * u), MR.plural(more, "mecz", "mecze", "meczów"), font=small, fill=_rgba(INK, 190), anchor="ms")
+        return out
+    size = min(cw * 0.40, ch * 0.46)
+    cy = size / 2 + h * 0.08
+    _place(out, _team_stone(match, "home", size, u), w / 2 - size * 0.36, cy)
+    _place(out, _team_stone(match, "away", size, u), w / 2 + size * 0.36, cy + size * 0.06)
+    bar_y = cy + size * 0.62
+    out.alpha_composite(_hue_bar(size * 1.3, 8 * u, hue), (int(w / 2 - size * 0.65), int(bar_y)))
+    tile = code_tile(str(match.get("code") or ""), match.get("code_color"), u, 26)
+    if tile is not None and bar_y + 20 * u + tile.height <= h + 6 * u:
+        _place(out, tile, w / 2, bar_y + 20 * u + tile.height / 2)
+    return out
+
+
+def _frame_cell(frame: Optional[Any], number: int, hue: Sequence[int], u: float) -> Any:
+    """Okienko taśmy: kadr klipu przycięty do 16:9, barwa meczu na dole, numer klipu w rogu. Bez kadru: ciemne okienko z numerem."""
+    from PIL import Image, ImageDraw, ImageOps
+
+    w, h = int(FRAME_W * u), int(FRAME_H * u)
+    if frame is not None:
+        art = ImageOps.fit(frame.convert("RGB"), (w, h), Image.LANCZOS).convert("RGBA")
+    else:
+        art = _vertical(w, h, K._mix(hue, (12, 10, 8), 0.72), (12, 10, 8))
+    art.alpha_composite(Image.new("RGBA", (w, int(9 * u) or 1), _rgba(hue, 255)), (0, h - (int(9 * u) or 1)))
+    font = _font(BOLD, 22 * u)
+    probe = ImageDraw.Draw(art)
+    label = str(number)
+    pill = _pill((int(max(34 * u, _text_w(probe, label, font) + 18 * u)), int(34 * u)), (12, 10, 8, 200), int(9 * u))
+    ImageDraw.Draw(pill).text((pill.width / 2, pill.height / 2), label, font=font, fill=_rgba(INK, 255), anchor="mm")
+    art.alpha_composite(pill, (int(8 * u), int(8 * u)))
+    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    out.paste(art, (0, 0), _rounded_mask(w, h, 10 * u))
+    return out
+
+
+def _more_frames(more: int, u: float) -> Any:
+    from PIL import Image, ImageDraw
+
+    w, h = int(FRAME_W * u), int(FRAME_H * u)
+    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    out.paste(Image.new("RGBA", (w, h), _rgba(CORAL, 52)), (0, 0), _rounded_mask(w, h, 10 * u))
+    draw = ImageDraw.Draw(out)
+    draw.text((w / 2, h / 2 + 4 * u), f"+{more}", font=_font(VOICE, 70 * u), fill=_rgba(INK, 240), anchor="ms")
+    draw.text((w / 2, h / 2 + 40 * u), MR.plural(more, "klip", "klipy", "klipów"), font=_font(MEDIUM, 24 * u), fill=_rgba(INK, 200), anchor="ms")
+    return out
+
+
+def _cover_art(width: int, height: int, hues: Sequence[Sequence[int]], frames_used: int, u: float) -> Any:
+    """Nieruchoma grafika: skośny panel w kropki z pasem barw meczów na krawędzi i taśma filmowa z perforacją."""
+    from PIL import Image, ImageChops, ImageDraw
+
+    k = 2
+    art = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    panel = [(PANEL_TOP_X * u * k, 0), (width * k, 0), (width * k, PANEL_BOTTOM * u * k), (PANEL_BOTTOM_X * u * k, PANEL_BOTTOM * u * k)]
+    mask = Image.new("L", (width * k, height * k), 0)
+    ImageDraw.Draw(mask).polygon(panel, fill=255)
+    mask = mask.resize((width, height), Image.LANCZOS)
+    shade = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    shade.paste(Image.new("RGBA", (width, height), (0, 0, 0, 74)), (0, 0), mask)
+    dots = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(dots)
+    step, r = 34 * u, max(1.0, 2.6 * u)
+    y = step / 2
+    while y < PANEL_BOTTOM * u:
+        x = PANEL_BOTTOM_X * u
+        while x < width:
+            draw.ellipse([x - r, y - r, x + r, y + r], fill=(255, 255, 255, 30))
+            x += step
+        y += step
+    dots.putalpha(ImageChops.multiply(dots.getchannel("A"), mask))
+    shade.alpha_composite(dots)
+    art.alpha_composite(shade)
+    layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    for i, hue in enumerate(list(hues)[:len(MATCH_HUES)] or [CORAL]):
+        right, left = PANEL_TOP_X - 14 * i - 4, PANEL_TOP_X - 14 * (i + 1)
+        shift = PANEL_BOTTOM_X - PANEL_TOP_X
+        one = Image.new("L", (width * k, height * k), 0)
+        ImageDraw.Draw(one).polygon([(left * u * k, 0), (right * u * k, 0), ((right + shift) * u * k, PANEL_BOTTOM * u * k),
+                                     ((left + shift) * u * k, PANEL_BOTTOM * u * k)], fill=255)
+        one = one.resize((width, height), Image.LANCZOS)
+        layer.paste(Image.new("RGBA", (width, height), _rgba(hue, 255)), (0, 0), one)
+    art.alpha_composite(layer)
+    band = ImageDraw.Draw(art)
+    band.rectangle([0, STRIP_TOP * u, width, (STRIP_TOP + STRIP_H) * u], fill=(8, 6, 5, 150))
+    hole_w, hole_h, pitch = 20 * u, 12 * u, 40 * u
+    x = 24 * u
+    hole = _pill((int(hole_w), int(hole_h)), (255, 255, 255, 40), int(3 * u))
+    while x < width:
+        for hy in (STRIP_TOP + 14, STRIP_TOP + STRIP_H - 26):
+            art.alpha_composite(hole, (int(x), int(hy * u)))
+        x += pitch
+    empty = _pill((int(FRAME_W * u), int(FRAME_H * u)), (255, 255, 255, 20), int(10 * u))
+    slot = 0
+    while (FRAME_X + slot * (FRAME_W + FRAME_GAP) + FRAME_W) * u <= width:
+        if slot >= frames_used:
+            art.alpha_composite(empty, (int((FRAME_X + slot * (FRAME_W + FRAME_GAP)) * u), int((STRIP_TOP + (STRIP_H - FRAME_H) / 2) * u)))
+        slot += 1
+    return art
 
 
 def compose_cover(data: Mapping[str, Any], width: int, height: int) -> Dict[str, Any]:
-    """Lewa kolumna: nazwa, kreska, opis, trzy liczby (klipy, mecze, czas). Prawa: wiersze meczów (herb - numer - herb),
-    które wjeżdżają po kolei. Klatka 0 jest kompletna (to też miniatura pliku)."""
+    """Okładka: nazwa i zdanie z liczbami po lewej, mecze w skośnym panelu po prawej (układ od liczby meczów), taśma kadrów
+    na dole. Kamyki, komórki i kadry dojeżdżają po kolei; klatka 0 i stan po ruchu są kompletne (to też miniatura pliku)."""
     from PIL import Image, ImageDraw
 
     u = unit(width, height)
     matches = list(data.get("matches") or [])
+    hues = [match_hue(i) for i in range(len(matches))]
     first = matches[0] if matches else {}
     accent = K.parse_color((first.get("colors") or {}).get("home")) or K.parse_color((first.get("colors") or {}).get("away"))
-    lights = [(width * 0.16, height * 0.30, 0.42), (width * 0.78, height * 0.50, 0.40)]
-    background = _bg(width, height, CORAL, accent or (61, 117, 133), lights)
+    background = _bg(width, height, CORAL, accent or (61, 117, 133), [])
+    clips = int(data.get("clips") or 0)
+    shown_frames = frame_count(clips)
+    art = _cover_art(width, height, hues, shown_frames + (1 if clips > shown_frames else 0), u)
+
     text = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(text)
-
-    left = 132 * u
-    col_w = (980 if matches else 1600) * u
+    left, col_w = TITLE_X * u, TITLE_W * u
     name = str(data.get("name") or "Zestawienie")
-    title_font, rows = _wrap_fit(draw, VOICE, name, ((150 * u, 2), (124 * u, 2), (104 * u, 3), (88 * u, 3)), col_w)
-    line = title_font.size * 1.02
+    title_font, rows = _wrap_fit(draw, VOICE, name, ((132 * u, 2), (112 * u, 2), (96 * u, 3), (84 * u, 3)), col_w)
+    line = title_font.size * 1.04
+    num_font, word_font = _font(VOICE, 92 * u), _font(MEDIUM, 40 * u)
+    sentence_lines: List[List[Tuple[str, str]]] = []
+    for group in cover_sentence(clips, len(matches), float(data.get("film_s") or 0)):
+        width_of = sum(_text_w(draw, t, num_font if kind == "n" else word_font) for t, kind in group)
+        if sentence_lines and sum(_text_w(draw, t, num_font if kd == "n" else word_font) for t, kd in sentence_lines[-1]) + 70 * u + width_of <= col_w:
+            sentence_lines[-1] = sentence_lines[-1] + [("  ·  ", "w")] + group
+        else:
+            sentence_lines.append(list(group))
+    sentence_line = num_font.size * 1.12
     desc = str(data.get("description") or "")
-    desc_font = _font(REGULAR, 38 * u)
-    desc_rows = K.wrap_lines(draw, desc, desc_font, col_w * 0.94, 3) if desc else []
-    block = line * len(rows) + 46 * u + (len(desc_rows) * desc_font.size * 1.32 + 10 * u if desc_rows else 0)
-    top = max(120 * u, (height * 0.60 - block) / 2.0)
-    y = top
+    desc_font = _font(REGULAR, 34 * u)
+    desc_rows = K.wrap_lines(draw, desc, desc_font, col_w, 2) if desc else []
+    block = line * len(rows) + 40 * u + sentence_line * len(sentence_lines) + (24 * u + len(desc_rows) * desc_font.size * 1.3 if desc_rows else 0)
+    y = max(96 * u, (PANEL_BOTTOM * u - block) / 2.0)
     for row in rows:
         draw.text((left, y + title_font.size * 0.86), row, font=title_font, fill=_rgba(INK, 255), anchor="ls")
         y += line
-    y += 18 * u
-    text.alpha_composite(_pill((int(112 * u), int(10 * u)), _rgba(CORAL, 255)), (int(left), int(y)))
-    y += 46 * u
-    for row in desc_rows:
-        draw.text((left, y + desc_font.size * 0.9), row, font=desc_font, fill=_rgba(INK, 214), anchor="ls")
-        y += desc_font.size * 1.32
-
-    clips = int(data.get("clips") or 0)
-    stats = [(str(clips), MR.plural(clips, "klip", "klipy", "klipów"))]
-    if matches:
-        stats.append((str(len(matches)), MR.plural(len(matches), "mecz", "mecze", "meczów")))
-    stats.append((MR.duration_label(float(data.get("film_s") or 0)), "czas filmu"))
-    x, base = left, height - 190 * u
-    for number, word in stats:
-        x += _stat(draw, x, base, number, word, u) + 84 * u
-    brand = _font(MEDIUM, 26 * u)
-    K._draw_tracked(draw, left, height - 64 * u, "BAZA · MENTOR", brand, _rgba(INK, 130), brand.size * 0.16)
-    text = _shadowed(text, u, 0.5)
+    y += 40 * u
+    for runs in sentence_lines:
+        x, base = left, y + num_font.size * 0.86
+        for t, kind in runs:
+            font = num_font if kind == "n" else word_font
+            draw.text((x, base), t, font=font, fill=_rgba(INK, 255 if kind == "n" else 205), anchor="ls")
+            x += _text_w(draw, t, font)
+        y += sentence_line
+    if desc_rows:
+        y += 24 * u
+        for row in desc_rows:
+            draw.text((left, y + desc_font.size * 0.9), row, font=desc_font, fill=_rgba(INK, 200), anchor="ls")
+            y += desc_font.size * 1.3
+    brand = _font(MEDIUM, 24 * u)
+    draw.text(((STAGE_X + STAGE_W) * u, 70 * u), "BAZA Mentor", font=brand, fill=_rgba(INK, 120), anchor="rs")
 
     layers: List[Dict[str, Any]] = []
-    if matches:
-        shown = matches if len(matches) <= 4 else matches[:3]
-        row_h = 176 * u
-        total_h = row_h * (len(shown) + (1 if len(matches) > len(shown) else 0))
-        cx = width - 400 * u
-        y0 = (height - total_h) / 2.0 + 10 * u
-        for i, m in enumerate(shown):
-            layers.append({"image": _match_row(m, u, row_h), "x": int(cx - 330 * u), "y": int(y0 + i * row_h), "delay": 0.12 + i * STAGGER_S})
-        if len(matches) > len(shown):
-            more = len(matches) - len(shown)
-            layers.append({"image": _more_row(more, u, row_h), "x": int(cx - 330 * u), "y": int(y0 + len(shown) * row_h),
-                           "delay": 0.12 + len(shown) * STAGGER_S})
-    return {"background": background, "text": text, "layers": layers, "unit": u}
+    sx, sy = STAGE_X * u, STAGE_Y * u
+    kind = cover_layout(len(matches))
+    if matches and kind == "duel":
+        home, away, mid = _duel_parts(matches[0], hues[0], u)
+        text.alpha_composite(mid, (int(sx), int(sy)))
+        for side, img, cx in (("home", home, 170), ("away", away, 570)):
+            layers.append({"image": img, "x": int(sx + cx * u - img.width / 2), "y": int(sy + 290 * u - img.height / 2), "motion": side,
+                           "delay": 0.10 if side == "home" else 0.16})
+    elif kind == "rows":
+        row_h = min(190.0, STAGE_H / len(matches)) * u
+        y0 = sy + (STAGE_H * u - row_h * len(matches)) / 2
+        for i, m in enumerate(matches):
+            layers.append({"image": _duel_row(m, hues[i], u, row_h), "x": int(sx), "y": int(y0 + i * row_h), "delay": 0.10 + i * STAGGER_S})
+    elif kind == "grid":
+        cols, grid_rows, shown = grid_shape(len(matches))
+        cw = STAGE_W * u / cols
+        ch = min(STAGE_H / grid_rows, 240.0) * u
+        y0 = sy + (STAGE_H * u - ch * grid_rows) / 2
+        cells = [(m, hues[i]) for i, m in enumerate(matches[:shown])]
+        for i in range(min(len(matches), GRID_MAX)):
+            r, c = divmod(i, cols)
+            m, hue = cells[i] if i < len(cells) else (None, CORAL)
+            img = _grid_cell(m, hue, u, cw, ch, len(matches) - shown)
+            layers.append({"image": img, "x": int(sx + c * cw), "y": int(y0 + r * ch), "delay": min(0.6, 0.08 + i * 0.045)})
 
+    frames = list(data.get("frames") or [])
+    owners = list(data.get("clip_matches") or [])
+    fy = (STRIP_TOP + (STRIP_H - FRAME_H) / 2) * u
+    for i in range(shown_frames):
+        hue = hues[owners[i]] if i < len(owners) and 0 <= owners[i] < len(hues) else CORAL
+        img = _frame_cell(frames[i] if i < len(frames) else None, i + 1, hue, u)
+        layers.append({"image": img, "x": int((FRAME_X + i * (FRAME_W + FRAME_GAP)) * u), "y": int(fy), "motion": "rise",
+                       "delay": 0.30 + i * 0.06})
+    if clips > shown_frames:
+        layers.append({"image": _more_frames(clips - shown_frames, u), "x": int((FRAME_X + shown_frames * (FRAME_W + FRAME_GAP)) * u),
+                       "y": int(fy), "motion": "rise", "delay": 0.30 + shown_frames * 0.06})
 
-def _match_row(match: Mapping[str, Any], u: float, row_h: float) -> Any:
-    """Wiersz okładki: herb gospodarza, kafelek numeru z datą pod spodem, herb gościa (szerokość 660u)."""
-    from PIL import Image, ImageDraw
-
-    w, h = int(660 * u), int(row_h)
-    box = int(124 * u)
-    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    crests = match.get("crests") or {}
-    colors = match.get("colors") or {}
-    for side, cx in (("home", 92 * u), ("away", w - 92 * u)):
-        img = medallion(crests.get(side), str(match.get(side) or ""), colors.get(side), box, u)
-        out.alpha_composite(img, (int(cx - img.width / 2), int(h / 2 - img.height / 2)))
-    tile = code_tile(str(match.get("code") or ""), match.get("code_color"), u, 40)
-    draw = ImageDraw.Draw(out)
-    mid = w / 2.0
-    if tile is not None:
-        out.alpha_composite(tile, (int(mid - tile.width / 2), int(h / 2 - tile.height + 4 * u)))
-    date = str(match.get("date") or "")
-    if date:
-        font = _font(MEDIUM, 26 * u)
-        draw.text((mid, h / 2 + 40 * u), date, font=font, fill=_rgba(INK, 205), anchor="ms")
-    elif tile is None:
-        font = _font(BOLD, 34 * u)
-        draw.text((mid, h / 2 + 12 * u), "-", font=font, fill=_rgba(INK, 200), anchor="ms")
-    return out
-
-
-def _more_row(more: int, u: float, row_h: float) -> Any:
-    from PIL import Image, ImageDraw
-
-    w, h = int(660 * u), int(row_h)
-    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(out)
-    font = _font(MEDIUM, 34 * u)
-    draw.text((w / 2, h / 2 + 12 * u), f"i jeszcze {more} {MR.plural(more, 'mecz', 'mecze', 'meczów')}", font=font,
-              fill=_rgba(INK, 210), anchor="ms")
-    return out
+    art.alpha_composite(_shadowed(text, u, 0.5))
+    return {"background": background, "text": art, "layers": layers, "unit": u}
 
 
 # ─── Rozdział meczu ─────────────────────────────────────────────────────────

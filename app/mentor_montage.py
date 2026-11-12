@@ -809,11 +809,26 @@ async def _render(row: Dict[str, Any], entries: List[Dict[str, Any]], folder: st
     look = {"v": MR.LOOK_VERSION, "w": width, "h": height, "ff": await _ffmpeg_version()}
     parts: List[str] = []
 
-    # Okładka.
+    # Okładka: mecze w kolejności filmu, barwa każdego klipu z numeru jego meczu, kadry pierwszych klipów na taśmę.
+    order = list(dict.fromkeys(match_ids))
+    clip_matches = [order.index(m) for m in match_ids]
+    cover_frames: List[Any] = []
+    frame_keys: List[Any] = []
+    for i, e in enumerate(entries[:MC.frame_count(total)]):
+        at = e["offset"] + min(1.0, e["duration"] * 0.5)
+        path = os.path.join(folder, f"cover-frame-{i}.png")
+        frame_keys.append([e["source"]["key"], round(at, 3)])
+        try:
+            await _ffmpeg(MV.frame_args(e["source"], at, width, height, path), 120)
+            with Image.open(path) as shot:
+                cover_frames.append(shot.convert("RGB").resize((480, 270), Image.LANCZOS))
+        except Exception:  # noqa: BLE001 - brak kadru to ciemne okienko z numerem, film rusza dalej
+            cover_frames.append(None)
     cover_info = {"name": name, "description": R.s(row.get("description")), "clips": total, "film_s": plan["total_s"],
-                  "matches": [{k: v for k, v in views[m].items() if k not in ("crests",)} for m in dict.fromkeys(match_ids)]}
-    cover_comp = MC.compose_cover(MC.cover_data(name, R.s(row.get("description")), [views[m] for m in dict.fromkeys(match_ids)], total,
-                                                plan["total_s"]), width, height)
+                  "matches": [{k: v for k, v in views[m].items() if k not in ("crests",)} for m in order],
+                  "clip_matches": clip_matches, "frames": frame_keys}
+    cover_comp = MC.compose_cover(MC.cover_data(name, R.s(row.get("description")), [views[m] for m in order], total,
+                                                plan["total_s"], clip_matches, cover_frames), width, height)
     cover_still = os.path.join(folder, "cover.png")
     MC.flatten(cover_comp).save(cover_still, "PNG", compress_level=1)
     cover_path = os.path.join(folder, f"part-cover.{MV.SEGMENT_EXT}")

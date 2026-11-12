@@ -22,7 +22,7 @@ import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 #: Wersja wyglądu: podbicie unieważnia zapamiętane odcinki i gotowe filmy przy ponownym zamówieniu.
-LOOK_VERSION = 2
+LOOK_VERSION = 3
 FPS = 30
 
 COVER_S = 4.0

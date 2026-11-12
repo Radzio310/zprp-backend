@@ -429,3 +429,26 @@ def test_usuniety_film_nie_wraca_z_przegladu(d):
 
     after, rendered = d.run(go)
     assert after["status"] == "cancelled" and rendered is False
+
+
+def test_cover_scales_with_matches_and_clips():
+    """Okładka 13.11: układ meczów od ich liczby, taśma kadrów z „+N”, liczby w zdaniu, warstwy w kadrze."""
+    from PIL import Image
+
+    from app import mentor_montage_cards as MC
+
+    assert [MC.cover_layout(n) for n in (0, 1, 2, 4, 5, 13)] == ["duel", "duel", "rows", "rows", "grid", "grid"]
+    assert MC.grid_shape(8) == (4, 2, 8) and MC.grid_shape(14) == (4, 3, 11)
+    assert MC.frame_count(3) == 3 and MC.frame_count(7) == 7 and MC.frame_count(20) == 6
+    assert MC.cover_sentence(1, 1, 23) == [[("1", "n"), (" klip", "w")], [("23", "n"), (" s filmu", "w")]]
+    assert MC.cover_sentence(9, 3, 161)[0] == [("9", "n"), (" klipów", "w"), (" z ", "w"), ("3", "n"), (" meczów", "w")]
+    for n_matches, clips in ((1, 1), (3, 9), (8, 24), (14, 30)):
+        matches = [{"home": f"Gospodarz {i}", "away": f"Gość {i}", "code": f"SPR/{i}", "code_color": "#d32f2f", "date": "10.10.2026",
+                    "crests": {}, "colors": {}} for i in range(n_matches)]
+        frames = [Image.new("RGB", (320, 180), (180, 120, 70)) if i % 2 else None for i in range(MC.frame_count(clips))]
+        comp = MC.compose_cover(MC.cover_data("Obszar kołowego", "", matches, clips, 90, [0] * clips, frames), 1280, 720)
+        assert comp["text"].size == (1280, 720)
+        for layer in comp["layers"]:
+            assert 0 <= layer["x"] and layer["x"] + layer["image"].width <= 1280 + 2
+            assert 0 <= layer["y"] and layer["y"] + layer["image"].height <= 720 + 2
+        assert MC.flatten(comp).size == (1280, 720)
