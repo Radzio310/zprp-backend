@@ -145,3 +145,18 @@ def test_strona_wynikow_otwarta_bez_klucza():
 def test_ladny_adres_wynikow():
     text = (ROOT / "app/district_forms.py").read_text(encoding="utf-8")
     assert 'return f"{R.WEB_HOST}/f/wyniki/{code}"' in text
+
+
+def test_sklad_kolumn_i_wplaty_bez_narastania():
+    assert ST.column_kinds(["Lp.", "Sędzia", "Osoby", "Zmiana"], [["1", "A", "2", "10.11.2026 12:00"], ["2", "B", "", ""]]) == ["lp", "txt", "num", "when"]
+    money = ST.html_money({"pass": "#000000", "warn": "#111111", "line": "#222222", "track": "#333333", "soft": "#444444"},
+                          {"confirmed": 1, "declared": 1, "none": 2, "amount": 50, "expected_total": 100, "confirmed_total": 50, "declared_total": 100})
+    assert "1 os. · 50 zł" in money and "100 zł" in money and "do zebrania 50 zł" in money
+
+
+def test_excel_liczby_jako_liczby_i_zamrozone_nazwisko():
+    from openpyxl import load_workbook
+
+    sheet = load_workbook(io.BytesIO(ST.to_xlsx(_doc(), theme="elegant", province_key=None, layout="report")))["Lista"]
+    assert sheet.freeze_panes == "C6"
+    assert sheet.cell(row=6, column=1).value == 1
