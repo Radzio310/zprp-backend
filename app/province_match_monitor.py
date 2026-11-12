@@ -926,6 +926,14 @@ async def _upsert_match(
         .where(and_(province_matches.c.province == province, province_matches.c.match_id == match_id))
         .values(**values)
     )
+    if old_row["fingerprint"] != new_fp:
+        # Obsada na zywo: dziennik zmian obsady i terminu. Zaczep nie rzuca.
+        try:
+            from app.obsada_view import record_changes
+
+            await record_changes(province, match_id, old, state, old_row["match_at"], values["match_at"])
+        except Exception:  # noqa: BLE001 - monitor nie moze na tym paść
+            logger.debug("obsada changes hook skipped", exc_info=True)
     if old_row["fingerprint"] != new_fp or removed_ids:
         from app.settlement_live import sync_match
 

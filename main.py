@@ -116,6 +116,7 @@ from app.province_settlement_exclusions import router as province_settlement_exc
 from app.province_assignments import router as province_assignments_router
 from app.province_assignment_auto import router as province_assignment_auto_router
 from app.province_assignment_board import router as province_assignment_board_router
+from app.obsada_view import router as obsada_view_router
 from app.zprp_archive import router as province_archive_router, run_archive_scheduler
 from app.assignment_insights import router as province_insights_router, run_insights_scheduler
 from app.province_club_budgets import router as province_club_budgets_router, seed_default_budgets
@@ -507,6 +508,7 @@ app.include_router(district_alerts_router)
 app.include_router(province_assignments_router)
 app.include_router(province_assignment_auto_router)
 app.include_router(province_assignment_board_router)
+app.include_router(obsada_view_router)
 app.include_router(province_archive_router)
 app.include_router(province_insights_router)
 app.include_router(province_events_router)
