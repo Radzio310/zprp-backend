@@ -749,6 +749,51 @@ async def create_compilation(pair_id: str, body: CompilationBody, actor: Actor =
     return await compilation_payload(ctx, row["id"])
 
 
+@router.get("/pairs/{pair_id}/compilations/suggest")
+async def suggest_compilations(pair_id: str, match_id: Optional[str] = Query(None), category_ids: Optional[str] = Query(None),
+                               clip_id: Optional[str] = Query(None), actor: Actor = Depends(mentor_actor)):
+    """Podpowiedzi zestawień dla klipu (12.11.2026): z tego meczu, po kategorii, ostatnio używane (`mentor_compilation_suggest`).
+    `category_ids` po przecinku. Przy wycinaniu nowego klipu bez `clip_id` (nic jeszcze nie ma `has_clip`)."""
+    from app import mentor_compilation_suggest as S
+
+    ctx = await C.pair_context(pair_id, actor)
+    comps = await C.rows(select(mentor_compilations).where(mentor_compilations.c.pair_id == ctx["pair_id"])
+                         .order_by(mentor_compilations.c.updated_at.desc()))
+    if not comps:
+        return {"suggestions": []}
+    rows = await C.rows(select(mentor_compilation_items).where(mentor_compilation_items.c.compilation_id.in_([c["id"] for c in comps]))
+                        .order_by(mentor_compilation_items.c.position.asc()))
+    items: Dict[str, List[str]] = {}
+    for r in rows:
+        items.setdefault(r["compilation_id"], []).append(r["clip_id"])
+    clip_rows = await C.rows(select(mentor_clips.c.id, mentor_clips.c.match_id, mentor_clips.c.category_ids)
+                             .where(mentor_clips.c.pair_id == ctx["pair_id"]).where(mentor_clips.c.deleted_at.is_(None))
+                             .where(mentor_clips.c.id.in_(list({r["clip_id"] for r in rows}) or [""])))
+    clips = {r["id"]: {"match_id": r["match_id"], "category_ids": [R.s(x) for x in R.json_value(r.get("category_ids"), []) or []]} for r in clip_rows}
+    cats = [R.s(x) for x in (category_ids or "").split(",") if R.s(x)][:20]
+    names = {r["id"]: R.s(r.get("name")) for r in await C.categories(ctx, seed=False)}
+    for comp in comps:
+        comp["can_edit"] = C.may(ctx, "edit", owner=R.s(comp.get("created_by")) == actor.judge_id)
+    ranked = S.rank(comps, items, clips, match_id=R.s(match_id) or None, category_ids=cats, clip_id=R.s(clip_id) or None, category_names=names)
+    for item in ranked:
+        item["reason_text"] = " · ".join(S.reason_text(r) for r in item["reasons"]) or "W zestawieniu"
+    return {"suggestions": [i for i in ranked if i["can_edit"] or i["has_clip"]]}
+
+
+@router.delete("/compilations/{compilation_id}/items/{clip_id}")
+async def remove_item(compilation_id: str, clip_id: str, actor: Actor = Depends(mentor_actor)):
+    """Jeden klip z zestawienia (przełącznik „w zestawieniu” przy klipie); reszta kolejności bez zmian."""
+    ctx, row = await _editable_compilation(compilation_id, actor)
+    current = await _items(compilation_id)
+    left = [i for i in current if i["clip_id"] != clip_id]
+    if len(left) != len(current):
+        await _write_items(compilation_id, [{k: i.get(k) for k in ("clip_id", "position", "column", "note", "label")} | {"position": n}
+                                            for n, i in enumerate(left)])
+        await database.execute(update(mentor_compilations).where(mentor_compilations.c.id == compilation_id).values(updated_at=C.now()))
+        await C.touch(ctx, actor.judge_id, "compilation_items", "compilations", data={"id": compilation_id})
+    return await compilation_payload(ctx, compilation_id)
+
+
 @router.get("/compilations/{compilation_id}")
 async def get_compilation(compilation_id: str, actor: Actor = Depends(mentor_actor)):
     ctx, _row = await _ctx_for(mentor_compilations, compilation_id, actor, missing="Nie ma takiego zestawienia.")

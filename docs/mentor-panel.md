@@ -217,6 +217,12 @@ serwer skleja części bez widocznego szwu. Kod: `app/mentor_upload_groups.py` (
 - `POST /pairs/{pairId}/compilations` `{name, mode, description?}`; `PATCH /compilations/{id}`; `DELETE`.
 - `PUT /compilations/{id}/items` `{items:[{clip_id, column?, note?, label?}], mode?}` (całość w kolejności) → `Compilation`; `POST /compilations/{id}/items` `{clip_id, column?, note?, label?}` („Dodaj do zestawienia”).
 - `GET /compilations/{id}` → `{..., items:[{clip: Clip, column, note, label, position}]}`.
+- **Podpowiedzi zestawień dla klipu (12.11.2026, addytywnie).** `GET /pairs/{pairId}/compilations/suggest?match_id=&category_ids=a,b&clip_id=`
+  → `{suggestions:[{id, name, items_count, has_clip, can_edit, score, reasons:[{kind:"match", count} | {kind:"category",
+  category_id, name, count, total, in_name} | {kind:"recent"}], reason_text}]}` (najwyżej 6; `app/mentor_compilation_suggest.py`).
+  Kolejność: zestawienia z tym klipem (`has_clip`), potem z klipami z tego meczu, potem po kategorii (udział, nazwa kategorii
+  w nazwie zestawienia), dopełnienie do trzech „Ostatnio używane”. Bez prawa edycji zestawienie wraca tylko, gdy ma już ten klip.
+  Przy wycinaniu nowego klipu bez `clip_id`. `DELETE /compilations/{id}/items/{clipId}` zdejmuje jeden klip (przełącznik przy klipie).
 - **Playlista (24.10.2026, addytywnie).** Zestawienie = nazwa + opis („co pokazujemy”) + dowolna liczba klipów z różnych meczów; każdy klip ma `label` (podpowiedzi: Dobra decyzja, Zła decyzja, Balans, Dysproporcja, Wzorzec, Do poprawy, albo dowolny tekst ≤40) i `note` (≤280). Nowi klienci tworzą i zapisują `mode: "free"`. Stary `contrast` czytany jako playlista: `label` pusty = z kolumny (`a` → „Wzorzec”, `b` → „Do poprawy”, `rules.legacy_label`); `PUT .../items` z `mode:"free"` albo `PATCH {mode:"free"}` przepisuje go na playlistę (kolejność A1, B1, A2..., `rules.playlist_items`). Publiczny odczyt oddaje też `label`. Klip w `GET /compilations/{id}` ma też `match` (skrót karty: `match_id, season, scheduled_at, match_code, category, competition_name, home, away`, `rules.slim_match`) - klient dzieli playlistę na sekcje meczów (herby, numer, data, wynik). Migracja: `ALTER TABLE mentor_compilation_items ADD COLUMN IF NOT EXISTS label`.
 
 ### 4.8 Wątki
