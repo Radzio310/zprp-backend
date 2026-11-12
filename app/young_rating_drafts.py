@@ -1,8 +1,8 @@
 """Szkice ocen młodych sędziów na serwerze (dokończenie na innym urządzeniu).
 
 Tylko autor (numer sędziego z tokenu) widzi i zmienia swoje szkice.
-Tabela żyje w tym module (nie w db.py): zakładana przy imporcie, bo
-`create_all` w db.py biegnie wcześniej, niż ten moduł dokłada schemat.
+Schemat: `app/young_rating_drafts_tables.py`, rejestrowany w db.py przed
+`metadata.create_all` (wzorzec projektu).
 """
 
 from __future__ import annotations
@@ -11,9 +11,9 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import Column, DateTime, String, Table, Text, delete, func, select
+from sqlalchemy import delete, func, select
 
-from app.db import database, engine, metadata
+from app.db import database, young_rating_drafts
 from app.deps import get_jwt_payload
 from app.province_guard import actor_judge_id
 from app.young_rating_drafts_rules import (
@@ -22,16 +22,6 @@ from app.young_rating_drafts_rules import (
     payload_dict,
 )
 
-young_rating_drafts = Table(
-    "young_rating_drafts",
-    metadata,
-    Column("judge_id", String, primary_key=True),
-    Column("draft_key", String, primary_key=True),
-    #: Napis JSON - serwer go nie rozbiera (sterownik oddaje JSONB napisem).
-    Column("payload", Text, nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-)
-young_rating_drafts.create(engine, checkfirst=True)
 
 router = APIRouter(prefix="/young_rating_drafts", tags=["young-rating-drafts"])
 

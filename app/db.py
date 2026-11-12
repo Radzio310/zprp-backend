@@ -4980,6 +4980,11 @@ from app.offtime_assignments_tables import define_tables as _define_offtime_assi
 
 (silesia_offtime_assignments,) = _define_offtime_assignments_tables(metadata)
 
+# Szkice ocen młodych sędziów (`app/young_rating_drafts_tables.py`).
+from app.young_rating_drafts_tables import define_tables as _define_young_rating_drafts_tables
+
+(young_rating_drafts,) = _define_young_rating_drafts_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
