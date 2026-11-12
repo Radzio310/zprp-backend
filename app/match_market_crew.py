@@ -414,7 +414,14 @@ async def _announce_new(offer_id: int) -> None:
 # ───────────────────────────── widoki ─────────────────────────────
 
 
-def _slot_views(offer: Dict[str, Any], claims: List[Dict[str, Any]], cards: Dict[str, Dict[str, Any]]) -> list:
+def _slot_views(
+    offer: Dict[str, Any],
+    claims: List[Dict[str, Any]],
+    cards: Dict[str, Dict[str, Any]],
+    *,
+    hide_names: bool = False,
+    viewer_id: str = "",
+) -> list:
     held = _assigned(claims)
     out = []
     for slot in offer["slots"]:
@@ -424,8 +431,17 @@ def _slot_views(offer: Dict[str, Any], claims: List[Dict[str, Any]], cards: Dict
                 "slot": slot,
                 "label": R.SLOT_LABELS[slot],
                 "role": R.role_of_slot(slot),
-                "assignedTo": _person(claim["judge_id"], cards) if claim else None,
-                "claimId": claim["id"] if claim else None,
+                # Ukryci zgłoszeni (decyzja 12.11): zwykły sędzia nie dostaje
+                # nazwiska obsadzonego - tylko fakt, że gniazdo jest zajęte,
+                # i czy to on.
+                "assignedTo": (
+                    _person(claim["judge_id"], cards)
+                    if claim and (not hide_names or _s(claim["judge_id"]) == viewer_id)
+                    else None
+                ),
+                "taken": bool(claim),
+                "takenByMe": bool(claim and _s(claim["judge_id"]) == viewer_id),
+                "claimId": claim["id"] if claim and not hide_names else None,
             }
         )
     return out
@@ -440,6 +456,7 @@ def _offer_view(
     can_manage: bool,
     my_roles: List[str],
     now: datetime,
+    hide_names: bool = False,
 ) -> Dict[str, Any]:
     roles = R.roles_of(offer["slots"])
     status = R.effective_status(
@@ -469,7 +486,8 @@ def _offer_view(
         "matchId": offer["match_id"],
         "matchCode": offer.get("match_code"),
         "match": _match_view(offer["match_snapshot"], offer.get("match_at")),
-        "slots": _slot_views(offer, claims, cards),
+        "slots": _slot_views(offer, claims, cards, hide_names=hide_names, viewer_id=viewer_id),
+        "iClaimed": bool(my_claim),
         "roles": roles,
         "needsRoleChoice": len(roles) == 2,
         "comment": offer.get("comment") or "",
@@ -689,7 +707,10 @@ async def list_offers(
                 continue
             if scope != "all" and not R.accepting_claims(offer["status"], offer.get("deadline_at"), now):
                 continue
-        out.append(_offer_view(offer, claims, cards, viewer_id=actor.judge_id, can_manage=can_manage, my_roles=my_roles, now=now))
+        out.append(_offer_view(
+            offer, claims, cards, viewer_id=actor.judge_id, can_manage=can_manage, my_roles=my_roles, now=now,
+            hide_names=bool(cfg["hide_claimers"]) and not can_manage,
+        ))
     return {"offers": out, "canManage": can_manage}
 
 
@@ -698,7 +719,7 @@ async def _detail(offer_id: int, actor: Actor, quick: bool = False) -> Dict[str,
     key = offer["province"]
     await _sweep(key)
     offer = await _load_offer(offer_id)
-    _, can_manage = await _viewer(actor, key)
+    cfg, can_manage = await _viewer(actor, key)
     claims = await _claims_of(offer_id)
     roster = await _roster_for(key)
     my_roles = _my_roles(roster, actor.judge_id, R.roles_of(offer["slots"]))
@@ -708,7 +729,10 @@ async def _detail(offer_id: int, actor: Actor, quick: bool = False) -> Dict[str,
         if reason:
             raise HTTPException(403, reason)
     cards = await _judge_cards([offer["created_by"]] + [c["judge_id"] for c in claims] + [c.get("partner_id") for c in claims])
-    view = _offer_view(offer, claims, cards, viewer_id=actor.judge_id, can_manage=can_manage, my_roles=my_roles, now=_now())
+    view = _offer_view(
+        offer, claims, cards, viewer_id=actor.judge_id, can_manage=can_manage, my_roles=my_roles, now=_now(),
+        hide_names=bool(cfg["hide_claimers"]) and not can_manage,
+    )
     if can_manage:
         claims_view = await _claims_view(offer, claims, cards, quick=quick)
         view["metricsPending"] = bool(claims_view.pop("_pending", False))
@@ -1094,7 +1118,8 @@ async def _maybe_fill(offer: Dict[str, Any], actor: Actor) -> None:
     losers = [c for c in claims if _s(c["status"]) == R.PENDING]
     for c in losers:
         await database.execute(update(claims_t).where(claims_t.c.id == c["id"]).values(status=R.DECLINED))
-    await _push([c["judge_id"] for c in losers], R.text_filled(offer), offer)
+    hide = bool((await _config(offer["province"]))["hide_claimers"])
+    await _push([c["judge_id"] for c in losers], R.text_filled(offer, hide), offer)
 
 
 @router.post("/{offer_id}/claims/{claim_id}/unassign", summary="Cofnij przydział")

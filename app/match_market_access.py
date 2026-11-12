@@ -237,3 +237,15 @@ def approved_notification_groups(
         "crew": crew,
         "managers": sorted(set(clean(manager_ids)) - informed),
     }
+
+
+def names_hidden_split(
+    ids: Iterable[Any], approver_ids: Iterable[Any], hide: bool,
+) -> tuple[List[str], List[str]]:
+    """(z nazwiskami, bez nazwisk): ukrycie dotyczy wszystkich poza rozstrzygającymi."""
+    clean = lambda values: sorted({str(v or "").strip() for v in values if str(v or "").strip()})
+    all_ids = clean(ids)
+    if not hide:
+        return all_ids, []
+    approvers = set(clean(approver_ids))
+    return [i for i in all_ids if i in approvers], [i for i in all_ids if i not in approvers]

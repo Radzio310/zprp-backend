@@ -573,3 +573,83 @@ def conflict_sentence(conflicts: Iterable[Mapping[str, Any]]) -> str:
             piece = f"{piece} w {hall}"
         parts.append(piece)
     return ", ".join(parts)
+
+
+# ─────────── wersje bez nazwisk (okręg ukrył, kto się zgłosił) ───────────
+#
+# Decyzja 12.11.2026: gdy okręg włączy „Ukryj, kto się zgłosił", zwykli sędziowie
+# (w tym oddający mecz) nie dostają w pushach żadnego nazwiska chętnego ani
+# przejmującego. Obsadowi i admini zostają przy wersjach z nazwiskami wyżej.
+
+
+def claim_digest_hidden(offer: Mapping[str, Any], count: int) -> tuple[str, str]:
+    """Oddający widzi tylko liczbę chętnych - wybiera obsadowy."""
+    code = _s(offer.get("match_code"))
+    suffix = f" · {code}" if code else ""
+    if count <= 0:
+        return (
+            f"🙋 Brak zgłoszeń{suffix}",
+            _join(
+                f"Nie ma już aktywnych zgłoszeń na {slot_for(offer.get('slot'))}",
+                "Oferta pozostaje otwarta",
+            ),
+        )
+    return (
+        f"🙋 {_claim_count_label(count)}{suffix}",
+        _join(
+            f"Na {slot_for(offer.get('slot'))} zgłasza się: {count}",
+            "Wybiera obsadowy",
+        ),
+    )
+
+
+def claim_withdrawn_hidden(offer: Mapping[str, Any]) -> tuple[str, str]:
+    return (
+        "↩️ Zgłoszenie wycofane",
+        _join(f"Ktoś wycofał zgłoszenie na {match_of(offer)}", when_of(offer)),
+    )
+
+
+def taker_won_hidden(offer: Mapping[str, Any]) -> tuple[str, str]:
+    return (
+        "✅ Masz mecz",
+        _join(
+            f"Prowadzisz {match_of(offer)} jako {slot_as(offer.get('slot'))}",
+            when_of(offer),
+            teams_of(offer.get("match_snapshot")),
+            "Obsada jest już zapisana w bazie związku",
+        ),
+    )
+
+
+def claim_lost_hidden(offer: Mapping[str, Any]) -> tuple[str, str]:
+    return (
+        "Tym razem nie",
+        _join(
+            f"{_capitalize(match_of(offer))} jest już obsadzony",
+            "Twoje zgłoszenie nie zostało wybrane",
+        ),
+    )
+
+
+def giver_released_hidden(offer: Mapping[str, Any]) -> tuple[str, str]:
+    return (
+        "✅ Mecz oddany",
+        _join(
+            f"{_capitalize(match_of(offer))} został przekazany dalej "
+            f"({slot_as(offer.get('slot'))})",
+            when_of(offer),
+            "Obsada jest już zmieniona w bazie związku - nie musisz tam być",
+        ),
+    )
+
+
+def crew_changed_hidden(offer: Mapping[str, Any]) -> tuple[str, str]:
+    return (
+        "🔁 Zmiana w Twoim meczu",
+        _join(
+            f"W {match_gen(offer)} zmienił się {slot_as(offer.get('slot'))}",
+            when_of(offer),
+            "Szczegóły w aplikacji",
+        ),
+    )

@@ -65,6 +65,12 @@ from app.match_market_notify import (
     claim_created_for_giver as text_claim_created_for_giver,
     claim_pending_for_claimer as text_claim_pending_for_claimer,
     claim_withdrawn as text_claim_withdrawn,
+    claim_digest_hidden as text_claim_digest_hidden,
+    claim_withdrawn_hidden as text_claim_withdrawn_hidden,
+    taker_won_hidden as text_taker_won_hidden,
+    claim_lost_hidden as text_claim_lost_hidden,
+    giver_released_hidden as text_giver_released_hidden,
+    crew_changed_hidden as text_crew_changed_hidden,
     claim_impossible as text_claim_impossible,
     claim_lost as text_claim_lost,
     crew_changed as text_crew_changed,
@@ -87,6 +93,7 @@ from app.match_market_access import (
     claim_notification_groups,
     may_approve,
     may_manage_config,
+    names_hidden_split,
     notification_manager_ids,
     offer_notification_groups,
     rejected_notification_targets,
@@ -272,6 +279,7 @@ async def _config(province: str) -> Dict[str, Any]:
         "assign_account_mode": _s(data.get("assign_account_mode")) or "own",
         "approver_badges": normalize_approver_badges(data.get("approver_badges")),
         "notify_admins": bool(data.get("notify_admins", False)),
+        "hide_claimers": bool(data.get("hide_claimers", False)),
         # Mecze spoza obsady okręgu - patrz sekcja „Poziom rozgrywek" w liściu
         # reguł. Wymiana domyślnie WYŁĄCZONA; lista lig powierzonych z panelu
         # albo z katalogu domyślnego (`managed_prefixes_custom` mówi, która).
@@ -1463,6 +1471,8 @@ class ProvinceConfigRequest(BaseModel):
     assign_account_mode: Optional[str] = None
     approver_badges: Optional[List[str]] = None
     notify_admins: Optional[bool] = None
+    #: Ukrycie przed zwykłymi sędziami, kto się zgłosił (widzi obsadowy i admin).
+    hide_claimers: Optional[bool] = None
     #: Wymiana meczów spoza obsady okręgu (boiskowe gniazda I ligi i wyżej
     #: oraz obcych II lig). Domyślnie wyłączona - patrz liść reguł.
     foreign_matches_enabled: Optional[bool] = None
@@ -1538,6 +1548,7 @@ async def get_context(actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
         "isAdmin": actor.is_admin,
         "enabled": bool(cfg and cfg["market_enabled"]),
         "deadlineHours": cfg["offer_deadline_hours"] if cfg else DEFAULT_DEADLINE_HOURS,
+        "hideClaimers": bool(cfg and cfg["hide_claimers"]),
         # Plakietka przy nazwisku: odznaka, która NAPRAWDĘ daje to prawo w tym
         # okręgu - odkąd okręg sam wybiera odznaki, nie zawsze jest to
         # "Obsadowy". Dla administratora bez odznaki zostaje pierwsza z listy;
@@ -2095,7 +2106,12 @@ async def _offer_payload(
     viewer_id: str,
     my_crew_label: str = "",
     bench: Optional[Dict[str, Dict[str, Any]]] = None,
+    hide_names: bool = False,
 ) -> Dict[str, Any]:
+    # `hide_names` = okręg ukrył zgłoszonych, a pytający nie rozstrzyga (decyzja
+    # 12.11): zostaje `claimCount` i `myClaim`, nazwisk nie ma wcale - ani w
+    # `claimers`, ani w `claims` (także dla oddającego), ani u przejmującego.
+    viewer = _s(viewer_id)
     # Ławka rezerwowych (decyzje 26.10): dojazd z domu do hali tego meczu i
     # sezon przy chętnych - `app/match_market_bench.py`. Pusto = brak liczb.
     bench = bench or {}
@@ -2129,7 +2145,7 @@ async def _offer_payload(
         # razu pokazać „3 + 2" bez osobnego zapytania na wiersz (wizytówki
         # przyszły już w `cards`). Notatek i kolizji tu nie ma - te zostają w
         # widoku decyzji. Kolejność = kolejność zgłoszeń.
-        "claimers": [
+        "claimers": [] if hide_names else [
             _person(_s(c.get("judge_id")), cards.get(_s(c.get("judge_id"))))
             for c in sorted(
                 (c for c in claims if _s(c.get("status")) in ("pending", "chosen")),
@@ -2144,6 +2160,7 @@ async def _offer_payload(
                 _s((cards.get(_s(c.get("judge_id"))) or {}).get("full_name"))
                 for c in claims
                 if _s(c.get("status")) == "chosen"
+                and (not hide_names or _s(c.get("judge_id")) == viewer)
             ),
             "",
         )
@@ -2156,6 +2173,7 @@ async def _offer_payload(
                 _person(_s(c.get("judge_id")), cards.get(_s(c.get("judge_id"))))
                 for c in claims
                 if _s(c.get("status")) == "chosen"
+                and (not hide_names or _s(c.get("judge_id")) == viewer)
             ),
             None,
         ),
@@ -2196,7 +2214,7 @@ async def _offer_payload(
                 for c in claims
                 if _s(c.get("status")) in ("pending", "chosen")
             ]
-            if _s(offer.get("from_judge_id")) == _s(viewer_id)
+            if _s(offer.get("from_judge_id")) == _s(viewer_id) and not hide_names
             else []
         ),
     }
@@ -2355,6 +2373,7 @@ async def list_offers(
                     viewer_id=actor.judge_id,
                     my_crew_label=my_roles.get(_s(r["match_id"]), ""),
                     bench=bench.get(int(r["id"])),
+                    hide_names=bool(cfg["hide_claimers"]) and not approver,
                 ),
                 r,
             )
@@ -3000,10 +3019,20 @@ async def create_claim(
     await _notify(managers, text_claim_digest(offer, active_names, actionable=True), offer,
                   audience="obsadowi i administratorzy", record_empty=True)
     if giver_targets:
-        await _notify(
-            giver_targets, text_claim_digest(offer, active_names, actionable=False), offer,
-            audience="oddający mecz",
+        named, nameless = names_hidden_split(
+            giver_targets, await _approvers_of(province, "claims"),
+            bool((await _config(province))["hide_claimers"]),
         )
+        if named:
+            await _notify(
+                named, text_claim_digest(offer, active_names, actionable=False), offer,
+                audience="oddający mecz",
+            )
+        if nameless:
+            await _notify(
+                nameless, text_claim_digest_hidden(offer, len(active_names)), offer,
+                audience="oddający mecz (bez nazwisk)",
+            )
     await _notify(claimer_targets, text_claim_pending_for_claimer(offer), offer,
                   audience="zgłoszony sędzia")
     return {"id": claim_id, "status": "pending", "conflicts": conflicts}
@@ -3062,17 +3091,34 @@ async def withdraw_claim(offer_id: int, actor: Actor = Depends(market_actor)) ->
             silent=True,
         )
         if giver_targets:
-            await _notify(
-                giver_targets,
-                (
-                    text_claim_digest(parent_offer, active_names, actionable=False)
-                    if active_names is not None
-                    else text_claim_withdrawn(parent_offer, actor.full_name)
-                ),
-                parent_offer,
-                audience="oddający mecz",
-                silent=True,
+            parent_cfg = await _config(_s(parent_offer["province"]))
+            named, nameless = names_hidden_split(
+                giver_targets, [], bool(parent_cfg["hide_claimers"])
             )
+            if named:
+                await _notify(
+                    named,
+                    (
+                        text_claim_digest(parent_offer, active_names, actionable=False)
+                        if active_names is not None
+                        else text_claim_withdrawn(parent_offer, actor.full_name)
+                    ),
+                    parent_offer,
+                    audience="oddający mecz",
+                    silent=True,
+                )
+            if nameless:
+                await _notify(
+                    nameless,
+                    (
+                        text_claim_digest_hidden(parent_offer, len(active_names))
+                        if active_names is not None
+                        else text_claim_withdrawn_hidden(parent_offer)
+                    ),
+                    parent_offer,
+                    audience="oddający mecz (bez nazwisk)",
+                    silent=True,
+                )
     return {"id": claim["id"], "status": target}
 
 
@@ -3165,6 +3211,7 @@ async def get_offer(
     )
     if not mine and not approver and actor.province != province:
         raise HTTPException(403, "To zgłoszenie należy do innego okręgu.")
+    hide_names = bool(cfg["hide_claimers"]) and not approver
 
     claims = [
         _row(r)
@@ -3219,6 +3266,7 @@ async def get_offer(
         claims,
         bench=bench,
         viewer_id=actor.judge_id,
+        hide_names=hide_names,
         my_crew_label=(await _viewer_roles(province, [_s(offer["match_id"])], actor)).get(
             _s(offer["match_id"]), ""
         ),
@@ -3243,7 +3291,7 @@ async def get_offer(
     # WYLACZNIE ci, ktorzy maja nim rozstrzygac: obsadowy, administrator i sam
     # oddajacy. Sedzia z okregu, ktory tylko oglada oferte, dostaje sam licznik.
     # Kolizje to rozpiska czyjegos weekendu, a nie element oferty.
-    if approver or mine:
+    if approver or (mine and not hide_names):
         # Te same liczby, co przy ofertach obsadowego: tydzień, odstęp, kolizje,
         # niedyspozycja (pola nowe i opcjonalne - starsza aplikacja ich nie zna).
         metrics = await claim_metrics(
@@ -3993,17 +4041,29 @@ async def approve_offer(
         await _approvers_of(province, "decisions"), offer["from_judge_id"], claim["judge_id"],
         other_ids, crew_ids, actor.judge_id,
     )
-    await _notify(groups["taker"], text_taker_won(offer), offer,
-                  audience="przejmujący mecz")
-    await _notify(groups["giver"], text_giver_released(offer, taker_name), offer,
-                  audience="oddający mecz")
-    await _notify(groups["others"], text_claim_lost(offer), offer,
-                  audience="pozostali chętni")
-    await _notify(
-        groups["crew"],
+    hide = bool((await _config(province))["hide_claimers"])
+    approver_ids = set(await _approvers_of(province)) | set(
+        await _approvers_of(province, "decisions")
+    )
+
+    async def _send(key: str, plain, hidden, audience: str) -> None:
+        named, nameless = names_hidden_split(groups[key], approver_ids, hide)
+        if named:
+            await _notify(named, plain, offer, audience=audience)
+        if nameless:
+            await _notify(nameless, hidden, offer, audience=f"{audience} (bez nazwisk)")
+
+    await _send("taker", text_taker_won(offer), text_taker_won_hidden(offer),
+                "przejmujący mecz")
+    await _send("giver", text_giver_released(offer, taker_name),
+                text_giver_released_hidden(offer), "oddający mecz")
+    await _send("others", text_claim_lost(offer), text_claim_lost_hidden(offer),
+                "pozostali chętni")
+    await _send(
+        "crew",
         text_crew_changed(offer, taker_name, _s(giver.get("full_name"))),
-        offer,
-        audience="pozostała obsada",
+        text_crew_changed_hidden(offer),
+        "pozostała obsada",
     )
     await _notify(
         groups["managers"],
@@ -4132,6 +4192,7 @@ async def admin_provinces(actor: Actor = Depends(market_actor)) -> Dict[str, Any
                 "assignAccountMode": mode,
                 "approverBadges": normalize_approver_badges(cfg.get("approver_badges")),
                 "notifyAdmins": bool(cfg.get("notify_admins", False)),
+                "hideClaimers": bool(cfg.get("hide_claimers", False)),
                 "foreignMatchesEnabled": bool(cfg.get("foreign_matches_enabled", False)),
                 "secondLeagueFieldEnabled": bool(
                     cfg.get("second_league_field_enabled", False)
@@ -4417,8 +4478,13 @@ async def _notification_test_plan(province: str, req: NotificationTestRequest) -
         add(manager_ids, text_claim_created(offer, claimer_name),
             "obsadowi i administratorzy")
         if giver_targets:
-            add(giver_targets, text_claim_created_for_giver(offer, claimer_name),
+            named, nameless = names_hidden_split(
+                giver_targets, managers, bool((await _config(province))["hide_claimers"])
+            )
+            add(named, text_claim_created_for_giver(offer, claimer_name),
                 "oddający mecz")
+            add(nameless, text_claim_digest_hidden(offer, 1),
+                "oddający mecz (bez nazwisk)")
         add(claimer_targets, text_claim_pending_for_claimer(offer), "zgłoszony sędzia")
     elif scenario == "decision_rejected":
         interested = {_s(c.get("judge_id")) for c in claims
@@ -4433,11 +4499,21 @@ async def _notification_test_plan(province: str, req: NotificationTestRequest) -
         groups = approved_notification_groups(
             managers, giver_id, claimer_id, others, crew_ids, "",
         )
-        add(groups["taker"], text_taker_won(offer), "przejmujący mecz")
-        add(groups["giver"], text_giver_released(offer, claimer_name), "oddający mecz")
-        add(groups["others"], text_claim_lost(offer), "pozostali chętni")
-        add(groups["crew"], text_crew_changed(offer, claimer_name, giver_name),
-            "pozostała obsada")
+        hide = bool((await _config(province))["hide_claimers"])
+
+        def add_pair(key: str, plain: Tuple[str, str], hidden: Tuple[str, str], audience: str) -> None:
+            named, nameless = names_hidden_split(groups[key], managers, hide)
+            add(named, plain, audience)
+            add(nameless, hidden, f"{audience} (bez nazwisk)")
+
+        add_pair("taker", text_taker_won(offer), text_taker_won_hidden(offer),
+                 "przejmujący mecz")
+        add_pair("giver", text_giver_released(offer, claimer_name),
+                 text_giver_released_hidden(offer), "oddający mecz")
+        add_pair("others", text_claim_lost(offer), text_claim_lost_hidden(offer),
+                 "pozostali chętni")
+        add_pair("crew", text_crew_changed(offer, claimer_name, giver_name),
+                 text_crew_changed_hidden(offer), "pozostała obsada")
         add(groups["managers"], text_change_approved(offer, claimer_name, giver_name),
             "obsadowi i administratorzy")
 
@@ -4782,6 +4858,8 @@ async def admin_set_province(
         values["approver_badges"] = normalize_approver_badges(req.approver_badges)
     if req.notify_admins is not None:
         values["notify_admins"] = bool(req.notify_admins)
+    if req.hide_claimers is not None:
+        values["hide_claimers"] = bool(req.hide_claimers)
     if req.foreign_matches_enabled is not None:
         values["foreign_matches_enabled"] = bool(req.foreign_matches_enabled)
     if req.second_league_field_enabled is not None:
@@ -4824,6 +4902,7 @@ async def admin_set_province(
         "assignAccountMode": cfg["assign_account_mode"],
         "approverBadges": cfg["approver_badges"],
         "notifyAdmins": cfg["notify_admins"],
+        "hideClaimers": cfg["hide_claimers"],
         "foreignMatchesEnabled": cfg["foreign_matches_enabled"],
         "secondLeagueFieldEnabled": cfg["second_league_field_enabled"],
         "managedPrefixes": cfg["managed_prefixes"],

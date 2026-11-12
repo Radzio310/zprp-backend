@@ -177,6 +177,7 @@ CONFIG_FIELD_LABELS: Dict[str, str] = {
     "assign_account_mode": "konto obsadowe",
     "approver_badges": "odznaki rozstrzygające",
     "notify_admins": "powiadomienia administratorów",
+    "hide_claimers": "ukrycie zgłoszonych",
     "foreign_matches_enabled": "mecze spoza okręgu",
     "second_league_field_enabled": "boiskowa II liga",
     "managed_prefixes": "ligi powierzone",
@@ -186,7 +187,7 @@ CONFIG_FIELD_LABELS: Dict[str, str] = {
 def _config_value(field: str, value: Any) -> str:
     if field == "market_enabled":
         return "włączona" if value else "wyłączona"
-    if field == "notify_admins":
+    if field in ("notify_admins", "hide_claimers"):
         return "włączone" if value else "wyłączone"
     if field == "approver_badges":
         items = value if isinstance(value, (list, tuple)) else []

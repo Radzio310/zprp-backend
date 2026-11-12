@@ -537,8 +537,9 @@ def text_unassigned(offer: Mapping[str, Any]) -> tuple[str, str]:
     return ("Cofnięto przydział", _join(f"Obsadowy cofnął Twój przydział do meczu {_match_line(offer)}", when_of(offer)))
 
 
-def text_filled(offer: Mapping[str, Any]) -> tuple[str, str]:
-    return ("Mecz obsadzony", _join(f"Mecz {_match_line(offer)} został już obsadzony. Dziękujemy za zgłoszenie", when_of(offer)))
+def text_filled(offer: Mapping[str, Any], hide: bool = False) -> tuple[str, str]:
+    # Ukryci zgłoszeni (decyzja 12.11): przegrani czytają „Tym razem nie".
+    return ("Tym razem nie" if hide else "Mecz obsadzony", _join(f"Mecz {_match_line(offer)} został już obsadzony. Dziękujemy za zgłoszenie", when_of(offer)))
 
 
 def text_withdrawn(offer: Mapping[str, Any]) -> tuple[str, str]:
