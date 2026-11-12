@@ -81,3 +81,18 @@ def test_signed_ics():
     assert R.verify_ics("s", "SLASKIE", "u12", "k", "TOKEN", sig)
     assert not R.verify_ics("s", "SLASKIE", "u12", "k", "NOWY", sig)
     assert not R.verify_ics("s", "SLASKIE", "u13", "k", "TOKEN", sig)
+
+
+def test_app_mode_row_always_has_token():
+    """Tryb `app` (bez linku) tez podpisuje .ics tokenem wiersza: token jest NOT NULL i
+    powstaje przy tworzeniu wiersza (_row), wiec ics-link dziala bez wczesniejszego 'link'."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent / "app"
+    tables = (root / "obsada_view_tables.py").read_text(encoding="utf-8")
+    assert 'Column("token", String(16), nullable=False, unique=True)' in tables
+    view = (root / "obsada_view.py").read_text(encoding="utf-8")
+    assert "mode=R.DEFAULT_MODE, token=R.new_token()" in view
+    token = R.new_token()
+    assert R.valid_token(token)
+    sig = R.sign_ics("s", "SLASKIE", "u1", "k", token)
+    assert R.verify_ics("s", "SLASKIE", "u1", "k", token, sig)
