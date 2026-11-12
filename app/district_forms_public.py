@@ -405,3 +405,63 @@ async def public_form_share(code: str):
     desc = SHARE.description(form, card) if form is not None else (
         R.LINK_RETIRED_MESSAGE if card.title == SHARE.RETIRED_TITLE else SHARE.BRAND_DESCRIPTION)
     return HTMLResponse(SHARE.page(code, card, desc), headers={"Cache-Control": "public, max-age=300"})
+
+
+@router.get("/results/{code}", summary="Strona publiczna wyników (studio eksportu): żywy widok przycięty do poziomu jawności")
+async def public_results_page(code: str, request: Request, preview: int = Query(0)):
+    """HTML bez logowania. Wyłączony link - 410 z jednym zdaniem; boty komunikatorów nie nabijają licznika."""
+    from fastapi.responses import HTMLResponse
+
+    from app import district_form_studio as ST
+    from app.district_forms import _crest, studio_doc, studio_rows
+    from app.exam_public_rules import is_bot
+
+    _limit(READ_LIMITER, f"res:{_address(request)}")
+    clean = "".join(ch for ch in _s(code).lower() if ch.isalnum())[:16]
+    row = await database.fetch_one(select(S.FORMS).where(S.FORMS.c.public_results["code"].as_string() == clean)) if clean else None
+    nope = {"Cache-Control": "no-store"}
+    if row is None:
+        return HTMLResponse(ST.gone_page("Ten link nie istnieje - sprawdź adres albo poproś komisję o nowy."), status_code=404, headers=nope)
+    form = S.parse_form(row)
+    stored = R.loads(form.get("public_results"), None) or {}
+    if stored.get("disabled_at") or form.get("deleted_at"):
+        return HTMLResponse(ST.gone_page("Komisja wyłączyła tę stronę wyników."), status_code=410, headers=nope)
+    ctx = await S.public_context(form, moment=S.now())
+    if ctx.status in ("trash", "draft"):
+        return HTMLResponse(ST.gone_page("Ten formularz nie jest już dostępny."), status_code=410, headers=nope)
+    level = stored.get("level") or "stats"
+    anonymous = bool((form.get("settings_json") or {}).get("anonymous"))
+    if anonymous:
+        level = "stats"
+    public_cols = [c for c in ctx.columns if (c.get("visibility") or "all") == "all"]
+    rows = await studio_rows(ctx)
+    if stored.get("scope") == "all":
+        if ctx.kind == "form":
+            rows = [r for r in rows if r.get("submitted_at")]
+        groups = None
+    else:
+        view = dict(stored.get("view") or {})
+        # Filtr może dotyczyć kolumny komisji (zawęża listę), ale grupy po niej zdradzałyby wartości.
+        if view.get("groupBy") not in {c["id"] for c in public_cols}:
+            view["groupBy"] = None
+        rows, found = ST.apply_view(rows, ctx.columns, view)
+        groups = [{"label": g["label"], "tone": g["tone"], "keys": g["keys"]} for g in found] if found else None
+    allowed = {c["id"] for c in public_cols}
+    column_ids = [c for c in stored.get("columns") or [] if c in allowed]
+    if level in ("initials", "names"):
+        status = R.status_column(public_cols)
+        column_ids = [status["id"]] if status else column_ids[:1]
+    generated = S.now().astimezone(R.WARSAW).strftime("%d.%m.%Y %H:%M")
+    doc = await studio_doc(ctx, rows, groups, column_ids, lenses=list(stored.get("lenses") or []), scope=stored.get("scope") or "view",
+                           public=True, generated=generated)
+    if ctx.kind == "form" and level != "stats":
+        keep = [i for i, h in enumerate(doc["header"]) if h in ("Wysłano", "Osoba")]
+        doc["header"] = [doc["header"][i] for i in keep]
+        doc["table"] = [[r[i] for i in keep] for r in doc["table"]]
+    if not preview and not is_bot(request.headers.get("user-agent")):
+        stored = {**stored, "views": int(stored.get("views") or 0) + 1, "last_view_at": S.now().isoformat()}
+        await database.execute(update(S.FORMS).where(S.FORMS.c.id == form["id"]).values(public_results=stored))
+    theme = stored.get("theme") or "province"
+    markup = ST.render_html(doc, theme=theme, province_key=form["province"], layout=stored.get("layout") or "report",
+                            mode="public", crest=_crest(ctx, theme), level=level)
+    return HTMLResponse(markup, headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"})

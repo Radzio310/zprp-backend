@@ -55,6 +55,9 @@ def define_tables(metadata):
         Column("web_code", String(8), nullable=True, unique=True),
         #: Tryb cichy (testy): lista widoczna dla odbiorców, ale bez pushy i przypomnień (10.11.2026).
         Column("silent", Boolean, nullable=False, default=False, server_default="false"),
+        #: Strona publiczna wyników (studio eksportu, 12.11.2026): kod, poziom jawności, motyw,
+        #: zapamiętany widok listy, licznik wyświetleń, wyłączenie. Kod raz nadany zostaje.
+        Column("public_results", _JSON, nullable=True),
         Column("created_by", String, nullable=False),
         Column("created_by_name", String, nullable=True),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
@@ -171,6 +174,9 @@ def define_tables(metadata):
 MIGRATIONS = (
     # Tryb cichy listy (10.11.2026): bez pushy i przypomnień, lista widoczna.
     "ALTER TABLE district_forms ADD COLUMN IF NOT EXISTS silent BOOLEAN NOT NULL DEFAULT false",
+    # Studio eksportu (12.11.2026): strona publiczna wyników pod /public/forms/results/<kod>.
+    "ALTER TABLE district_forms ADD COLUMN IF NOT EXISTS public_results JSONB",
+    "CREATE INDEX IF NOT EXISTS ix_district_forms_public_code ON district_forms ((public_results->>'code'))",
     # Bloki informacyjne (sec. 17) - tabela mogla juz powstac bez tej kolumny.
     "ALTER TABLE district_forms ADD COLUMN IF NOT EXISTS info_json JSONB DEFAULT '{\"above\":[],\"below\":[]}'::jsonb",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_district_forms_event ON district_forms (event_id) "

@@ -28,6 +28,7 @@ from sqlalchemy import and_, insert, select, update
 from app import district_form_export as X
 from app import district_form_info as INFO
 from app import district_form_schema as SC
+from app import district_form_studio as ST
 from app import district_form_templates as T
 from app import district_forms_rules as R
 from app import district_forms_service as S
@@ -389,7 +390,9 @@ async def export_file(token: str, filename: str = Query("")):
         raise R.FormError("file_expired", "Plik wygasł - wygeneruj eksport jeszcze raz.", 404)
     path, ext = found
     name = X.safe_filename(filename.rsplit(".", 1)[0] if filename else "formularz", ext)
-    return FileResponse(path, media_type=X.MEDIA[ext], filename=name, headers={"Cache-Control": "no-store"})
+    # HTML ze studia otwiera się w przeglądarce (wyszukiwarka działa od razu), reszta się pobiera.
+    return FileResponse(path, media_type=X.MEDIA[ext], filename=name, headers={"Cache-Control": "no-store"},
+                        content_disposition_type="inline" if ext in ("html", "pdf") else "attachment")
 
 
 @router.post("/pair/{code}/approve", summary="Telefon zatwierdza logowanie przeglądarki (QR z /f/p/<kod>)")
@@ -1003,6 +1006,204 @@ async def export(form_id: str, format: str = Query("xlsx"), who: Who = Depends(w
     token = X.store(data, format)
     filename = X.safe_filename(ctx.form["title"], format)
     return {"url": f"/district-forms/file/{token}?filename={urllib.parse.quote(filename)}", "filename": filename}
+
+
+# ---------------------------------------------------------------------------
+# Studio eksportu (12.11.2026): plik z bieżącego widoku i strona publiczna wyników
+# ---------------------------------------------------------------------------
+
+
+async def studio_rows(ctx: S.Ctx) -> List[Dict[str, Any]]:
+    """Wszystkie wiersze w kształcie widoku (`key`, `name`, `cells` {id: v}, ...) - lista albo formularz."""
+    out: List[Dict[str, Any]] = []
+    schema = ctx.form.get("schema_json")
+    for jid in _sorted_people(ctx, ctx.circles.participants):
+        entry = ctx.entries.get(jid) or {}
+        cells = R.loads(entry.get("cells_json"), {})
+        out.append({
+            "key": jid,
+            "name": S.judge_name(ctx.by_id, jid),
+            "guest": None,
+            "cells": {cid: c.get("v") for cid, c in cells.items() if isinstance(c, Mapping)} if isinstance(cells, Mapping) else {},
+            "answers": R.loads(entry.get("answers_json"), {}) if entry.get("submitted_at") else {},
+            "filled": R.entry_filled(ctx.kind, schema, entry or None),
+            "web_review": bool(entry.get("web_review")),
+            "updated_at": R.iso(entry.get("updated_at")),
+            "submitted_at": entry.get("submitted_at"),
+            "self_source": entry.get("self_source"),
+        })
+    if ctx.kind == "form":
+        for entry in await S.all_entries([ctx.form["id"]]):
+            if _s(entry.get("judge_id")) or not entry.get("submitted_at"):
+                continue
+            guest = _s(entry.get("guest_name")) or "Gość"
+            out.append({
+                "key": f"g:{guest}", "name": guest, "guest": guest, "cells": {},
+                "answers": R.loads(entry.get("answers_json"), {}), "filled": True, "web_review": False,
+                "updated_at": R.iso(entry.get("updated_at")), "submitted_at": entry.get("submitted_at"),
+                "self_source": entry.get("self_source"),
+            })
+    return out
+
+
+async def studio_doc(
+    ctx: S.Ctx,
+    rows: List[Mapping[str, Any]],
+    groups: Optional[List[Mapping[str, Any]]],
+    column_ids: List[str],
+    *,
+    lenses: List[str],
+    scope: str,
+    public: bool,
+    generated: str,
+) -> Dict[str, Any]:
+    """Dokument studia z wierszy w kolejności pliku. `groups` = [{label, tone, keys}] (klucze z `rows`)."""
+    by_key = {r["key"]: r for r in rows}
+    doc_groups = None
+    if groups:
+        ordered: List[Mapping[str, Any]] = []
+        doc_groups = []
+        for g in groups:
+            members = [by_key[k] for k in g.get("keys") or [] if k in by_key and by_key[k] not in ordered]
+            if not members:
+                continue
+            ordered.extend(members)
+            doc_groups.append({"label": g["label"], "tone": g.get("tone") or "", "size": len(members), "members": members})
+        rows = list(ordered)
+    province = R.province_label(display(ctx.form["province"]))
+    if ctx.kind == "list":
+        by_id = {c["id"]: c for c in ctx.columns}
+        columns = [by_id[c] for c in column_ids if c in by_id]
+        header = ["Lp.", "Sędzia"] + [c["title"] for c in columns] + ([] if public else ["Zmiana"])
+        table, tones = [], []
+        for i, r in enumerate(rows, start=1):
+            cells = r.get("cells") or {}
+            table.append([str(i), r["name"]] + [ST.cell_text(c, cells.get(c["id"])) for c in columns] + ([] if public else [X._local(r.get("updated_at"))]))
+            tones.append(["", ""] + [ST._cell_tone(c, cells.get(c["id"])) for c in columns] + ([] if public else [""]))
+        stats = ST.list_stats_for(columns, rows)
+        stats["participants"] = len(rows)
+        charts = ST.charts_for_list(columns, stats)
+        if doc_groups:
+            for g in doc_groups:
+                g["aggs"] = ST.group_aggs([c for c in columns], g.pop("members"))
+    else:
+        anonymous = bool((ctx.form.get("settings_json") or {}).get("anonymous"))
+        schema = ctx.form.get("schema_json") or {}
+        responses = [{"answers": r.get("answers") or {}, "submitted_at": r.get("submitted_at"),
+                      "self_source": r.get("self_source"), "name": r["name"]} for r in rows]
+        header, table = X.form_table(schema, responses, with_person=not anonymous)
+        tones = None
+        sections = SC.sections_of(schema)
+        sent = [r for r in rows if r.get("submitted_at")]
+        results, _hidden = SC.aggregate(sections, [r.get("answers") or {} for r in sent])
+        stats = {"participants": len(rows), "filled": len(sent), "timeline": R.timeline(R._day(r.get("submitted_at")) for r in sent)}
+        charts = ST.charts_for_form(results, {q.id: q.title for q in SC.questions(sections)})
+        if doc_groups:
+            for g in doc_groups:
+                g.pop("members", None)
+                g["aggs"] = []
+    payment = []
+    if not public:
+        event = (await S.events_by_id([ctx.form.get("event_id")])).get(int(ctx.form["event_id"])) if ctx.form.get("event_id") else None
+        payment = X.payment_rows(INFO.first_payment(S.resolved_info(ctx.form, event)))
+    return ST.build_doc(
+        form=ctx.form, province=province, generated=generated, kind=ctx.kind, header=header, table=table, tones=tones,
+        names=[r["name"] for r in rows], groups=doc_groups, stats=stats, charts=charts, lenses=lenses, scope=scope, payment=payment,
+    )
+
+
+def _crest(ctx: S.Ctx, theme: str) -> str:
+    from app.exam_report_html import crest_data_uri
+
+    return crest_data_uri(ctx.form["province"]) if theme in ("province", "elegant", "premium") else ""
+
+
+@router.post("/{form_id}/studio-export", summary="Studio eksportu: plik pdf / xlsx / html z bieżącego widoku (15 minut)")
+async def studio_export(form_id: str, body: Dict[str, Any] = Body(...), who: Who = Depends(who_dep)) -> Dict[str, Any]:
+    ctx = await S.context(form_id, who.viewer)
+    _manager(ctx)
+    plan = ST.clean_plan(body, ctx.columns)
+    generated = S.now().astimezone(R.WARSAW).strftime("%d.%m.%Y %H:%M")
+    rows = await studio_rows(ctx)
+    if plan["scope"] == "all":
+        if ctx.kind == "form":
+            rows = [r for r in rows if r.get("submitted_at")]
+        chosen, groups = rows, None
+    else:
+        chosen = ST.order_by_keys(rows, plan["keys"])
+        groups = plan["groups"]
+    doc = await studio_doc(ctx, list(chosen), groups, plan["columns"], lenses=plan["lenses"], scope=plan["scope"], public=False, generated=generated)
+    fmt = plan["format"]
+    if fmt == "xlsx":
+        data = await asyncio.to_thread(ST.to_xlsx, doc, theme=plan["theme"], province_key=ctx.form["province"], layout=plan["layout"])
+    else:
+        markup = ST.render_html(doc, theme=plan["theme"], province_key=ctx.form["province"], layout=plan["layout"],
+                                mode="print" if fmt == "pdf" else "file", crest=_crest(ctx, plan["theme"]))
+        data = await asyncio.to_thread(X.render_pdf, markup) if fmt == "pdf" else markup.encode("utf-8")
+    token = X.store(data, fmt)
+    filename = X.safe_filename(ctx.form["title"], fmt)
+    expires = (S.now() + R.EXPORT_TTL).isoformat()
+    return {
+        "url": f"/district-forms/file/{token}?filename={urllib.parse.quote(filename)}",
+        "filename": filename,
+        "format": fmt,
+        "rows": len(doc["table"]),
+        "size": len(data),
+        "expires_at": expires,
+    }
+
+
+def results_url(code: str) -> str:
+    return f"/public/forms/results/{code}"
+
+
+async def _link_payload(ctx: S.Ctx) -> Dict[str, Any]:
+    out = ST.link_view(R.loads(ctx.form.get("public_results"), None), results_url)
+    out["province"] = _s(ctx.form.get("province"))
+    return out
+
+
+@router.get("/{form_id}/public-link", summary="Strona publiczna wyników: stan linku i licznik")
+async def public_link_get(form_id: str, who: Who = Depends(who_dep)) -> Dict[str, Any]:
+    ctx = await S.context(form_id, who.viewer, with_entries=False)
+    _manager(ctx)
+    return await _link_payload(ctx)
+
+
+@router.post("/{form_id}/public-link", summary="Włącz albo zmień stronę publiczną wyników (ten sam kod)")
+async def public_link_set(form_id: str, body: Dict[str, Any] = Body(...), who: Who = Depends(who_dep)) -> Dict[str, Any]:
+    ctx = await S.context(form_id, who.viewer, with_entries=False)
+    _manager(ctx)
+    stored = R.loads(ctx.form.get("public_results"), None) or {}
+    settings = ST.clean_link_settings(body, ctx.columns)
+    moment = S.now().isoformat()
+    code = stored.get("code")
+    if not code or body.get("new_code"):
+        for _ in range(8):
+            code = R.new_code()
+            taken = await database.fetch_one(select(S.FORMS.c.id).where(S.FORMS.c.public_results["code"].as_string() == code))
+            if not taken:
+                break
+    nxt = {
+        **stored, **settings, "code": code, "updated_at": moment, "disabled_at": None,
+        "created_at": stored.get("created_at") or moment, "created_by_name": stored.get("created_by_name") or who.actor.full_name,
+        "views": int(stored.get("views") or 0) if code == stored.get("code") else 0,
+    }
+    await database.execute(update(S.FORMS).where(S.FORMS.c.id == ctx.form["id"]).values(public_results=nxt))
+    ctx.form["public_results"] = nxt
+    return await _link_payload(ctx)
+
+
+@router.delete("/{form_id}/public-link", summary="Wyłącz stronę publiczną wyników (od razu)")
+async def public_link_delete(form_id: str, who: Who = Depends(who_dep)) -> Dict[str, Any]:
+    ctx = await S.context(form_id, who.viewer, with_entries=False)
+    _manager(ctx)
+    stored = R.loads(ctx.form.get("public_results"), None)
+    if stored and stored.get("code"):
+        stored = {**stored, "disabled_at": S.now().isoformat()}
+        await database.execute(update(S.FORMS).where(S.FORMS.c.id == ctx.form["id"]).values(public_results=stored))
+        ctx.form["public_results"] = stored
+    return await _link_payload(ctx)
 
 
 # ---------------------------------------------------------------------------

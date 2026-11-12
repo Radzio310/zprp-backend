@@ -242,6 +242,8 @@ OPEN_PATTERNS: Tuple[str, ...] = (
     r"^/public/forms/[^/]+/share$",
     r"^/public/forms/[^/]+/card\.jpg$",
     r"^/public/forms/qr/[^/]+$",
+    # Strona publiczna wyników ze studia eksportu (12.11.2026): link i QR dla każdego, bez klucza.
+    r"^/public/forms/results/[^/]+$",
     r"^/district-forms/file/[^/]+$",
 )
 

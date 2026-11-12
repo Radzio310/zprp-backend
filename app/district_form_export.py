@@ -28,7 +28,10 @@ MEDIA = {
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "csv": "text/csv; charset=utf-8",
     "pdf": "application/pdf",
+    "html": "text/html; charset=utf-8",
 }
+#: Pliki do pobrania pod tokenem: eksport klasyczny i studio (HTML z wyszukiwarką).
+STORED = FORMATS + ("html",)
 _TOKEN = re.compile(r"^[a-f0-9]{32}$")
 
 #: Kolory statusów w arkuszu: zielony, czerwony, szary (i bursztyn dla „może").
@@ -286,7 +289,7 @@ def find(token: str) -> Optional[Tuple[str, str]]:
     safe = _s(token).lower()
     if not _TOKEN.match(safe):
         return None
-    for ext in FORMATS:
+    for ext in STORED:
         path = os.path.join(EXPORT_DIR, f"{safe}.{ext}")
         if os.path.exists(path):
             if time.time() - os.path.getmtime(path) > R.EXPORT_TTL.total_seconds():
