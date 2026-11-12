@@ -160,3 +160,12 @@ def test_excel_liczby_jako_liczby_i_zamrozone_nazwisko():
     sheet = load_workbook(io.BytesIO(ST.to_xlsx(_doc(), theme="elegant", province_key=None, layout="report")))["Lista"]
     assert sheet.freeze_panes == "C6"
     assert sheet.cell(row=6, column=1).value == 1
+
+
+def test_pusty_stan_bez_zer():
+    nobody = [row("9", "Jan Nowy", filled=False)]
+    doc = _doc(rows=nobody, lenses=())
+    out = ST.render_html(doc, theme="premium", province_key=None, layout="report", mode="print")
+    assert "Nikt jeszcze nie odpowiedział" in out and 'class="cnum"' not in out and 'class="cfacts"' not in out
+    empty = ST.render_html(_doc(rows=[]), theme="province", province_key=None, layout="report", mode="file")
+    assert "Nikt nie pasuje" in empty and "Obecność: Będę" in empty and 'class="mfacts"' not in empty

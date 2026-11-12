@@ -688,6 +688,41 @@ def doc_facts(doc: Mapping[str, Any]) -> List[Tuple[str, str]]:
     return facts[:4]
 
 
+def empty_state(doc: Mapping[str, Any]) -> Optional[Dict[str, str]]:
+    """Pusty widok zamiast zer: nikt nie pasuje (filtr) albo nikt jeszcze nie odpowiedział."""
+    if not doc["table"] or not int(doc["participants"]):
+        if doc["lenses"]:
+            hint = f"Widok zawęża: {', '.join(doc['lenses'])}. Poluzuj filtr w aplikacji albo wygeneruj cały formularz."
+        else:
+            hint = "Na liście formularza nie ma jeszcze nikogo. Plik uzupełni się sam, gdy pojawią się osoby."
+        return {"kind": "nomatch", "title": "Nikt nie pasuje do tego widoku", "hint": hint}
+    if not int(doc["filled"]):
+        until = f" Zapisy trwają do {_local_date(doc['closes'])}." if doc.get("closes") else ""
+        return {"kind": "waiting", "title": "Nikt jeszcze nie odpowiedział",
+                "hint": f"Formularz czeka na pierwsze odpowiedzi.{until}"}
+    return None
+
+
+def empty_art(kind: str) -> str:
+    """Spokojna grafika pustego stanu w barwie napisu okładki (currentColor): pusta kartka z lupą albo z klepsydrą."""
+    lines = "".join(
+        f'<line x1="25" y1="{y}" x2="{60 if i % 2 else 66}" y2="{y}" stroke="currentColor" stroke-opacity="0.35" '
+        f'stroke-width="2.4" stroke-linecap="round" stroke-dasharray="2 5"/>'
+        for i, y in enumerate((32, 44, 56, 68))
+    )
+    sheet = ('<rect x="14" y="10" width="62" height="80" rx="8" fill="currentColor" fill-opacity="0.10" '
+             'stroke="currentColor" stroke-opacity="0.55" stroke-width="2.4"/>'
+             '<rect x="32" y="5" width="26" height="11" rx="4" fill="currentColor" fill-opacity="0.55"/>' + lines)
+    if kind == "waiting":
+        badge = ('<circle cx="80" cy="76" r="18" fill="currentColor" fill-opacity="0.16" stroke="currentColor" stroke-width="2.4"/>'
+                 '<path d="M73 66 h14 M73 86 h14 M75 66 c0 7 10 7 10 10 c0 3 -10 3 -10 10 M85 66 c0 7 -10 7 -10 10 c0 3 10 3 10 10" '
+                 'fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>')
+    else:
+        badge = ('<circle cx="76" cy="72" r="14" fill="currentColor" fill-opacity="0.16" stroke="currentColor" stroke-width="3"/>'
+                 '<line x1="86" y1="82" x2="96" y2="92" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>')
+    return f'<svg class="eart" width="104" height="100" viewBox="0 0 104 100" fill="none">{sheet}{badge}</svg>'
+
+
 def _view_text(doc: Mapping[str, Any]) -> List[str]:
     if doc["lenses"]:
         return list(doc["lenses"])
@@ -711,7 +746,7 @@ def render_html(
     printing = not interactive
     report = layout == "report"
     checklist = layout == "checklist" and printing
-    show_table = not (mode == "public" and level == "stats")
+    show_table = not (mode == "public" and level == "stats") and bool(doc["table"])
     show_charts = report or (mode == "public" and level == "stats")
     cover_page = printing and report
     logo = brand_logo_uri(240)
@@ -733,12 +768,11 @@ def render_html(
     view_text = _view_text(doc)
 
     # ── liczba-bohater i fakty (okładka druku, nagłówek pliku) ──
-    if participants:
-        hero_num = f"{round(share * 100)}%"
-        hero_cap = f"{filled} z {participants} " + ("odpowiedziało" if doc["kind"] == "list" else "wysłało odpowiedź")
-    else:
-        hero_num = "0"
-        hero_cap = "W tym widoku nie ma jeszcze nikogo"
+    hero_num = f"{round(share * 100)}%"
+    hero_cap = f"{filled} z {participants} " + ("odpowiedziało" if doc["kind"] == "list" else "wysłało odpowiedź")
+    empty = empty_state(doc)
+    if empty:
+        show_charts = False
     fact_html = "".join(f'<div class="f"><b>{esc(v)}</b><span>{esc(k)}</span></div>' for v, k in facts)
     when_bits = []
     if doc.get("closes"):
@@ -746,7 +780,12 @@ def render_html(
     stamp = ("Stan na " if mode == "public" else "Wygenerowano ") + doc["generated"]
     sub = " · ".join([x for x in [doc["province"], *when_bits] if x])
     crest_img = f'<img class="crest" src="{crest}" alt="Herb okręgu"/>' if crest else ""
-    logo_img = f'<img class="logo" src="{logo}" alt="BAZA"/>' if logo else ""
+    # Logo na białym krążku: czytelne na żółtym, kremowym i grafitowym tle tak samo.
+    logo_img = f'<span class="lpad"><img class="logo" src="{logo}" alt="BAZA"/></span>' if logo else ""
+    empty_html = ""
+    if empty:
+        empty_html = (f'<div class="estate">{empty_art(empty["kind"])}<div class="etext"><b>{esc(empty["title"])}</b>'
+                      f'<span>{esc(empty["hint"])}</span></div></div>')
     lens_html = '<div class="lenses">' + "".join(f'<span class="lens">{esc(x)}</span>' for x in view_text) + "</div>"
 
     if cover_page:
@@ -754,9 +793,10 @@ def render_html(
             f'<section class="cover"><div class="cstripes"></div>'
             f'<div class="ctop">{crest_img}{logo_img}</div>'
             f'<div class="ctitle"><h1>{esc(doc["title"])}</h1><div class="csub">{esc(sub)}</div></div>'
-            f'<div class="chero"><div class="cnum">{esc(hero_num)}</div><div class="ccap">{esc(hero_cap)}</div>'
-            f'<div class="crule"><div style="width:{max(0.0, min(1.0, share)) * 100:.1f}%"></div></div></div>'
-            f'<div class="cfacts">{fact_html}</div>'
+            + (f'<div class="chero cempty">{empty_html}</div>' if empty else
+               f'<div class="chero"><div class="cnum">{esc(hero_num)}</div><div class="ccap">{esc(hero_cap)}</div>'
+               f'<div class="crule"><div style="width:{max(0.0, min(1.0, share)) * 100:.1f}%"></div></div></div>'
+               f'<div class="cfacts">{fact_html}</div>') +
             f'<div class="cfoot"><span class="cview">Widok: {esc(" · ".join(view_text))}</span>'
             f'<span class="cstamp">{esc(stamp)} · BAZA</span></div></section>'
         )
@@ -765,9 +805,10 @@ def render_html(
             f'<header class="mast"><div class="mstripes"></div><div class="mrow">'
             f'<div class="mid">{crest_img}<div class="mtext"><h1>{esc(doc["title"])}</h1><div class="msub">{esc(sub)}</div></div></div>'
             f'<div class="mlogo">{logo_img}</div></div>'
-            f'<div class="mhero"><div class="mnum"><b>{esc(hero_num)}</b><span>{esc(hero_cap)}</span>'
-            f'<div class="mrule"><div style="width:{max(0.0, min(1.0, share)) * 100:.1f}%"></div></div></div>'
-            f'<div class="mfacts">{fact_html}</div></div></header>'
+            + (f'<div class="mhero mempty">{empty_html}</div></header>' if empty else
+               f'<div class="mhero"><div class="mnum"><b>{esc(hero_num)}</b><span>{esc(hero_cap)}</span>'
+               f'<div class="mrule"><div style="width:{max(0.0, min(1.0, share)) * 100:.1f}%"></div></div></div>'
+               f'<div class="mfacts">{fact_html}</div></div></header>') +
             f'<div class="viewline"><span class="vlabel">Widok</span>{lens_html}<span class="vstamp">{esc(stamp)}</span></div>'
         )
 
@@ -920,7 +961,15 @@ b {{ font-weight: {heavy}; }}
   background: repeating-linear-gradient(90deg, {th['band2']} 0, {th['band2']} 7mm, transparent 7mm, transparent 15mm); opacity: {0.2 if theme == 'province' else 0.16}; }}
 .ctop {{ position: absolute; top: {16 if wide else 20}mm; left: 20mm; right: 20mm; height: 34mm; }}
 .ctop .crest {{ height: {30 if wide else 34}mm; width: auto; float: left; }}
-.ctop .logo {{ height: {17 if wide else 19}mm; width: auto; float: right; margin-top: 2mm; }}
+.ctop .lpad {{ float: right; padding: 2.2mm; }}
+.ctop .logo {{ height: {22 if wide else 26}mm; width: auto; display: block; }}
+.lpad {{ display: inline-block; background: #FFFFFF; border-radius: 50%; line-height: 0; border: 0.8pt solid rgba(0,0,0,0.08); }}
+.estate {{ overflow: hidden; }}
+.estate svg {{ float: left; width: {'92px' if px else ('46mm' if cover_page else '22mm')}; height: auto; margin-right: {'22px' if px else ('8mm' if cover_page else '5mm')}; color: {th['cover_ink']}; }}
+.etext {{ overflow: hidden; padding-top: {'10px' if px else ('8mm' if cover_page else '2mm')}; }}
+.etext b {{ display: block; font-family: {title_font}; font-size: {'26px' if px else ('24pt' if cover_page else '15pt')}; line-height: 1.12; letter-spacing: -0.4px; }}
+.etext span {{ display: block; margin-top: {'8px' if px else '2mm'}; max-width: {'560px' if px else '150mm'}; color: {th['cover_soft']}; font-size: {'15px' if px else ('11pt' if cover_page else '9pt')}; line-height: 1.45; }}
+.chero.cempty {{ right: 20mm; width: auto; }}
 .ctitle {{ position: absolute; left: 20mm; right: {110 if wide else 20}mm; top: {58 if wide else 74}mm; }}
 .ctitle h1 {{ font-size: {32 if wide else 36}pt; font-weight: {heavy}; line-height: 1.04; letter-spacing: {title_track}; }}
 .csub {{ margin-top: 4mm; font-size: 11pt; color: {th['cover_soft']}; }}
@@ -951,7 +1000,8 @@ b {{ font-weight: {heavy}; }}
 .mtext h1 {{ font-size: {'34px' if px else '20pt'}; font-weight: {heavy}; line-height: 1.06; letter-spacing: {title_track}; }}
 .msub {{ margin-top: {'6px' if px else '1.5mm'}; color: {th['cover_soft']}; font-size: {'15px' if px else '9pt'}; }}
 .mlogo {{ float: right; text-align: right; }}
-.mlogo .logo {{ height: {'48px' if px else '12mm'}; width: auto; }}
+.mlogo .lpad {{ padding: {'6px' if px else '1.5mm'}; }}
+.mlogo .logo {{ height: {'58px' if px else '15mm'}; width: auto; display: block; }}
 .mhero {{ position: relative; margin-top: {'24px' if px else '4.5mm'}; overflow: hidden; }}
 .mnum {{ float: left; width: {'34%' if px else '30%'}; }}
 .mnum b {{ display: block; font-size: {'64px' if px else '30pt'}; line-height: 0.95; letter-spacing: {'-3px' if px else '-1.4pt'}; }}
@@ -1070,7 +1120,7 @@ body.nohit .tscroll {{ display: none; }}
 @media (max-width: 720px) {{
   body {{ padding: 12px 10px 40px; }}
   .mast {{ padding: 20px 18px 18px; border-radius: 18px; }}
-  .mid {{ width: 100%; }} .mlogo {{ position: absolute; right: 0; top: 0; }} .mlogo .logo {{ height: 34px; }}
+  .mid {{ width: 100%; }} .mlogo {{ position: absolute; right: 0; top: 0; }} .mlogo .logo {{ height: 42px; }} .estate svg {{ width: 70px; margin-right: 14px; }} .etext b {{ font-size: 21px; }}
   .mid .crest {{ height: 44px; margin-right: 12px; }}
   .mtext h1 {{ font-size: 25px; padding-right: 30px; }} .msub {{ font-size: 13.5px; }}
   .mnum, .mfacts {{ float: none; width: 100%; }} .mnum b {{ font-size: 54px; }}
