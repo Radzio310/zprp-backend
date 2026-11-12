@@ -140,7 +140,7 @@ def test_giełda_obsadowego_ukrywa_obsadzonych_przed_zwyklym():
     assert shown[0]["assignedTo"]["name"] == "Anna A"
     hidden = views(offer, claims, cards, hide_names=True, viewer_id="A")
     assert hidden[0]["assignedTo"]["name"] == "Anna A" and hidden[0]["takenByMe"]
-    assert hidden[1]["assignedTo"] is None and hidden[1]["taken"] and not hidden[1]["takenByMe"]
+    assert hidden[1]["assignedTo"] == {"id": "", "name": "", "photoUrl": None} and hidden[1]["taken"] and not hidden[1]["takenByMe"]
     assert hidden[1]["claimId"] is None
     assert "Beata" not in repr(hidden)
 

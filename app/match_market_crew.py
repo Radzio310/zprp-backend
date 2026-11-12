@@ -435,9 +435,13 @@ def _slot_views(
                 # nazwiska obsadzonego - tylko fakt, że gniazdo jest zajęte,
                 # i czy to on.
                 "assignedTo": (
-                    _person(claim["judge_id"], cards)
-                    if claim and (not hide_names or _s(claim["judge_id"]) == viewer_id)
-                    else None
+                    None
+                    if not claim
+                    else _person(claim["judge_id"], cards)
+                    if not hide_names or _s(claim["judge_id"]) == viewer_id
+                    # Puste dane zamiast null: gniazdo ma wyglądać na ZAJĘTE
+                    # (klienty liczą wolne po `!assignedTo`), tylko bez nazwiska.
+                    else {"id": "", "name": "", "photoUrl": None}
                 ),
                 "taken": bool(claim),
                 "takenByMe": bool(claim and _s(claim["judge_id"]) == viewer_id),
