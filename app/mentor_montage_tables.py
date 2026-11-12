@@ -47,6 +47,8 @@ def define_tables(metadata):
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("started_at", DateTime(timezone=True), nullable=True),
+        #: Od kiedy film czeka na klipy (limit przygotowania liczy się od zamówienia albo od ostatniego ponowienia).
+        Column("waiting_since", DateTime(timezone=True), nullable=True),
         Column("ready_at", DateTime(timezone=True), nullable=True),
         Column("expires_at", DateTime(timezone=True), nullable=True),
     )
@@ -71,6 +73,7 @@ def define_tables(metadata):
 
 #: Wykonywane przy starcie przez `app/db.py` (PostgreSQL), każde osobno i idempotentnie.
 MIGRATIONS = (
+    "ALTER TABLE mentor_montages ADD COLUMN IF NOT EXISTS waiting_since TIMESTAMPTZ",
     "CREATE INDEX IF NOT EXISTS ix_mentor_montages_pair ON mentor_montages (pair_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS ix_mentor_montages_compilation ON mentor_montages (compilation_id)",
     "CREATE INDEX IF NOT EXISTS ix_mentor_montages_status ON mentor_montages (status)",

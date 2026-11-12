@@ -1,8 +1,8 @@
 """Montaż (12.11.2026) - polecenia ffmpeg dla odcinków filmu i sklejki. Czyste: tylko budowanie argumentów.
 
-Każdy odcinek ma TE SAME parametry strumieni (rozmiar, 30 kl/s, H.264 high, yuv420p, AAC 48 kHz stereo), więc sklejka
-(`concat`) kopiuje obraz bez ponownego kodowania. Dźwięk sklejki kodujemy jeszcze raz: AAC na granicach plików zostawia
-drobne luki „primingu”, a jedno przejście je wygładza.
+Każdy odcinek ma TE SAME parametry strumieni (rozmiar, 30 kl/s, H.264 high, yuv420p, PCM 48 kHz stereo w Matroska), więc
+sklejka (`concat`) kopiuje obraz bez ponownego kodowania. Dźwięk odcinków jest PCM o długości co do próbki, a AAC powstaje
+raz, w sklejce - inaczej wypełnienie AAC na każdej granicy przesuwało dźwięk o kilkanaście ms na odcinek.
 
 Wejście klipu: `{"url", "start", "dur", "has_audio"}` - fragment pliku MP4 klipu (po przeliczeniu przesunięć Bastionu) albo
 pliku po wypaleniu zoomu. Wejście planszy: PNG w pełnym rozmiarze kadru.
@@ -18,7 +18,11 @@ FPS = MR.FPS
 CHAPTER_TRANSITION = "smoothleft"
 
 VIDEO_CODEC = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "60",
-               "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-video_track_timescale", "15360"]
+               "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
+#: Odcinki niosą dźwięk PCM (Matroska): długość co do próbki. AAC w odcinkach dokładał na każdej granicy kilkanaście ms
+#: wypełnienia i przy 40 odcinkach dźwięk spóźniał się o pół sekundy (pomiar 12.11.2026). AAC kodujemy raz, w sklejce.
+SEGMENT_AUDIO = ["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]
+SEGMENT_EXT = "mkv"
 AUDIO_CODEC = ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
 BASE = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error"]
 #: Jak w planszy klipu: więcej wątków filtrów nie przyspiesza, a zabiera rdzenie kodowaniu.
@@ -64,7 +68,7 @@ class Graph:
         self.chains.append(chain)
 
     def args(self, maps: Sequence[str], target: str, seconds: float) -> List[str]:
-        return [*BASE, *self.inputs, *FILTER_THREADS, "-filter_complex", ";".join(self.chains), *maps, *VIDEO_CODEC, *AUDIO_CODEC,
+        return [*BASE, *self.inputs, *FILTER_THREADS, "-filter_complex", ";".join(self.chains), *maps, *VIDEO_CODEC, *SEGMENT_AUDIO,
                 "-t", f"{seconds:.4f}", target]
 
 

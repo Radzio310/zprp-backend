@@ -405,6 +405,27 @@ def test_prawdziwy_render_sklada_film_z_rozdzialami(monkeypatch, tmp_path):
     plan = MR.timeline([2.5, 2.5], [True, True], 2, 10)
     video = next(s for s in probe["streams"] if s["codec_type"] == "video")
     assert int(video["nb_frames"]) == plan["total_frames"] and (video["width"], video["height"]) == (1280, 720)
-    assert any(s["codec_type"] == "audio" for s in probe["streams"])
+    audio = next(s for s in probe["streams"] if s["codec_type"] == "audio")
+    # Dźwięk jest jeden (AAC ze sklejki PCM), równy obrazowi co do kilkudziesięciu ms - bez narastania na granicach odcinków.
+    assert audio["codec_name"] == "aac" and abs(float(audio["duration"]) - float(video["duration"])) < 0.06
     assert [c["tags"]["title"] for c in probe["chapters"]] == ["Test", "1. 12:00 · Wzorzec · Kara", "2. 12:00 · Kara", "Spis klipów"]
     assert row["status"] == "ready" and json.loads(row["rendered_json"]) == ["c1", "c2"] and row["poster_key"].endswith(".jpg")
+
+
+def test_usuniety_film_nie_wraca_z_przegladu(d):
+    async def go():
+        await seed(d)
+        await add_clip(d, "c1")
+        actor = await actor_for(d)
+        made = await d.montage.create_montage(PAIR, body(clip_ids=["c1"], name="Do usunięcia"), actor)
+        while await d.media.process_next():
+            pass
+        row = await d.core.one(select(d.T["mentor_montages"]).where(d.T["mentor_montages"].c.id == made["id"]))
+        await d.montage.delete_montage(made["id"], actor)
+        await d.montage._tick_one(row)  # przegląd czytał wiersz przed usunięciem
+        after = await d.core.one(select(d.T["mentor_montages"]).where(d.T["mentor_montages"].c.id == made["id"]))
+        rendered = await d.montage.render_next()
+        return after, rendered
+
+    after, rendered = d.run(go)
+    assert after["status"] == "cancelled" and rendered is False

@@ -51,6 +51,9 @@ RENDER_TIMEOUT_S = 1800
 _wake: Optional[asyncio.Event] = None
 #: Postęp renderu z pamięci workera: {id: {stage, progress}} (po restarcie wraca z bazy).
 _live: Dict[str, Dict[str, Any]] = {}
+_woken: Dict[str, float] = {}
+#: Tyle prób renderu jednego filmu; dalej błąd zamiast kręcenia się w kółko.
+MAX_ATTEMPTS = 3
 
 
 def merr(exc: MR.MontageError):
@@ -180,17 +183,22 @@ async def assess(ctx: Dict[str, Any], items: Sequence[Dict[str, Any]], clips: Di
     if order:
         active = await database.fetch_val(select(func.count()).select_from(JOBS).where(JOBS.c.requested_by_real_judge_id == J.real_judge_of(actor))
                                           .where(JOBS.c.state.in_(BR.JOB_ACTIVE))) or 0
-        allowed = DR.allocate_batch(plans, int(active))
+        # Limit kolejki liczymy tylko dla klipów, które naprawdę zamówimy teraz (nowe albo ponawiane): nieudany klip bez
+        # ponowienia nie zajmuje miejsca i nie udaje „czekania w kolejce”.
+        orderable = [dict(p, can_download=bool(p.get("can_download")) and (p.get("mp4_status") == "none" or bool(i.get("_retry"))))
+                     for p, i in zip(plans, items)]
+        allowed = DR.allocate_batch(orderable, int(active))
     out: Dict[str, Dict[str, Any]] = {}
     videos: Dict[str, Optional[Dict[str, Any]]] = {}
     for item, plan, ok in zip(items, plans, allowed):
         cid = item["clip_id"]
         clip = clips.get(cid)
-        if order and plan.get("can_download") and plan.get("mp4_status") in ("none", "failed") and clip is not None:
+        wants = plan.get("mp4_status") == "none" or (plan.get("mp4_status") == "failed" and item.get("_retry"))
+        if order and plan.get("can_download") and wants and clip is not None:
             if not ok:
                 plan = {**plan, "can_download": False, "reason": "QUEUE_LIMIT",
                         "hint": "Kolejka Bastionu jest pełna. Zamówimy ten klip, gdy zwolni się miejsce."}
-            elif plan.get("mp4_status") == "none" or item.get("_retry"):
+            else:
                 try:
                     await D.place_order(ctx, clip, actor, plan)
                     fresh = await C.one(select(mentor_clips).where(mentor_clips.c.id == cid)) or clip
@@ -216,6 +224,7 @@ async def assess(ctx: Dict[str, Any], items: Sequence[Dict[str, Any]], clips: Di
                     can_copy = False
         state = MR.item_state(plan, own_provider=own_provider, can_copy=can_copy, copy_status=copy_status)
         state.update({"clip_id": cid, "match_id": (clip or {}).get("match_id"), "video_id": video_id, "source": plan.get("source"),
+                      "range": plan.get("source_range"),
                       "copy_progress": copy_progress if state["state"] == "copying" else None,
                       "missing": plan.get("missing") or [] if state["reason"] == "NEED_SYNC" else []})
         out[cid] = state
@@ -327,7 +336,9 @@ async def preflight(pair_id: str, body: MontageBody, actor: Actor = Depends(ment
 async def create_montage(pair_id: str, body: MontageBody, actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(pair_id, actor, action="create")
     req = await _request(ctx, body)
-    rsig = MR.request_sig(req["name"], req["description"], req["items"], req["clips"], body.skip_missing)
+    planned = await assess(ctx, req["items"], req["clips"], actor, order=False, shared=req["shared"])
+    rsig = MR.request_sig(req["name"], req["description"], req["items"], req["clips"], body.skip_missing,
+                          ranges={cid: st.get("range") for cid, st in planned.items()})
     same = await C.one(select(mentor_montages).where(mentor_montages.c.pair_id == ctx["pair_id"]).where(mentor_montages.c.request_sig == rsig)
                        .where(mentor_montages.c.status.in_(("preparing", "queued", "rendering", "ready")))
                        .order_by(mentor_montages.c.updated_at.desc()).limit(1))
@@ -343,7 +354,7 @@ async def create_montage(pair_id: str, body: MontageBody, actor: Actor = Depends
            "description": req["description"] or None, "items_json": C.dumps(req["items"]), "states_json": "{}",
            "skip_missing": bool(body.skip_missing), "status": "preparing", "stage": "clips", "progress": 0.0, "request_sig": rsig,
            "estimate_s": MR.estimate_render_s(req["film_s"], 720, len(req["items"]) + 2), "created_by": actor.judge_id,
-           "acted_by": actor.acted_by, "created_at": now, "updated_at": now}
+           "acted_by": actor.acted_by, "created_at": now, "updated_at": now, "waiting_since": now}
     await database.execute(mentor_montages.insert().values(**row))
     states = await assess(ctx, req["items"], req["clips"], actor, order=True, shared=req["shared"])
     status = MR.next_status([states[i["clip_id"]]["state"] for i in req["items"]], bool(body.skip_missing))
@@ -377,8 +388,9 @@ async def list_montages(pair_id: str, compilation_id: Optional[str] = Query(None
 @router.get("/montages/{montage_id}")
 async def get_montage(montage_id: str, actor: Actor = Depends(mentor_actor)):
     ctx, row = await _montage(montage_id, actor)
-    if row["status"] == "preparing":
-        # Odpytywanie odświeża gotowość od razu (kopia skończona, gwizdki ustawione), bez czekania na takt workera.
+    if row["status"] == "preparing" and time.monotonic() - _woken.get(row["id"], 0.0) > 5.0:
+        # Odpytywanie odświeża gotowość od razu (kopia skończona, gwizdki ustawione), najwyżej raz na 5 s na film.
+        _woken[row["id"]] = time.monotonic()
         wake_worker()
     return await shape(ctx, row)
 
@@ -394,7 +406,7 @@ async def retry_montage(montage_id: str, actor: Actor = Depends(mentor_actor)):
     status = MR.next_status([states.get(i["clip_id"], {}).get("state") or "blocked" for i in items], bool(row.get("skip_missing")))
     await database.execute(update(mentor_montages).where(mentor_montages.c.id == row["id"]).values(
         status=status if status != "failed" else "preparing", stage="clips", progress=0.0, message=None, states_json=C.dumps(states),
-        film_key=None, chapters_json=None, ready_at=None, expires_at=None, attempts=0, created_at=row["created_at"], updated_at=C.now()))
+        film_key=None, chapters_json=None, ready_at=None, expires_at=None, attempts=0, waiting_since=C.now(), updated_at=C.now()))
     if row.get("film_key"):
         M.forget_object(row.get("film_key"))
     await C.touch(ctx, actor.judge_id, "montage_retry", "compilations", data={"id": row["id"]})
@@ -466,18 +478,33 @@ async def _tick_one(row: Dict[str, Any]) -> None:
     states = await assess(ctx, items, clips, actor, order=True)
     status = MR.next_status([states[i["clip_id"]]["state"] for i in items], bool(row.get("skip_missing")))
     values: Dict[str, Any] = {"states_json": C.dumps(states)}
-    created = row.get("created_at")
-    expired = created is not None and C.now() - _aware(created) > timedelta(hours=MR.PREPARE_LIMIT_H)
+    since = row.get("waiting_since") or row.get("created_at")
+    expired = since is not None and C.now() - _aware(since) > timedelta(hours=MR.PREPARE_LIMIT_H)
     if status == "queued":
         values.update(status="queued", stage="queued")
     elif status == "failed" or (expired and status == "preparing"):
         values.update(status="failed", stage=None, message="Żaden klip nie jest gotowy do filmu. Sprawdź powody przy klipach i spróbuj ponownie."
                       if status == "failed" else f"Czekaliśmy {MR.PREPARE_LIMIT_H} godzin na klipy. Odblokuj brakujące albo pomiń je i zrób film ponownie.")
-    changed = values.get("status") or old != states
-    if changed:
-        values["updated_at"] = C.now()
-        await database.execute(update(mentor_montages).where(mentor_montages.c.id == row["id"]).values(**values))
-        await C.touch(row["pair_id"], row["created_by"], "montage_state", "compilations", data={"id": row["id"]})
+    # Zapis tylko przy zmianie, która coś znaczy: status filmu albo stan / akcja pozycji. Postęp kopii z YouTube
+    # i podpowiedzi zmieniają się co chwilę - te idą do wiersza bez śladu w dzienniku i bez budzenia klientów pary.
+    meaningful = bool(values.get("status")) or _shape_of(old) != _shape_of(states)
+    if meaningful or old != states:
+        values["updated_at"] = C.now() if meaningful else row.get("updated_at") or C.now()
+        done = await _guarded(row["id"], ("preparing",), values)
+        if meaningful and done:
+            await C.touch(row["pair_id"], row["created_by"], "montage_state", "compilations", data={"id": row["id"]})
+
+
+async def _guarded(montage_id: str, expected: Sequence[str], values: Dict[str, Any]) -> bool:
+    """Przejście stanu tylko z oczekiwanego statusu (RETURNING: działa tak samo w PostgreSQL i SQLite). Film usunięty
+    albo przejęty w międzyczasie nie wraca do życia."""
+    row = await database.fetch_one(update(mentor_montages).where(mentor_montages.c.id == montage_id)
+                                   .where(mentor_montages.c.status.in_(list(expected))).values(**values).returning(mentor_montages.c.id))
+    return row is not None
+
+
+def _shape_of(states: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: (v.get("state"), v.get("action"), v.get("reason")) for k, v in (states or {}).items()}
 
 
 def _aware(value: Any):
@@ -554,14 +581,29 @@ async def _cached(pair_id: str, sig: str, kind: str, target: str, render: Callab
     await render()
     if M.storage_ready():
         try:
-            key = M.object_key(pair_id, "montage-parts", f"{sig}.mp4")
-            size = await asyncio.to_thread(M.put_file, target, key, "video/mp4")
+            key = M.object_key(pair_id, "montage-parts", f"{sig}.{MV.SEGMENT_EXT}")
+            size = await asyncio.to_thread(M.put_file, target, key, "video/x-matroska")
             await database.execute(delete(mentor_montage_assets).where(mentor_montage_assets.c.sig == sig))
             await database.execute(mentor_montage_assets.insert().values(sig=sig, pair_id=pair_id, kind=kind, key=key, size=size,
                                                                           created_at=C.now(), used_at=C.now()))
         except Exception:  # noqa: BLE001 - brak zapisu w księdze nie psuje filmu
             logger.info("montaż: zapis odcinka do księgi nieudany", exc_info=True)
     return False
+
+
+_ff_version: Optional[str] = None
+
+
+async def _ffmpeg_version() -> str:
+    """Wersja ffmpeg w odcisku odcinków: po aktualizacji kodera stare odcinki nie trafiają do sklejki z nowymi."""
+    global _ff_version
+    if _ff_version is None:
+        try:
+            done = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-hide_banner", "-version"], capture_output=True, text=True, timeout=30)
+            _ff_version = ((done.stdout or "").splitlines() or ["?"])[0][:80]
+        except Exception:  # noqa: BLE001
+            _ff_version = "?"
+    return _ff_version
 
 
 async def _ffmpeg(args: List[str], timeout: float = RENDER_TIMEOUT_S) -> None:
@@ -628,17 +670,21 @@ async def _entries(row: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str,
     entries: List[Dict[str, Any]] = []
     rows = await shared.category_rows()
     names = {r["id"]: R.s(r.get("name")) for r in rows}
+    unreadable: List[str] = []
+    not_ready = 0
     for item in items:
         clip = clips.get(item["clip_id"])
         if not clip or (states.get(item["clip_id"]) or {}).get("state") != "ready" or not clip.get("mp4_key"):
+            not_ready += 1
             continue
         url = M.presign_get(clip["mp4_key"], M.SOURCE_URL_TTL)
-        if not url:
-            continue
         try:
+            if not url:
+                raise RuntimeError("brak adresu pliku")
             info = await asyncio.to_thread(BM.ffprobe_file, url)
         except Exception:  # noqa: BLE001
             logger.warning("montaż: plik klipu %s nieczytelny", clip["id"], exc_info=True)
+            unreadable.append(R.s(clip.get("title")) or "Klip")
             continue
         offset, duration = await _clip_source(clip)
         file_s = float(info.get("duration_s") or 0.0)
@@ -651,7 +697,9 @@ async def _entries(row: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str,
         label = item.get("label") or ""
         entries.append({
             "clip_id": clip["id"], "match_id": clip["match_id"], "clip": clip, "match": match,
-            "source": {"url": url, "has_audio": bool(info.get("has_audio")), "key": clip["mp4_key"]},
+            # Tożsamość treści pliku: ten sam klucz R2 bywa nadpisany nowym cięciem (inne źródło, poprawione gwizdki).
+            "source": {"url": url, "has_audio": bool(info.get("has_audio")),
+                       "key": MR.sig(clip["mp4_key"], clip.get("mp4_size"), clip.get("mp4_source_json"), clip.get("media_rev"))},
             "src_w": int(info.get("width") or 1280), "src_h": int(info.get("height") or 720),
             "offset": offset, "duration": duration, "zoom": MR.parse_zoom(clip.get("zoom_track_json")),
             "title": R.s(clip.get("title")) or "Klip", "minute": MR.clock(seconds),
@@ -659,7 +707,7 @@ async def _entries(row: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str,
             "category": D._category_of(clip, names), "category_color": D._category_color(clip, rows),
             "label": label, "label_color": MR.label_color(label) or "", "note": item.get("note") or R.s(clip.get("note")),
         })
-    return entries, ctx
+    return entries, unreadable, not_ready
 
 
 def _match_view(match: Dict[str, Any], crests: Dict[str, Any], colors: Dict[str, Any]) -> Dict[str, Any]:
@@ -671,19 +719,26 @@ def _match_view(match: Dict[str, Any], crests: Dict[str, Any], colors: Dict[str,
 
 async def process_montage(row: Dict[str, Any]) -> None:
     mid = row["id"]
-    await database.execute(update(mentor_montages).where(mentor_montages.c.id == mid).values(
-        status="rendering", stage="prepare", progress=0.0, started_at=C.now(), attempts=int(row.get("attempts") or 0) + 1, updated_at=C.now()))
+    attempts = int(row.get("attempts") or 0) + 1
+    # Przejęcie warunkowe: film usunięty albo przejęty w międzyczasie nie wraca do życia.
+    claimed = await _guarded(mid, ("queued",), dict(status="rendering", stage="prepare", progress=0.0, started_at=C.now(), attempts=attempts,
+                                                     updated_at=C.now()))
+    if not claimed:
+        return
+    if attempts > MAX_ATTEMPTS:
+        raise MR.MontageError(409, "MONTAGE_ATTEMPTS", "Film nie złożył się po kilku próbach. Sprawdź klipy i spróbuj ponownie.")
     _live[mid] = {"stage": "prepare", "progress": 0.0}
     folder = await asyncio.to_thread(M.make_tmpdir, "montage-")
     try:
-        entries, _ctx = await _entries(row)
+        entries, unreadable, not_ready = await _entries(row)
+        if unreadable:
+            # Plik klipu „gotowy”, a nie da się go odczytać (zniknął z magazynu, uszkodzony): błąd z nazwą klipu, bez pętli.
+            raise MR.MontageError(409, "MONTAGE_FILE", f"Nie da się odczytać pliku klipu „{unreadable[0]}”. Ponów film - wytniemy go od nowa.")
         if not entries:
             raise MR.MontageError(409, "MONTAGE_EMPTY", "Żaden klip nie jest gotowy do filmu.")
-        items = _j(row.get("items_json"), [])
-        if not row.get("skip_missing") and len(entries) < len(items):
-            # Wyścig: klip zmienił się między przeglądem a renderem. Wracamy do przygotowania.
-            await database.execute(update(mentor_montages).where(mentor_montages.c.id == mid).values(status="preparing", stage="clips",
-                                                                                                    updated_at=C.now()))
+        if not row.get("skip_missing") and not_ready:
+            # Wyścig: klip zmienił się między przeglądem a renderem. Wracamy do przygotowania (warunkowo).
+            await _guarded(mid, ("rendering",), dict(status="preparing", stage="clips", updated_at=C.now()))
             _live.pop(mid, None)
             return
         await _render(row, entries, folder)
@@ -751,7 +806,7 @@ async def _render(row: Dict[str, Any], entries: List[Dict[str, Any]], folder: st
                            "delay": layer.get("delay") or 0.0, "fade": motion == "row"})
         return {"background": bg_path, "layers": layers}
 
-    look = {"v": MR.LOOK_VERSION, "w": width, "h": height}
+    look = {"v": MR.LOOK_VERSION, "w": width, "h": height, "ff": await _ffmpeg_version()}
     parts: List[str] = []
 
     # Okładka.
@@ -761,7 +816,7 @@ async def _render(row: Dict[str, Any], entries: List[Dict[str, Any]], folder: st
                                                 plan["total_s"]), width, height)
     cover_still = os.path.join(folder, "cover.png")
     MC.flatten(cover_comp).save(cover_still, "PNG", compress_level=1)
-    cover_path = os.path.join(folder, "part-cover.mp4")
+    cover_path = os.path.join(folder, f"part-cover.{MV.SEGMENT_EXT}")
     cover_sig = MR.sig("cover", look, cover_info)
 
     async def render_cover():
@@ -785,7 +840,7 @@ async def _render(row: Dict[str, Any], entries: List[Dict[str, Any]], folder: st
         tail_key = {"cover": cover_sig} if prev is None else item_key(prev, i - 1)
         seg_sig = MR.sig("clip", look, tail_key, chapter_info, bar_info, item_key(e, i),
                          {k: seg[k] for k in ("fades", "offsets", "body_s", "tail_in", "frames")})
-        target = os.path.join(folder, f"part-{i:03d}.mp4")
+        target = os.path.join(folder, f"part-{i:03d}.{MV.SEGMENT_EXT}")
 
         async def render_segment(e=e, seg=seg, prev=prev, view=view, chapter_info=chapter_info, bar_info=bar_info, i=i, target=target):
             frame_path = os.path.join(folder, f"frame-{i}.png")
@@ -820,7 +875,7 @@ async def _render(row: Dict[str, Any], entries: List[Dict[str, Any]], folder: st
     info_lines = [f"{total} {MR.plural(total, 'klip', 'klipy', 'klipów')} · {chapters_total} {MR.plural(chapters_total, 'mecz', 'mecze', 'meczów')}",
                   f"Czas filmu {MR.duration_label(plan['total_s'])}"]
     end_sig = MR.sig("end", look, item_key(last, total - 1), rows_info, info_lines, name, plan["end"])
-    end_path = os.path.join(folder, "part-end.mp4")
+    end_path = os.path.join(folder, f"part-end.{MV.SEGMENT_EXT}")
 
     async def render_end():
         comp = MC.compose_credits({"name": name, "info": info_lines, "rows": rows_info}, width, height)
@@ -878,11 +933,15 @@ async def _render(row: Dict[str, Any], entries: List[Dict[str, Any]], folder: st
         await asyncio.to_thread(M.delete_objects, [key, poster_key])  # film usunięty w trakcie renderu
         return
     now = C.now()
-    await database.execute(update(mentor_montages).where(mentor_montages.c.id == mid).values(
+    became = await _guarded(mid, ("rendering",), dict(
         status="ready", stage=None, progress=1.0, message=None, film_key=key, poster_key=poster_key, size=size,
         duration_s=round(float(probe.get("duration_s") or plan["total_s"]), 2), width=width, height=height,
         chapters_json=C.dumps(chapters), rendered_json=C.dumps([e["clip_id"] for e in entries]), ready_at=now,
         expires_at=now + timedelta(days=MR.TTL_DAYS), updated_at=now))
+    if not became:
+        await asyncio.to_thread(M.delete_objects, [key, poster_key])  # film usunięty tuż przed zapisem
+        _live.pop(mid, None)
+        return
     _live.pop(mid, None)
     await C.touch(pair_id, row["created_by"], "montage_ready", "compilations", data={"id": mid})
     try:
@@ -911,10 +970,10 @@ async def render_next() -> bool:
     except Exception as exc:  # noqa: BLE001
         logger.warning("montaż: render %s nieudany: %s", row["id"], exc, exc_info=not isinstance(exc, MR.MontageError))
         message = exc.message if isinstance(exc, MR.MontageError) else "Nie udało się złożyć filmu. Spróbuj ponownie."
-        await database.execute(update(mentor_montages).where(mentor_montages.c.id == row["id"]).values(
-            status="failed", stage=None, message=message, updated_at=C.now()))
+        failed = await _guarded(row["id"], ("queued", "rendering"), dict(status="failed", stage=None, message=message, updated_at=C.now()))
         _live.pop(row["id"], None)
-        await C.touch(row["pair_id"], row["created_by"], "montage_failed", "compilations", data={"id": row["id"]})
+        if failed:
+            await C.touch(row["pair_id"], row["created_by"], "montage_failed", "compilations", data={"id": row["id"]})
     return True
 
 

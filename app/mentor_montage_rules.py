@@ -22,7 +22,7 @@ import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 #: Wersja wyglądu: podbicie unieważnia zapamiętane odcinki i gotowe filmy przy ponownym zamówieniu.
-LOOK_VERSION = 1
+LOOK_VERSION = 2
 FPS = 30
 
 COVER_S = 4.0
@@ -405,13 +405,16 @@ def sig(*parts: Any) -> str:
 
 
 def request_sig(name: str, description: str, items: Sequence[Mapping[str, Any]], clips: Mapping[str, Mapping[str, Any]],
-                skip_missing: bool) -> str:
+                skip_missing: bool, ranges: Optional[Mapping[str, Any]] = None) -> str:
     """Odcisk zamówienia: te same klipy (z ich treścią), kolejność, etykiety, notatki i nazwa = ten sam film."""
     shaped = []
     for item in items:
         clip = clips.get(item["clip_id"]) or {}
         shaped.append([item["clip_id"], item.get("label"), item.get("note"), clip.get("start_s"), clip.get("end_s"), clip.get("title"),
-                       s(clip.get("updated_at")), clip.get("media_rev"), s(clip.get("zoom_track_json")), clip.get("category_ids")])
+                       s(clip.get("updated_at")), clip.get("media_rev"), s(clip.get("zoom_track_json")), clip.get("category_ids"),
+                       # Skąd tniemy (nagranie i zakres z planu pobrania): inne źródło albo poprawione gwizdki = inny film.
+                       # Sam postęp cięcia (status, rozmiar pliku) nie zmienia zamówienia.
+                       (ranges or {}).get(item["clip_id"])])
     return sig("montage", LOOK_VERSION, name, description, shaped, bool(skip_missing))
 
 
