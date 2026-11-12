@@ -3172,6 +3172,8 @@ province_module_config = Table(
     Column("approver_badges", JSON, nullable=True),
     # Admini otrzymują zdarzenia giełdy tego okręgu tylko po świadomym włączeniu.
     Column("notify_admins", Boolean, nullable=False, server_default=text("false")),
+    # Ukrycie przed zwykłymi sędziami, kto się zgłosił na ofertę (widzi obsadowy i admin).
+    Column("hide_claimers", Boolean, nullable=False, server_default=text("false")),
     # Wymiana meczów SPOZA obsady okręgu (I liga i wyżej, obce II ligi) -
     # boiskowe gniazda takich meczów wchodzą na giełdę dopiero po włączeniu,
     # a zapis idzie wtedy „trasą sędziego". Domyślnie wyłączone, świadomie.
@@ -5281,6 +5283,7 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE extra_report_province_recipients ADD COLUMN IF NOT EXISTS discord_webhook_url varchar"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS approver_badges json"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS notify_admins boolean NOT NULL DEFAULT false"))
+    _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS hide_claimers boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS foreign_matches_enabled boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS second_league_field_enabled boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS managed_prefixes json"))
