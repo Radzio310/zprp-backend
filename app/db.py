@@ -4975,6 +4975,11 @@ from app.route_atlas_tables import define_tables as _define_route_atlas_tables
 
 route_atlas, route_atlas_failures = _define_route_atlas_tables(metadata)
 
+# Niedyspozycje wpisane sędziom przez obsadowego/Calendar Mastera/admina (`app/offtime_assignments_tables.py`).
+from app.offtime_assignments_tables import define_tables as _define_offtime_assignments_tables
+
+(silesia_offtime_assignments,) = _define_offtime_assignments_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 

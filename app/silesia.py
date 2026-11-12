@@ -28,10 +28,14 @@ from app.db import (
     judge_calendar_feeds,
     judge_feed_offtimes,
     province_central_offtimes,
+    province_judges,
     province_offtime_sync_runs,
     silesia_offtimes,
 )
 from app.announcement_rules import make_thumbnail
+from app.offtime_assignments import assigned_ids, assigned_rows
+from app.offtime_assignments import router as assigned_router
+from app.offtime_assignments_rules import build_item, strip_assigned
 from app.calendar_feed_rules import judge_key
 from app.ical_feed import is_feed_entry
 from app.province_match_offtimes import (
@@ -887,6 +891,45 @@ async def _composed_offtime_records(
         for key, group in groups.items():
             group["matches"] = match_by_judge.get(judge_key(key[1]), [])
 
+    # Niedyspozycje wpisane przez obsadowego / Calendar Mastera / admina. Piąte
+    # źródło, doklejane DOPIERO przy odczycie; sędzia bez własnego wiersza
+    # dostaje kafelek tylko z nimi (nazwisko z listy okręgu).
+    assigned_by_judge: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for arow in await assigned_rows(province=province, judge_id=judge_id):
+        akey = (
+            normalize_province(arow["province"]) or str(arow["province"]),
+            str(arow["judge_id"]),
+        )
+        assigned_by_judge.setdefault(akey, []).append(build_item(arow))
+    missing = [key for key in assigned_by_judge if key not in groups]
+    if missing:
+        names = {
+            str(r["judge_id"]): r
+            for r in await database.fetch_all(
+                select(province_judges).where(
+                    province_judges.c.judge_id.in_([key[1] for key in missing])
+                )
+            )
+        }
+        for key in missing:
+            person = names.get(key[1])
+            groups[key] = {
+                "judge_id": key[1],
+                "province": str(province or key[0]),
+                "full_name": str(person["full_name"] or "") if person else "",
+                "city": None,
+                "district": [],
+                "central": [],
+                "feeds": [],
+                "matches": [],
+                "updated_at": _newest_datetime(
+                    *[item.get("updated_at") for item in assigned_by_judge[key]]
+                ),
+                "central_synced_at": None,
+            }
+    for key, group in groups.items():
+        group["assigned"] = assigned_by_judge.get(key, [])
+
     records = [
         OfftimeRecord(
             judge_id=group["judge_id"],
@@ -898,16 +941,20 @@ async def _composed_offtime_records(
                     # Wpisy meczowe z telefonu zostają, POZA tymi, których
                     # świeższy odpowiednik właśnie dokładamy z serwera.
                     *without_client_duplicates(
-                        _without_feed_entries(
-                            _without_client_central(group["district"])
-                            if group["central_synced_at"]
-                            else group["district"]
+                        strip_assigned(
+                            _without_feed_entries(
+                                _without_client_central(group["district"])
+                                if group["central_synced_at"]
+                                else group["district"]
+                            ),
+                            [],
                         ),
                         group.get("matches", []),
                     ),
                     *group["central"],
                     *group.get("feeds", []),
                     *group.get("matches", []),
+                    *group.get("assigned", []),
                 ]
             ),
             updated_at=group["updated_at"],
@@ -964,6 +1011,12 @@ async def set_offtimes(
     # To samo dotyczy wpisów z kalendarzy sędziego - ich właścicielem jest
     # serwer, a telefon dostaje je tylko do pokazania.
     data_json_obj = _without_feed_entries(data_json_obj)
+    # Wpisy od obsadowego (kłódka) należą do osobnego magazynu - telefon dostaje
+    # je w odczycie i odsyła z blobem, więc tu je wycinamy (po `locked` i po id,
+    # także usuniętych), inaczej sędzia przepisałby je na własne.
+    data_json_obj = strip_assigned(
+        data_json_obj, await assigned_ids(judge_id=judge_plain, province=province)
+    )
 
     # Postgres: ON CONFLICT (judge_id, province)
     # SQLite: w razie czego zadziała jako zwykły INSERT, ale rekomendowana migracja na composite PK
@@ -1117,3 +1170,4 @@ async def central_offtime_sync_status(
 router = APIRouter()
 router.include_router(router_ann)
 router.include_router(router_off)
+router.include_router(assigned_router)
