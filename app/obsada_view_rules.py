@@ -76,7 +76,9 @@ class Roster:
     def __init__(self, rows: Iterable[Mapping[str, Any]] = ()):
         self.by_id: dict[str, str] = {}
         self.by_key: dict[str, Optional[str]] = {}
-        for row in rows:
+        for raw in rows:
+            # Rekord z `databases` nie ma .get() - zawsze przez zwykly slownik.
+            row = dict(raw)
             photo = _s(row.get("photo_url"))
             photo = photo if photo.lower().startswith("https://") else ""
             jid = _s(row.get("judge_id"))

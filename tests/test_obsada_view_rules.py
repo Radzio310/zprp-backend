@@ -140,3 +140,19 @@ def test_rev_changes_with_photo():
     a = R.compute_rev([{"crew": R.crew_view(crew, _roster())}])
     r2 = R.Roster([{"judge_id": "101", "full_name": "NALEŻNY Adam", "photo_url": "https://x/b.jpg"}])
     assert a != R.compute_rev([{"crew": R.crew_view(crew, r2)}])
+
+
+def test_roster_accepts_records_without_get():
+    """Rekord z `databases` to Mapping bez .get() - Roster nie moze na tym paść (produkcja 13.11)."""
+    class Record:
+        """Jak rekord `databases`: keys() i [] dzialaja, .get() nie."""
+        def __init__(self, d):
+            self._d = d
+        def keys(self):
+            return self._d.keys()
+        def __getitem__(self, k):
+            return self._d[k]
+
+    from app import obsada_view_rules as R
+    roster = R.Roster([Record({"judge_id": "123", "full_name": "Jan Kowalski", "photo_url": "https://x/y.jpg"})])
+    assert roster.by_id["123"] == "https://x/y.jpg"
