@@ -140,12 +140,21 @@ def norm_rgb(frames: int) -> str:
     return f"fps={FPS},settb=1/{FPS},setsar=1,tpad=stop_mode=clone:stop_duration=3,trim=end_frame={frames},setpts=PTS-STARTPTS"
 
 
+def _cfr(g: Graph, label: str) -> str:
+    """xfade wymaga stałej liczby klatek NA WEJŚCIU. `setpts` na końcu gałęzi (norm) w nowszym ffmpeg oznacza strumień
+    jako zmienny (frame_rate 1/0) i xfade pada: „The inputs needs to be a constant frame rate” (produkcja 13.11).
+    Znaczniki czasu są już równe co 1/FPS, więc `fps` niczego nie gubi - tylko przywraca deklarację stałego tempa."""
+    out = f"{label}c"
+    g.add(f"[{label}]fps={FPS},settb=1/{FPS}[{out}]")
+    return out
+
+
 def _xfade_chain(g: Graph, labels: Sequence[str], fades: Sequence[float], offsets: Sequence[float], transitions: Sequence[str]) -> str:
-    current = labels[0]
+    current = _cfr(g, labels[0])
     for i in range(1, len(labels)):
         out = f"x{i}"
-        g.add(f"[{current}][{labels[i]}]xfade=transition={transitions[i - 1]}:duration={fades[i - 1]:.4f}:offset={offsets[i - 1]:.4f}[{out}]")
-        current = out
+        g.add(f"[{current}][{_cfr(g, labels[i])}]xfade=transition={transitions[i - 1]}:duration={fades[i - 1]:.4f}:offset={offsets[i - 1]:.4f}[{out}]")
+        current = _cfr(g, out) if i < len(labels) - 1 else out
     return current
 
 
