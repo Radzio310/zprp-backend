@@ -1556,7 +1556,26 @@ async def check_release(
             "preview_shots": meta["preview_shots"],
             "store_url": meta["store_urls"].get(platform) or "",
             "required": forced,
+            "frames": [],
         }
+        # Kadry wachlarza, gdy wersja nie ma własnych zrzutów: media slajdów
+        # opublikowanej premiery tej wersji (w kolejności slajdów, bez key).
+        if not meta["preview_shots"]:
+            try:
+                fexp = await database.fetch_one(
+                    select(release_experiences)
+                    .where(release_experiences.c.version_id == int(latest_row["id"]))
+                    .where(release_experiences.c.status == "published")
+                )
+                if fexp and dict(fexp).get("experience_mode") != "changelog_only":
+                    fstory = await _serialize_story(fexp, include_assets=False, schema=2)
+                    for slide in fstory.get("slides") or []:
+                        media = slide.get("media") if isinstance(slide, dict) else None
+                        if isinstance(media, dict) and media.get("url"):
+                            latest["frames"].append({k: v for k, v in media.items() if k not in ("key", "poster_key")})
+                    latest["frames"] = latest["frames"][:5]
+            except Exception:
+                latest["frames"] = []
 
     whats_new = None
     current = next((r for r in rows if str(r["version"]) == installed), None)
