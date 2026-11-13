@@ -40,20 +40,22 @@ def rank(compilations: Sequence[Mapping[str, Any]], items: Mapping[str, Sequence
     for recency, comp in enumerate(compilations):
         ids = [i for i in items.get(comp["id"], []) if i in clips]
         has_clip = bool(clip_id) and clip_id in ids
-        others = [clips[i] for i in ids if i != clip_id]
+        # Liczymy wszystkie klipy zestawienia, także ten - „2 klipy z tego meczu” ma się zgadzać z zestawieniem
+        # od razu po dodaniu klipu (zgłoszenie 12.11.2026: licznik nie obejmował właśnie dodanego klipu).
+        members = [clips[i] for i in ids]
         reasons: List[Dict[str, Any]] = []
         score = 0.0
-        same_match = sum(1 for c in others if match_id and c.get("match_id") == match_id)
+        same_match = sum(1 for c in members if match_id and c.get("match_id") == match_id)
         if same_match:
             reasons.append({"kind": "match", "count": same_match})
             score += 100 + same_match * 6
         for cat in cats:
-            hits = sum(1 for c in others if cat in (c.get("category_ids") or []))
+            hits = sum(1 for c in members if cat in (c.get("category_ids") or []))
             in_name = name_has(comp.get("name"), category_names.get(cat))
             if hits or in_name:
-                share = hits / len(others) if others else 0.0
+                share = hits / len(members) if members else 0.0
                 reasons.append({"kind": "category", "category_id": cat, "name": category_names.get(cat) or "", "count": hits,
-                                "total": len(others), "in_name": in_name})
+                                "total": len(members), "in_name": in_name})
                 score += 40 + share * 60 + hits * 3 + (45 if in_name else 0)
         if has_clip:
             score += 1000
