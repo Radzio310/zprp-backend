@@ -177,3 +177,34 @@ def flag_png(iso: str) -> Optional[FlagCrest]:
 def team_flag(name: object) -> Optional[FlagCrest]:
     iso = flag_iso(name)
     return flag_png(iso) if iso else None
+
+
+# ─── Mecz międzypaństwowy: złota plakietka numeru (jak `IntlGold` w aplikacji i panelu) ─────────────
+
+#: Złoto plakietki meczów międzypaństwowych i międzynarodowych (`IntlGold.dark.solid` aplikacji; plansze są ciemne).
+INTL_GOLD = "#E6C15A"
+INTL_KINDS = ("miedzypanstwowy", "miedzynarodowy")
+
+_OWN_CATEGORY = re.compile(
+    r"^(MP[A-Z0-9]*|PP[MK]?\d*|P[MK]|SP[MK]\d*|ML[MK](1213)?R?\d*|JM[MK]\d*|J[MK]\d*|DZ[MK]\d*|III[MK]\d*|II[MK]\d*|I[MK]\d*"
+    r"|LC[MK]?\d*|BS[MK]\d*|OS[MK]\d*|S[MK]\d*|OOM[MK]?\d*)$")
+
+
+def has_own_rate_category(code: object) -> bool:
+    """Czy numer meczu ma własną kategorię stawek (liga, puchar, MP, OOM); „EHF/1”, „TOW/2” i pusty - nie
+    (`hasOwnRateCategory` w `utils/matchKind.ts`). Człon po członie, bo „S/PPK/2” i „MPJMM/19”."""
+    folded = str(code or "").strip().replace("ł", "l").replace("Ł", "L")
+    folded = "".join(ch for ch in unicodedata.normalize("NFD", folded) if not unicodedata.combining(ch)).upper()
+    return any(_OWN_CATEGORY.match(part.strip()) for part in folded.split("/"))
+
+
+def is_intl_match(home: object, away: object, code: object = None, kind: object = None) -> bool:
+    """Mecz międzypaństwowy/międzynarodowy jak `intlOf` w panelu: zapisany rodzaj meczu decyduje („zwykly” = nie), a bez
+    decyzji - dwa RÓŻNE kraje w nazwach drużyn i numer bez własnej kategorii stawek („Polska - Polska B” to nie)."""
+    saved = str(kind or "").strip().lower()
+    if saved in INTL_KINDS:
+        return True
+    if saved == "zwykly" or has_own_rate_category(code):
+        return False
+    a, b = flag_iso(home), flag_iso(away)
+    return bool(a and b and a != b)

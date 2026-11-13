@@ -148,7 +148,9 @@ class Context:
         card = await self._raw_card(match_id)
         home, away = card.get("home") or {}, card.get("away") or {}
         return {"date": R.s(card.get("scheduled_at"))[:10], "home": home.get("name"), "away": away.get("name"), "code": card.get("match_code"),
-                "competition": card.get("competition_name") or card.get("category"), "home_logo": home.get("logo_url"), "away_logo": away.get("logo_url")}
+                "competition": card.get("competition_name") or card.get("category"), "home_logo": home.get("logo_url"), "away_logo": away.get("logo_url"),
+                # Rodzaj meczu (międzypaństwowy) z karty wspólnego meczu: złota plakietka numeru na planszach.
+                "kind": card.get("match_kind")}
 
     async def category_rows(self) -> List[Dict[str, Any]]:
         if self._category_rows is None:
