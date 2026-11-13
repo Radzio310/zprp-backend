@@ -7,6 +7,8 @@ Edytować i usuwać można tylko swoje (administrator wszystko); komisja ogląda
 
 from __future__ import annotations
 
+import asyncio
+
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -349,10 +351,20 @@ async def _with_offer(payload: Dict[str, Any], row: Dict[str, Any], video: Optio
 @router.post("/pairs/{pair_id}/clips")
 async def create_clip(pair_id: str, body: ClipBody, actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(pair_id, actor, action="create")
-    card = await C.match_card(ctx, body.match_id)
-    video = await _video_of(ctx, card["match_id"], body.video_id)
+    # Szybki zapis (13.11.2026): nagranie tej pary przy tym samym meczu wystarcza za dowód, że mecz należy do pary -
+    # bez ładowania wszystkich meczów pary (hurtownia, okręg, archiwum, mecze wspólne; zimne bywało kilka sekund).
+    # Inny numer w zapytaniu niż przy nagraniu (karta `my:` scalona z ZPRP) - pełna karta jak dotąd.
+    video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == body.video_id))
+    if (video and video.get("deleted_at") is None and R.s(video.get("pair_key")) == ctx["pair_key"]
+            and R.s(video.get("match_id")) == R.s(body.match_id)):
+        match_id = R.s(video["match_id"])
+    else:
+        card = await C.match_card(ctx, body.match_id)
+        video = await _video_of(ctx, card["match_id"], body.video_id)
+        match_id = card["match_id"]
+    duration, allowed = await asyncio.gather(_video_duration(video), _allowed_categories(ctx))
     try:
-        start, end = R.validate_clip(body.start_s, body.end_s, await _video_duration(video))
+        start, end = R.validate_clip(body.start_s, body.end_s, duration)
     except R.RuleError as exc:
         raise C.rule_error(exc) from exc
     source = body.source if body.source in R.CLIP_SOURCES else "manual"
@@ -362,10 +374,10 @@ async def create_clip(pair_id: str, body: ClipBody, actor: Actor = Depends(mento
         raise C.rule_error(exc) from exc
     stamp = C.now()
     row = {
-        "id": R.new_id(), "pair_id": ctx["pair_id"], "match_id": card["match_id"], "video_id": video["id"],
+        "id": R.new_id(), "pair_id": ctx["pair_id"], "match_id": match_id, "video_id": video["id"],
         "start_s": start, "end_s": end, "title": R.plain(body.title, R.MAX_CLIP_TITLE) or None,
         "note": R.plain(body.note, R.MAX_CLIP_NOTE) or None,
-        "category_ids": C.dumps(R.clean_category_ids(body.category_ids, await _allowed_categories(ctx))),
+        "category_ids": C.dumps(R.clean_category_ids(body.category_ids, allowed)),
         "source": source, "source_key": R.plain(body.source_key, 120) or None,
         "match_ms": body.match_ms if body.match_ms is None or 0 <= body.match_ms <= 3 * 3600 * 1000 else None,
         "half": body.half if body.half in (1, 2) else None, "author_id": actor.judge_id,
@@ -373,7 +385,7 @@ async def create_clip(pair_id: str, body: ClipBody, actor: Actor = Depends(mento
         "zoom_track_json": C.dumps(zoom) if zoom else None,
     }
     await database.execute(mentor_clips.insert().values(**row))
-    await C.touch(ctx, actor.judge_id, "clip_created", "clips", card["match_id"], {"id": row["id"]})
+    await C.touch(ctx, actor.judge_id, "clip_created", "clips", match_id, {"id": row["id"]})
     await _reattach_shots(row)
     from app import mentor_bastion_jobs as J
 
