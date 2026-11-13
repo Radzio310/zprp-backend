@@ -12,13 +12,14 @@ Importy bazy na górze jak w reszcie panelu (`app.db` łączy się przy imporcie
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
 import shutil
 import time
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
@@ -191,6 +192,14 @@ async def _card_content(shared: Context, clip: Dict[str, Any], sync: Any) -> Tup
     seconds = D.match_time_s(clip.get("match_ms"), video_s, sync)
     lines = [D.folder_names(match, category)["match"], D.match_clock(seconds), R.s(clip.get("title")) or "Klip", category]
     details = D.card_details(match, category_color=_category_color(clip, rows), time_label=D.card_time_label(clip.get("match_ms"), video_s, sync))
+    # Flaga reprezentacji (bez logo w karcie meczu) zmienia wygląd planszy: wchodzi do podpisu, więc stara plansza
+    # z tarczą „P” przestaje być aktualna. Kluby bez zmian w podpisie.
+    from app.team_flags import flag_iso
+
+    for side in ("home", "away"):
+        iso = None if R.s(match.get(f"{side}_logo")) else flag_iso(match.get(side))
+        if iso:
+            details[f"{side}_flag"] = iso
     return lines, details, match
 
 
@@ -495,10 +504,40 @@ async def _crest_url(logo: Any, name: Any) -> Optional[str]:
         return None
 
 
+async def _side_asset(logo: Any, name: Any) -> Tuple[Optional[bytes], Optional[str]]:
+    """Znak jednej drużyny jak w aplikacji (`Pebble`): logo z karty meczu; bez logo (albo gdy się nie wczytało) reprezentacja
+    dostaje flagę kraju; potem herb po nazwie z indeksu; brak = None (plansza rysuje tarczę z inicjałami)."""
+    from app import team_flags as F
+
+    if R.s(logo):
+        image, color = await crest_asset(R.s(logo))
+        if image:
+            return image, color
+    flag = F.team_flag(name)
+    if flag is not None:
+        return flag, await asyncio.to_thread(_flag_color, flag.iso)
+    return await crest_asset(await _crest_url(None, name))
+
+
+@functools.lru_cache(maxsize=96)
+def _flag_color(iso: str) -> Optional[str]:
+    from app import team_flags as F
+
+    flag = F.flag_png(iso)
+    return CARD.dominant_color(bytes(flag)) if flag else None
+
+
+def flag_marks(crests: Mapping[str, Any]) -> Dict[str, str]:
+    """Strony z flagą reprezentacji ({"home": "pl"}): idą do podpisów plansz, bo herbów (bajtów) w podpisach nie ma."""
+    from app.team_flags import is_flag
+
+    return {side: raw.iso for side, raw in sorted(crests.items()) if is_flag(raw)}
+
+
 async def card_assets(match: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Herby i barwy obu drużyn: (crests, colors). Braki to None."""
-    urls = [await _crest_url(match.get("home_logo"), match.get("home")), await _crest_url(match.get("away_logo"), match.get("away"))]
-    (home, home_color), (away, away_color) = await asyncio.gather(crest_asset(urls[0]), crest_asset(urls[1]))
+    """Herby i barwy obu drużyn: (crests, colors). Braki to None. Flaga reprezentacji przychodzi jako `team_flags.FlagCrest`."""
+    (home, home_color), (away, away_color) = await asyncio.gather(_side_asset(match.get("home_logo"), match.get("home")),
+                                                                  _side_asset(match.get("away_logo"), match.get("away")))
     return {"home": home, "away": away}, {"home": home_color, "away": away_color}
 
 

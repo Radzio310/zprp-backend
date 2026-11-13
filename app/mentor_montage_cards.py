@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app import mentor_clip_card as K
 from app import mentor_montage_rules as MR
+from app.team_flags import is_flag
 
 FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
 VOICE = os.path.join(FONT_DIR, "FontastiquePL.ttf")
@@ -97,10 +98,7 @@ def code_tile(code: str, color: Any, u: float, size: float = 44) -> Optional[Any
 
 
 def _crest(raw: Optional[bytes], name: str, color: Any, box: int, u: float) -> Tuple[Any, int]:
-    crest = K.prepare_crest(raw, box) if raw else None
-    if crest is None:
-        crest = K.shield_crest(name, K.parse_color(color), box)
-    return K._crest_with_light(crest, u)
+    return K._crest_with_light(K.crest_or_flag(raw, name, K.parse_color(color), box), u)
 
 
 def medallion(raw: Optional[bytes], name: str, color: Any, diameter: int, u: float) -> Any:
@@ -131,6 +129,12 @@ def medallion(raw: Optional[bytes], name: str, color: Any, diameter: int, u: flo
     plate = Image.new("RGBA", (d, d), (0, 0, 0, 0))
     plate.paste(ring, (0, 0), disc)
     inner = disc.resize((d - 2 * ring_w, d - 2 * ring_w), Image.LANCZOS)
+    flag = K.flag_tile(raw, inner.width, inner.height, inner.width / 2, gloss=0.16, shade=0.12) if raw and is_flag(raw) else None
+    if flag is not None:
+        # Reprezentacja: flaga na całą tarczę medalionu (jak w aplikacji), bez znaku w środku.
+        plate.alpha_composite(flag, (ring_w, ring_w))
+        out.alpha_composite(plate, (pad, pad))
+        return out
     plate.paste(fill.resize(inner.size), (ring_w, ring_w), inner)
     out.alpha_composite(plate, (pad, pad))
     box = int(d * 0.64)
@@ -257,17 +261,22 @@ def _vertical(w: int, h: int, top: Sequence[int], bottom: Sequence[int]) -> Any:
 
 def stone(raw: Optional[bytes], name: str, color: Any, size: float, u: float) -> Any:
     """Herb na kamyku jak `Pebble` w aplikacji: jasny ciepły kamień pod logo (herby projektuje się na biel), bez logo ciemny
-    kamyk z tarczą z inicjałami. Cień pod spodem, żadnej poświaty. Mały herb zostaje mały - nie rozciągamy źródeł 50x50."""
+    kamyk z tarczą z inicjałami, reprezentacja to sama flaga. Cień pod spodem, żadnej poświaty. Mały herb zostaje mały - nie rozciągamy źródeł 50x50."""
     from PIL import Image
 
     s = max(12, int(size))
-    crest = K.prepare_crest(raw, int(s * 0.74)) if raw else None
+    flag = K.flag_tile(raw, s, s, s * 0.30, gloss=0.10, shade=0.30) if raw and is_flag(raw) else None
+    crest = K.prepare_crest(raw, int(s * 0.74)) if raw and flag is None else None
     top, bottom = STONE_LIGHT if crest is not None else STONE_DARK
     plate = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    plate.paste(_vertical(s, s, top, bottom), (0, 0), _rounded_mask(s, s, s * 0.30))
-    if crest is None:
-        crest = K.shield_crest(name, K.parse_color(color), int(s * 0.64))
-    plate.alpha_composite(crest, (int(s / 2 - crest.width / 2), int(s / 2 - crest.height / 2)))
+    if flag is not None:
+        # Reprezentacja: kamyk to sama flaga z połyskiem u góry i cieniem u dołu (`Pebble` + `CountryFlag` w aplikacji).
+        plate.alpha_composite(flag)
+    else:
+        plate.paste(_vertical(s, s, top, bottom), (0, 0), _rounded_mask(s, s, s * 0.30))
+        if crest is None:
+            crest = K.shield_crest(name, K.parse_color(color), int(s * 0.64))
+        plate.alpha_composite(crest, (int(s / 2 - crest.width / 2), int(s / 2 - crest.height / 2)))
     pad = int(max(6, s * 0.16))
     out = Image.new("RGBA", (s + 2 * pad, s + 2 * pad), (0, 0, 0, 0))
     out.alpha_composite(plate, (pad, pad))

@@ -342,6 +342,64 @@ def _paint_ball(draw: Any, cx: float, cy: float, radius: float) -> None:
     draw.polygon(points, fill=ink)
 
 
+def flag_tile(data: bytes, width: int, height: int, radius: float, gloss: float = 0.18, shade: float = 0.0) -> Optional[Any]:
+    """Flaga reprezentacji jako szklany kafel (jak `CountryFlag` w aplikacji): obraz na całą powierzchnię kształtu, połysk
+    u góry (więcej przekłamuje barwy: czerwień Serbii szła w róż), jasna linia od środka i ciemna krawędź. `radius` = połowa
+    boku daje koło. `shade` przyciemnia dół jak kamyk w aplikacji. Zły plik = None (wołający rysuje tarczę)."""
+    from PIL import Image, ImageDraw
+
+    try:
+        flag = Image.open(io.BytesIO(data)).convert("RGBA")
+    except Exception:  # noqa: BLE001
+        return None
+    w, h = max(4, int(width)), max(4, int(height))
+    k = 3
+    # Kadrowanie „cover”: środek flagi wypełnia kształt bez pasów.
+    scale = max(w * k / flag.width, h * k / flag.height)
+    big = flag.resize((max(1, int(round(flag.width * scale))), max(1, int(round(flag.height * scale)))), Image.LANCZOS)
+    left, top = (big.width - w * k) // 2, (big.height - h * k) // 2
+    face = Image.new("RGBA", (w * k, h * k), (255, 255, 255, 255))
+    face.alpha_composite(big.crop((left, top, left + w * k, top + h * k)))
+    # Połysk i cień na osobnej warstwie: rysowanie wprost na fladze zastępuje piksele zamiast je przykrywać.
+    sheen = Image.new("RGBA", face.size, (0, 0, 0, 0))
+    paint = ImageDraw.Draw(sheen)
+    reach = int(h * k * 0.55)
+    for y in range(reach):
+        paint.line([(0, y), (w * k, y)], fill=(255, 255, 255, int(255 * gloss * (1 - y / float(reach)))))
+    if shade > 0:
+        start = int(h * k * 0.6)
+        for y in range(start, h * k):
+            paint.line([(0, y), (w * k, y)], fill=(16, 10, 8, int(255 * shade * (y - start) / float(max(1, h * k - start)))))
+    r = radius * k
+    line = max(k, int(round(max(1.0, min(w, h) / 90.0) * k)))
+    if min(w, h) >= 36:
+        rim = Image.new("RGBA", face.size, (0, 0, 0, 0))
+        ImageDraw.Draw(rim).rounded_rectangle([line, line, w * k - 1 - line, h * k - 1 - line], radius=max(0, r - line),
+                                              outline=(255, 255, 255, 82), width=line)
+        sheen.alpha_composite(rim)
+    edge = Image.new("RGBA", face.size, (0, 0, 0, 0))
+    ImageDraw.Draw(edge).rounded_rectangle([0, 0, w * k - 1, h * k - 1], radius=r, outline=(26, 18, 16, 66), width=line)
+    sheen.alpha_composite(edge)
+    face.alpha_composite(sheen)
+    mask = Image.new("L", (w * k, h * k), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, w * k - 1, h * k - 1], radius=r, fill=255)
+    face.putalpha(mask)
+    return face.resize((w, h), Image.LANCZOS)
+
+
+def crest_or_flag(data: Optional[bytes], name: Any, color: Optional[RGB], box: int) -> Any:
+    """Herb do skrzynki `box`: flaga reprezentacji jako szklane koło, logo klubu z wyciętym tłem, inaczej tarcza z inicjałami."""
+    from app.team_flags import is_flag
+
+    crest = None
+    if data and is_flag(data):
+        side = int(box * 0.86)
+        crest = flag_tile(data, side, side, side / 2)
+    elif data:
+        crest = prepare_crest(data, box)
+    return crest if crest is not None else shield_crest(name, color, box)
+
+
 def shield_crest(name: Any, color: Optional[RGB], box: int) -> Any:
     """Zastępczy znak: tarcza w barwie drużyny z inicjałami. Bez nazwy: sama tarcza z pasem."""
     from PIL import Image, ImageDraw, ImageFont
@@ -593,9 +651,7 @@ def compose(data: Mapping[str, Any], width: int, height: int) -> Dict[str, Any]:
     layers: List[Dict[str, Any]] = []
     for side, cx in zip(("home", "away"), centers):
         raw = (data.get("crests") or {}).get(side)
-        crest = prepare_crest(raw, box) if raw else None
-        if crest is None:
-            crest = shield_crest(data.get(side), colors.get(side), box)
+        crest = crest_or_flag(raw, data.get(side), colors.get(side), box)
         image, pad = _crest_with_light(crest, u)
         # Niski herb stoi na podstawie skrzynki: odstęp do nazwy jest zawsze ten sam.
         layers.append({"image": image, "x": int(cx - image.width / 2), "y": int(box_bottom - crest.height - pad), "motion": side})
