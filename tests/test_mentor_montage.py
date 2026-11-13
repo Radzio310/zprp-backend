@@ -458,3 +458,23 @@ def test_cover_scales_with_matches_and_clips():
             assert 0 <= layer["x"] and layer["x"] + layer["image"].width <= 1280 + 2
             assert 0 <= layer["y"] and layer["y"] + layer["image"].height <= 720 + 2
         assert MC.flatten(comp).size == (1280, 720)
+
+
+def test_poczatek_fragmentu_nie_wychodzi_za_koniec_pliku():
+    """12.11: -ss za końcem pliku dawał puste wejście i „Could not open encoder before EOF”."""
+    from app import mentor_montage_render as MV
+
+    src = {"url": "u.mp4", "has_audio": True, "file_s": 6.0}
+    assert MV.safe_start(src, 7.0, 2.5) == pytest.approx(3.4)
+    assert MV.safe_start(src, 1.0, 2.5) == 1.0 and MV.safe_start(src, -2.0, 2.5) == 0.0
+    assert MV.safe_start({"url": "u.mp4"}, 7.0, 2.5) == 7.0  # plik po zoomie: nie znamy długości, bez przycinania
+    g = MV.Graph()
+    g.clip(src, 7.0, 2.5)
+    assert g.inputs[:2] == ["-ss", "3.400"]
+
+
+def test_powod_bledu_ffmpeg_jest_czytelny(d):
+    M = d.montage
+    assert "obrazu" in M.ffmpeg_reason("Could not open encoder before EOF\nNothing was written into output file")
+    assert "niedostępny" in M.ffmpeg_reason("Server returned 403 Forbidden")
+    assert M.ffmpeg_reason("coś dziwnego") == "błąd kodowania odcinka"

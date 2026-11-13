@@ -606,10 +606,30 @@ async def _ffmpeg_version() -> str:
     return _ff_version
 
 
+class FfmpegFailed(RuntimeError):
+    """Nieudane polecenie ffmpeg. `reason` to krótki ludzki powód (trafia do `message` filmu), pełny dziennik jest w logu."""
+
+    def __init__(self, stderr: str):
+        text = (stderr or "").strip()
+        super().__init__(f"ffmpeg: {text[:300]} ... {text[-600:]}" if len(text) > 900 else f"ffmpeg: {text}")
+        self.reason = ffmpeg_reason(text)
+
+
+def ffmpeg_reason(stderr: str) -> str:
+    low = (stderr or "").lower()
+    if any(k in low for k in ("server returned", "connection", "no such file", "http error", "i/o error", "timed out")):
+        return "plik klipu jest niedostępny"
+    if "before eof" in low or "nothing was written" in low or "invalid argument" in low:
+        return "z klipu nie da się odczytać obrazu w wybranym fragmencie"
+    if "out of memory" in low or "cannot allocate" in low:
+        return "serwerowi zabrakło pamięci"
+    return "błąd kodowania odcinka"
+
+
 async def _ffmpeg(args: List[str], timeout: float = RENDER_TIMEOUT_S) -> None:
     done = await asyncio.to_thread(M._run, args, timeout)
     if done.returncode != 0 or not os.path.exists(args[-1]):
-        raise RuntimeError(f"ffmpeg: {(done.stderr or '')[-600:]}")
+        raise FfmpegFailed(done.stderr or "")
 
 
 def zoom_pass(source: Dict[str, Any], start: float, dur: float, track: List[Dict[str, float]], video_start_s: float,
@@ -689,6 +709,7 @@ async def _entries(row: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str,
         offset, duration = await _clip_source(clip)
         file_s = float(info.get("duration_s") or 0.0)
         if file_s:
+            offset = min(offset, max(0.0, file_s - MR.MIN_CLIP_S))
             duration = max(MR.MIN_CLIP_S, min(duration, file_s - offset))
         video = await C.one(select(mentor_match_videos).where(mentor_match_videos.c.id == clip["video_id"])) or {}
         sync = clean_sync(R.json_value(video.get("sync_json"), {}))
@@ -698,7 +719,7 @@ async def _entries(row: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str,
         entries.append({
             "clip_id": clip["id"], "match_id": clip["match_id"], "clip": clip, "match": match,
             # Tożsamość treści pliku: ten sam klucz R2 bywa nadpisany nowym cięciem (inne źródło, poprawione gwizdki).
-            "source": {"url": url, "has_audio": bool(info.get("has_audio")),
+            "source": {"url": url, "has_audio": bool(info.get("has_audio")), "file_s": file_s,
                        "key": MR.sig(clip["mp4_key"], clip.get("mp4_size"), clip.get("mp4_source_json"), clip.get("media_rev"))},
             "src_w": int(info.get("width") or 1280), "src_h": int(info.get("height") or 720),
             "offset": offset, "duration": duration, "zoom": MR.parse_zoom(clip.get("zoom_track_json")),
@@ -744,6 +765,11 @@ async def process_montage(row: Dict[str, Any]) -> None:
         await _render(row, entries, folder)
     finally:
         await asyncio.to_thread(shutil.rmtree, folder, True)
+
+
+def _thumb(Image: Any, path: str) -> Any:
+    with Image.open(path) as shot:
+        return shot.convert("RGB").resize((480, 270), Image.LANCZOS)
 
 
 async def _render(row: Dict[str, Any], entries: List[Dict[str, Any]], folder: str) -> None:
@@ -820,22 +846,21 @@ async def _render(row: Dict[str, Any], entries: List[Dict[str, Any]], folder: st
         frame_keys.append([e["source"]["key"], round(at, 3)])
         try:
             await _ffmpeg(MV.frame_args(e["source"], at, width, height, path), 120)
-            with Image.open(path) as shot:
-                cover_frames.append(shot.convert("RGB").resize((480, 270), Image.LANCZOS))
+            cover_frames.append(await asyncio.to_thread(_thumb, Image, path))
         except Exception:  # noqa: BLE001 - brak kadru to ciemne okienko z numerem, film rusza dalej
             cover_frames.append(None)
     cover_info = {"name": name, "description": R.s(row.get("description")), "clips": total, "film_s": plan["total_s"],
                   "matches": [{k: v for k, v in views[m].items() if k not in ("crests",)} for m in order],
                   "clip_matches": clip_matches, "frames": frame_keys}
-    cover_comp = MC.compose_cover(MC.cover_data(name, R.s(row.get("description")), [views[m] for m in order], total,
-                                                plan["total_s"], clip_matches, cover_frames), width, height)
+    cover_comp = await asyncio.to_thread(lambda: MC.compose_cover(MC.cover_data(
+        name, R.s(row.get("description")), [views[m] for m in order], total, plan["total_s"], clip_matches, cover_frames), width, height))
     cover_still = os.path.join(folder, "cover.png")
-    MC.flatten(cover_comp).save(cover_still, "PNG", compress_level=1)
+    await asyncio.to_thread(lambda: MC.flatten(cover_comp).save(cover_still, "PNG", compress_level=1))
     cover_path = os.path.join(folder, f"part-cover.{MV.SEGMENT_EXT}")
     cover_sig = MR.sig("cover", look, cover_info)
 
     async def render_cover():
-        card = save_layers(cover_comp, "cover", "row")
+        card = await asyncio.to_thread(save_layers, cover_comp, "cover", "row")
         await _ffmpeg(MV.cover_args(card, MR.COVER_S, width, height, cover_path))
 
     progress.stage("cover")
@@ -860,22 +885,28 @@ async def _render(row: Dict[str, Any], entries: List[Dict[str, Any]], folder: st
         async def render_segment(e=e, seg=seg, prev=prev, view=view, chapter_info=chapter_info, bar_info=bar_info, i=i, target=target):
             frame_path = os.path.join(folder, f"frame-{i}.png")
             await _ffmpeg(MV.frame_args(e["source"], e["offset"] + 0.02, width, height, frame_path), 300)
-            frame = Image.open(frame_path).convert("RGB")
-            # Tekst belki dojeżdża lekko od dołu: rozdzielamy tło (rozmyta klatka) i warstwę tekstu.
-            bar_comp = MC.compose_bar(frame, bar_info, width, height)
-            bg_path = os.path.join(folder, f"bar-{i}-plain.png")
-            bar_comp["background"].save(bg_path, "PNG", compress_level=1)
-            text_path = os.path.join(folder, f"bar-{i}-text.png")
-            bar_comp["text"].save(text_path, "PNG", compress_level=1)
-            bar = {"background": bg_path, "layers": [{"path": text_path, "x": 0, "y": 0, "motion": "rise", "delay": 0.05, "fade": True}]}
-            chapter = None
-            if chapter_info is not None:
-                chapter = save_layers(MC.compose_chapter({**chapter_info, "crests": view["crests"]}, width, height), f"chap-{i}")
+            # Obrazy (PIL) liczą się w wątku: kilkaset ms na PNG blokowało pętlę zdarzeń serwera.
+            def compose_plates():
+                frame = Image.open(frame_path).convert("RGB")
+                # Tekst belki dojeżdża lekko od dołu: rozdzielamy tło (rozmyta klatka) i warstwę tekstu.
+                bar_comp = MC.compose_bar(frame, bar_info, width, height)
+                bg_path = os.path.join(folder, f"bar-{i}-plain.png")
+                bar_comp["background"].save(bg_path, "PNG", compress_level=1)
+                text_path = os.path.join(folder, f"bar-{i}-text.png")
+                bar_comp["text"].save(text_path, "PNG", compress_level=1)
+                bar = {"background": bg_path, "layers": [{"path": text_path, "x": 0, "y": 0, "motion": "rise", "delay": 0.05, "fade": True}]}
+                chapter = None
+                if chapter_info is not None:
+                    chapter = save_layers(MC.compose_chapter({**chapter_info, "crests": view["crests"]}, width, height), f"chap-{i}")
+                return bar, chapter
+
+            bar, chapter = await asyncio.to_thread(compose_plates)
             if prev is None:
                 tail = {"still": cover_still}
             else:
-                tail = {"source": prev["source"], "start": prev["offset"] + prev["duration"] - seg["tail_in"], "overlay": overlay_png(prev, i - 1)}
-            body = {"source": e["source"], "start": e["offset"], "overlay": overlay_png(e, i)}
+                tail = {"source": prev["source"], "start": prev["offset"] + prev["duration"] - seg["tail_in"],
+                        "overlay": await asyncio.to_thread(overlay_png, prev, i - 1)}
+            body = {"source": e["source"], "start": e["offset"], "overlay": await asyncio.to_thread(overlay_png, e, i)}
             await _ffmpeg(MV.clip_segment_args(seg, tail=tail, chapter=chapter, bar=bar, body=body, width=width, height=height, target=target))
 
         progress.stage("clips")
@@ -893,24 +924,28 @@ async def _render(row: Dict[str, Any], entries: List[Dict[str, Any]], folder: st
     end_path = os.path.join(folder, f"part-end.{MV.SEGMENT_EXT}")
 
     async def render_end():
-        comp = MC.compose_credits({"name": name, "info": info_lines, "rows": rows_info}, width, height)
-        bg = comp["background"].convert("RGBA")
-        bg.alpha_composite(comp["text"])
-        bg_path = os.path.join(folder, "end-bg.png")
-        bg.convert("RGB").save(bg_path, "PNG", compress_level=1)
-        list_path = os.path.join(folder, "end-list.png")
-        comp["list"].save(list_path, "PNG", compress_level=1)
-        upper, lower = MC.credit_masks(bg.convert("RGB"), comp["viewport"], comp["list_x"], comp["fade_h"])
-        up_path, low_path = os.path.join(folder, "end-up.png"), os.path.join(folder, "end-low.png")
-        upper.save(up_path, "PNG")
-        lower.save(low_path, "PNG")
-        top, bottom = comp["viewport"]
-        distance = max(0, comp["list_h"] - (bottom - top))
-        layers = [{"path": list_path, "x": comp["list_x"], "y": comp["list_y"], "motion": "scroll",
-                   "y_expr": MV.scroll_expr(comp["list_y"], distance, plan["end"]["card_s"]), "fade": True, "delay": 0.1},
-                  {"path": up_path, "x": comp["list_x"], "y": 0},
-                  {"path": low_path, "x": comp["list_x"], "y": comp["viewport"][1] - comp["fade_h"]}]
-        tail = {"source": last["source"], "start": last["offset"] + last["duration"] - plan["end"]["tail_in"], "overlay": overlay_png(last, total - 1)}
+        def compose_end():
+            comp = MC.compose_credits({"name": name, "info": info_lines, "rows": rows_info}, width, height)
+            bg = comp["background"].convert("RGBA")
+            bg.alpha_composite(comp["text"])
+            bg_path = os.path.join(folder, "end-bg.png")
+            bg.convert("RGB").save(bg_path, "PNG", compress_level=1)
+            list_path = os.path.join(folder, "end-list.png")
+            comp["list"].save(list_path, "PNG", compress_level=1)
+            upper, lower = MC.credit_masks(bg.convert("RGB"), comp["viewport"], comp["list_x"], comp["fade_h"])
+            up_path, low_path = os.path.join(folder, "end-up.png"), os.path.join(folder, "end-low.png")
+            upper.save(up_path, "PNG")
+            lower.save(low_path, "PNG")
+            top, bottom = comp["viewport"]
+            distance = max(0, comp["list_h"] - (bottom - top))
+            layers = [{"path": list_path, "x": comp["list_x"], "y": comp["list_y"], "motion": "scroll",
+                       "y_expr": MV.scroll_expr(comp["list_y"], distance, plan["end"]["card_s"]), "fade": True, "delay": 0.1},
+                      {"path": up_path, "x": comp["list_x"], "y": 0},
+                      {"path": low_path, "x": comp["list_x"], "y": comp["viewport"][1] - comp["fade_h"]}]
+            return bg_path, layers
+
+        bg_path, layers = await asyncio.to_thread(compose_end)
+        tail = {"source": last["source"], "start": last["offset"] + last["duration"] - plan["end"]["tail_in"], "overlay": await asyncio.to_thread(overlay_png, last, total - 1)}
         await _ffmpeg(MV.end_args(plan["end"], tail=tail, credits={"background": bg_path, "layers": layers}, width=width, height=height,
                                   target=end_path))
 
@@ -984,7 +1019,12 @@ async def render_next() -> bool:
         await process_montage(row)
     except Exception as exc:  # noqa: BLE001
         logger.warning("montaż: render %s nieudany: %s", row["id"], exc, exc_info=not isinstance(exc, MR.MontageError))
-        message = exc.message if isinstance(exc, MR.MontageError) else "Nie udało się złożyć filmu. Spróbuj ponownie."
+        if isinstance(exc, MR.MontageError):
+            message = exc.message
+        elif isinstance(exc, FfmpegFailed):
+            message = f"Nie udało się złożyć odcinka: {exc.reason}. Spróbuj ponownie."
+        else:
+            message = "Nie udało się złożyć filmu. Spróbuj ponownie."
         failed = await _guarded(row["id"], ("queued", "rendering"), dict(status="failed", stage=None, message=message, updated_at=C.now()))
         _live.pop(row["id"], None)
         if failed:

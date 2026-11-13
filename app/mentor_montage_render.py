@@ -43,6 +43,17 @@ def fit(width: int, height: int) -> str:
 RGB_IN = "scale=out_color_matrix=bt709:out_range=tv"
 
 
+def safe_start(source: Mapping[str, Any], start: float, dur: float) -> float:
+    """Początek fragmentu w pliku klipu. Gdy znamy długość pliku (`file_s`), fragment nie może zaczynać się za jego końcem:
+    -ss za EOF daje puste wejście, a filtry (tpad, anullsrc, apad) mielą wtedy w nieskończoność albo kończą bez pakietu
+    (\"Could not open encoder before EOF\", 12.11.2026)."""
+    start = max(0.0, float(start))
+    file_s = float(source.get("file_s") or 0.0)
+    if file_s > 0:
+        start = min(start, max(0.0, file_s - dur - 0.1))
+    return start
+
+
 class Graph:
     """Zbiera wejścia i gałęzie grafu filtrów; numeruje wejścia w kolejności dodania."""
 
@@ -56,7 +67,7 @@ class Graph:
         return self._next()
 
     def clip(self, source: Mapping[str, Any], start: float, dur: float) -> int:
-        self.inputs += ["-ss", f"{max(0.0, start):.3f}", "-t", f"{dur + 0.3:.3f}", "-i", str(source["url"])]
+        self.inputs += ["-ss", f"{safe_start(source, start, dur):.3f}", "-t", f"{dur + 0.3:.3f}", "-i", str(source["url"])]
         return self._next()
 
     def _next(self) -> int:
