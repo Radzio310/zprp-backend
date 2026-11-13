@@ -265,3 +265,21 @@ class TestSedziowieWOkregach:
         assert merged["active_by_province"] is None
         again = merge_sections({}, {"active_by_province": {"SLASKIE": 4}})
         assert again["active_by_province"] == {"SLASKIE": 4}
+
+
+class TestBeachStats:
+    def test_same_liczby_i_updated_at(self):
+        from app.public_stats_rules import BEACH_FIELDS, build_beach_payload
+
+        out = build_beach_payload(
+            {"tournaments": 3, "matches": 10, "teams": 5, "users": 7}, None, NOW
+        )
+        assert set(out) == set(BEACH_FIELDS) | {"updated_at", "stale"}
+        assert out["matches"] == 10 and out["stale"] is False
+
+    def test_brakujace_pole_z_poprzedniej_odpowiedzi(self):
+        from app.public_stats_rules import build_beach_payload
+
+        prev = {"tournaments": 3, "matches": 10, "teams": 5, "users": 7}
+        out = build_beach_payload({"users": 8}, prev, NOW)
+        assert out["users"] == 8 and out["tournaments"] == 3

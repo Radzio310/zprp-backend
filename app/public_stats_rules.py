@@ -364,3 +364,26 @@ class StatsCache:
     def in_backoff(self, now_s: float) -> bool:
         """Czy trwa jeszcze przerwa po nieudanym liczeniu."""
         return self._failed_at is not None and now_s - self._failed_at < self.retry_after_s
+
+
+#: Pola publicznych sum BAZA Beach (`GET /public/beach-stats`).
+BEACH_FIELDS = ("tournaments", "matches", "teams", "users")
+
+
+def build_beach_payload(
+    fresh: Mapping[str, Any],
+    previous: Optional[Mapping[str, Any]],
+    now: datetime,
+) -> Dict[str, Any]:
+    """Odpowiedź Beach: same liczby całkowite; brakujące pole bierze starą wartość."""
+    payload: Dict[str, Any] = {}
+    for name in BEACH_FIELDS:
+        value = fresh.get(name)
+        if value is None and previous is not None:
+            value = previous.get(name)
+        payload[name] = max(0, int(value or 0))
+    payload["updated_at"] = (_aware(now) or datetime.now(timezone.utc)).astimezone(
+        timezone.utc
+    ).isoformat()
+    payload["stale"] = False
+    return payload

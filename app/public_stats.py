@@ -30,6 +30,7 @@ from sqlalchemy import func, select
 from app.proel_training_key import TRAINING_KEY_LIKE
 from app.public_stats_rules import (
     StatsCache,
+    build_beach_payload,
     build_payload,
     summarize_panel,
     summarize_judges,
@@ -151,6 +152,68 @@ async def baza_stats(response: Response) -> Dict[str, Any]:
                 _cache.put(payload, time.monotonic())
                 return payload
         stale = _cache.stale()
+        if stale is not None:
+            return stale
+        raise HTTPException(503, "Statystyki są chwilowo niedostępne")
+
+
+# --- BAZA Beach: `GET /public/beach-stats` -----------------------------------
+
+_beach_cache = StatsCache()
+_beach_lock = asyncio.Lock()
+
+
+async def _beach_count(table_name: str) -> int:
+    from app import db
+
+    table = getattr(db, table_name)
+    return int(await db.database.fetch_val(select(func.count()).select_from(table)) or 0)
+
+
+_BEACH_SOURCES = (
+    ("tournaments", "beach_tournaments"),
+    ("matches", "beach_proel_matches"),
+    ("teams", "beach_teams"),
+    ("users", "beach_users"),
+)
+
+
+async def _beach_compute() -> Dict[str, Any]:
+    fresh: Dict[str, Any] = {}
+    failed = 0
+    for field, table_name in _BEACH_SOURCES:
+        try:
+            fresh[field] = await _beach_count(table_name)
+        except Exception:  # noqa: BLE001
+            failed += 1
+            logger.warning("beach stats: %s nie policzone", field, exc_info=True)
+    if failed == len(_BEACH_SOURCES):
+        raise RuntimeError("beach stats: żadna sekcja się nie policzyła")
+    return build_beach_payload(fresh, _beach_cache.last(), datetime.now(timezone.utc))
+
+
+@router.get("/beach-stats", summary="Publiczne liczby BAZA Beach (bez auth, same sumy)")
+async def beach_stats(response: Response) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = f"public, max-age={_CLIENT_MAX_AGE_S}"
+
+    hit = _beach_cache.fresh(time.monotonic())
+    if hit is not None:
+        return hit
+
+    async with _beach_lock:
+        hit = _beach_cache.fresh(time.monotonic())
+        if hit is not None:
+            return hit
+        if not _beach_cache.in_backoff(time.monotonic()):
+            try:
+                payload = await _beach_compute()
+            except Exception as exc:  # noqa: BLE001
+                logger.error("beach stats: liczenie nie powiodło się: %s", exc)
+                _beach_cache.mark_failure(time.monotonic())
+            else:
+                _beach_cache.put(payload, time.monotonic())
+                return payload
+        stale = _beach_cache.stale()
         if stale is not None:
             return stale
         raise HTTPException(503, "Statystyki są chwilowo niedostępne")
