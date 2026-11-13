@@ -734,7 +734,7 @@ async def _entries(row: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str,
 def _match_view(match: Dict[str, Any], crests: Dict[str, Any], colors: Dict[str, Any]) -> Dict[str, Any]:
     code = R.s(match.get("code"))
     return {"home": R.s(match.get("home")), "away": R.s(match.get("away")), "code": code,
-            "code_color": DR.match_number_color(code) if code else "", "date": DR.card_date(match.get("date")),
+            "code_color": DR.match_code_color(match), "date": DR.card_date(match.get("date")),
             "competition": R.s(match.get("competition")), "crests": crests, "colors": colors,
             # Flagi reprezentacji w podpisach okładki i rozdziałów (bajtów herbów tam nie ma); kluby bez nowego klucza.
             **({"flags": flags} if (flags := D.flag_marks(crests)) else {})}

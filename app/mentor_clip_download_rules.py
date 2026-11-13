@@ -236,10 +236,21 @@ def match_number_color(code: Any) -> str:
     return MATCH_NUMBER_UNKNOWN
 
 
+def match_code_color(match: Mapping[str, Any]) -> str:
+    """Barwa plakietki numeru dla karty meczu: mecz międzypaństwowy (zapisany rodzaj albo dwa różne kraje i numer bez
+    własnej kategorii, np. EHF/1) jest złoty jak w aplikacji i panelu; reszta po kategorii numeru. Bez numeru pusto."""
+    from app.team_flags import INTL_GOLD, is_intl_match
+
+    code = str(match.get("code") or "").strip()
+    if not code:
+        return ""
+    return INTL_GOLD if is_intl_match(match.get("home"), match.get("away"), code, match.get("kind")) else match_number_color(code)
+
+
 def card_details(match: Mapping[str, Any], *, category_color: Any, time_label: str) -> Dict[str, str]:
     """Pola planszy obok `card_lines` (te cztery zachowują znaczenie). Nazwisk sędziów tu nie ma: plik często idzie dalej."""
     return {"half": time_label, "competition": str(match.get("competition") or "").strip(), "date": card_date(match.get("date")),
-            "code": str(match.get("code") or "").strip(), "code_color": match_number_color(match.get("code")) if str(match.get("code") or "").strip() else "",
+            "code": str(match.get("code") or "").strip(), "code_color": match_code_color(match),
             "home": str(match.get("home") or "").strip(),
             "away": str(match.get("away") or "").strip(), "category_color": str(category_color or "")}
 

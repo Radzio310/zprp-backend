@@ -118,3 +118,22 @@ def test_flaga_w_podpisie_planszy_a_kluby_bez_zmian(monkeypatch, tmp_path):
     assert with_flags["flags"] == {"away": "si", "home": "pl"}
     club = montage._match_view({**match, "home": "KS Azoty", "away": "Wisła"}, {"home": b"logo", "away": None}, {})
     assert "flags" not in club
+
+
+def test_mecz_miedzypanstwowy_ma_zlota_plakietke():
+    """Jak `intlOf` w panelu i `IntlGold` w aplikacji: EHF/1 Polska - Słowenia złoty, liga i klub - barwa kategorii."""
+    from app import mentor_clip_download_rules as DR
+
+    assert F.is_intl_match("Polska", "Słowenia", "EHF/1")
+    assert F.is_intl_match("Polska U-21", "Reprezentacja Niemiec", "TOW/2")
+    assert not F.is_intl_match("Polska", "Polska B", "TOW/1")  # ten sam kraj
+    assert not F.is_intl_match("Polska", "Słowenia", "SPM/12")  # numer z własną kategorią stawek
+    assert not F.is_intl_match("Polska", "Słowenia", "EHF/1", "zwykly")  # decyzja człowieka
+    assert F.is_intl_match("KS Azoty", "HC Celje", "EHF/3", "miedzynarodowy")
+    assert not F.is_intl_match("KS Azoty", "Wisła Płock", "EHF/3")
+    assert F.has_own_rate_category("S/PPK/2") and F.has_own_rate_category("MPJMM/19") and not F.has_own_rate_category("EHF/1")
+    assert DR.match_code_color({"code": "EHF/1", "home": "Polska", "away": "Słowenia"}) == F.INTL_GOLD
+    assert DR.match_code_color({"code": "EHF/1", "home": "KS Azoty", "away": "Wisła"}) == DR.match_number_color("EHF/1")
+    assert DR.match_code_color({"code": "", "home": "Polska", "away": "Słowenia"}) == ""
+    details = DR.card_details({"code": "EHF/1", "home": "Polska", "away": "Słowenia"}, category_color="", time_label="")
+    assert details["code_color"] == F.INTL_GOLD

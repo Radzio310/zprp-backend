@@ -22,7 +22,7 @@ import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 #: Wersja wyglądu: podbicie unieważnia zapamiętane odcinki i gotowe filmy przy ponownym zamówieniu.
-LOOK_VERSION = 4  # 4: flagi reprezentacji zamiast tarcz z inicjałami (13.11.2026)
+LOOK_VERSION = 5  # 4: flagi reprezentacji zamiast tarcz z inicjałami, 5: złota plakietka meczów międzypaństwowych (13.11.2026)
 FPS = 30
 
 COVER_S = 4.0
