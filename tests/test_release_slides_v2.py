@@ -73,3 +73,70 @@ def test_draft_fallback_and_json_parsing():
     assert out[0]["tag"] == "new" and out[0]["layout"] is None
     with pytest.raises(ValueError):
         v2.parse_draft_json("brak")
+
+
+# --- szkic przez Claude (mock klienta) ---
+import asyncio
+import json as _json
+from types import SimpleNamespace
+
+
+class _FakeClient:
+    def __init__(self, stop="end_turn", text=None):
+        self.calls = []
+        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self._create))
+        self.stop, self.text = stop, text
+
+    async def _create(self, **kw):
+        self.calls.append(kw)
+        return SimpleNamespace(
+            stop_reason=self.stop, content=[SimpleNamespace(type="text", text=self.text)]
+        )
+
+
+_ANSWER = _json.dumps(
+    {
+        "slides": [
+            {"title": "Giełda w kieszeni", "body": "Filtry po okręgu.", "tag": "new", "accent": "#112233",
+             "icon": "trophy", "layout": "rise", "side": "right", "flight": "spin"},
+            {"title": "X", "body": "", "tag": "zly", "accent": "red", "icon": "nieistnieje",
+             "layout": "duo", "side": "x", "flight": "none"},
+        ],
+        "warnings": ["Pominięto zmianę techniczną."],
+    }
+)
+
+
+def test_ai_draft_request_and_cleaning(monkeypatch):
+    monkeypatch.setenv("RELEASE_AI_MODEL", "claude-opus-5-5")
+    fake = _FakeClient(text=_ANSWER)
+    raw, notes = asyncio.run(v2.ai_draft("- Giełda", 4, client=fake))
+    kw = fake.calls[0]
+    assert kw["model"] == "claude-opus-5-5" and kw["thinking"] == {"type": "adaptive"}
+    assert kw["output_config"]["effort"] == "high" and kw["output_config"]["format"]["type"] == "json_schema"
+    assert kw["betas"] == ["server-side-fallback-2026-07-01"] and kw["fallbacks"] == "default"
+    assert "4" in kw["system"]
+    slides, _ = v2.finalize_draft(raw, 4)
+    assert slides[0]["icon"] == "trophy" and slides[0]["side"] == "right" and slides[0]["flight"] == "spin"
+    assert slides[0]["accent"] == "#112233" and slides[0]["layout"] == "rise"
+    assert slides[1]["icon"] is None and slides[1]["accent"] is None and slides[1]["layout"] is None
+    assert slides[1]["side"] == "left" and slides[1]["flight"] is None and slides[1]["tag"] == "new"
+    assert notes == ["Pominięto zmianę techniczną."]
+
+
+@pytest.mark.parametrize("stop", ["refusal", "max_tokens"])
+def test_ai_draft_bad_stop_reason(stop):
+    with pytest.raises(RuntimeError):
+        asyncio.run(v2.ai_draft("x", 3, client=_FakeClient(stop=stop, text="{}")))
+
+
+def test_ai_draft_no_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        asyncio.run(v2.ai_draft("x", 3))
+
+
+def test_draft_schema_is_strict():
+    item = v2.DRAFT_SCHEMA["properties"]["slides"]["items"]
+    assert item["additionalProperties"] is False and set(item["required"]) == set(item["properties"])
+    assert "duo" not in item["properties"]["layout"]["enum"]

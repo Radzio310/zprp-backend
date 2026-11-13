@@ -29,6 +29,7 @@ bcrypt
 lxml
 pymupdf<2
 openai>=1.40.0
+anthropic==2.8.0
 openpyxl
 xlrd>=2.0.1
 Pillow==10.4.0

@@ -328,14 +328,63 @@ _BULLET = re.compile(r"^\s*(?:[-*•–]|\d+[.)])\s*(.+?)\s*$")
 _FIXED = re.compile(r"(napraw|błęd|błąd|\bfix)", re.I)
 _IMPROVED = re.compile(r"(popraw|ulepsz|szybsz|przyspiesz|zmienion|usprawni)", re.I)
 
+ALLOWED_ICONS = (
+    "sparkles", "rocket", "flash", "star", "trophy", "whistle", "timer", "stopwatch", "people", "person",
+    "calendar", "map", "navigate", "car", "wallet", "cash", "document-text", "clipboard", "create",
+    "pencil", "camera", "videocam", "images", "notifications", "chatbubbles", "shield-checkmark",
+    "lock-closed", "cloud-upload", "cloud-download", "sync", "speedometer", "bug", "build", "settings",
+    "stats-chart", "podium", "football", "search", "filter", "share-social", "qr-code", "school", "heart",
+)
+AI_DEFAULT_MODEL = "claude-opus-5-5"
+AI_TIMEOUT_S = 90.0
+AI_MAX_TOKENS = 8000
+
 DRAFT_SYSTEM_PROMPT = (
     "Jesteś redaktorem premier aplikacji mobilnej BAZA dla sędziów piłki ręcznej. "
-    "Z opisu zmian wersji zrób krótki pokaz slajdów po polsku, z polskimi znakami, "
-    "bez długich myślników i bez emoji. Każdy slajd to jedna zmiana widoczna dla użytkownika. "
-    'Zwróć WYŁĄCZNIE JSON: {"slides":[{"title":str (do 60 znaków),"body":str (do 160 znaków),'
-    '"tag":"new|improved|fixed","layout":"side|rise|zoom|type|null"}]}. '
-    "Najwyżej %d slajdów, pomiń zmiany czysto techniczne. Nie wymyślaj funkcji spoza opisu."
+    "Z opisu zmian wersji zrób pokaz slajdów po polsku, z polskimi znakami, bez emoji.\n"
+    "Zasady:\n"
+    "- Każdy slajd to jedna zmiana widoczna dla użytkownika. Pomiń zmiany czysto techniczne. "
+    "Nie wymyślaj funkcji spoza opisu.\n"
+    "- Tytuł: krótki, konkretny, jak plakat, najwyżej 6 słów, bez nadtytułów i bez kropki na końcu.\n"
+    "- Opis: 1-2 zdania, z korzyścią dla sędziego (co zyskuje, co mu się upraszcza), najwyżej 160 znaków.\n"
+    "- Nie używaj długich myślników (— ani –). Używaj przecinków, dwukropków lub krótkich zdań.\n"
+    "- tag: new (nowa funkcja), improved (ulepszenie), fixed (poprawka błędu).\n"
+    "- icon: motyw wyłącznie z dozwolonej listy w schemacie; \"none\" gdy nic nie pasuje.\n"
+    "- layout, side, flight: dobieraj kompozycje tak, by sąsiednie slajdy wyraźnie się różniły "
+    "(nie powtarzaj tego samego układu ani tej samej strony dwa razy z rzędu). "
+    "flight \"none\" jest w porządku.\n"
+    "- accent: kolor #RRGGBB pasujący do tematu slajdu albo pusty tekst.\n"
+    "- Brak mediów: nie wspominaj o zrzutach ani filmach.\n"
+    "- warnings: krótkie uwagi dla redaktora (np. pominięte pozycje), zwykle pusta lista.\n"
+    "Zrób najwyżej %d slajdów."
 )
+
+DRAFT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "slides": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "body": {"type": "string"},
+                    "tag": {"type": "string", "enum": ["new", "improved", "fixed"]},
+                    "accent": {"type": "string"},
+                    "icon": {"type": "string", "enum": [*ALLOWED_ICONS, "none"]},
+                    "layout": {"type": "string", "enum": ["side", "rise", "zoom", "type"]},
+                    "side": {"type": "string", "enum": ["left", "right"]},
+                    "flight": {"type": "string", "enum": [*sorted(ALLOWED_FLIGHTS), "none"]},
+                },
+                "required": ["title", "body", "tag", "accent", "icon", "layout", "side", "flight"],
+                "additionalProperties": False,
+            },
+        },
+        "warnings": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["slides", "warnings"],
+    "additionalProperties": False,
+}
 
 
 def parse_draft_json(text: str) -> list[dict[str, Any]]:
@@ -348,6 +397,50 @@ def parse_draft_json(text: str) -> list[dict[str, Any]]:
     if not isinstance(slides, list):
         raise ValueError("brak listy slajdów")
     return [s for s in slides if isinstance(s, dict)]
+
+
+def parse_ai_answer(text: str) -> tuple[list[dict[str, Any]], list[str]]:
+    data = json.loads((text or "").strip())
+    slides = data.get("slides") if isinstance(data, dict) else None
+    if not isinstance(slides, list):
+        raise ValueError("brak listy slajdów")
+    notes = [str(w).strip() for w in (data.get("warnings") or []) if str(w).strip()]
+    return [x for x in slides if isinstance(x, dict)], notes
+
+
+async def ai_draft(
+    description: str, max_slides: int, *, client: Any = None
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Szkic slajdów przez Claude (structured outputs). Rzuca wyjątek, gdy się nie uda."""
+    import os
+
+    if client is None:
+        key = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+        if not key:
+            raise RuntimeError("brak ANTHROPIC_API_KEY")
+        from anthropic import AsyncAnthropic
+
+        client = AsyncAnthropic(api_key=key, timeout=AI_TIMEOUT_S, max_retries=1)
+    model = (os.getenv("RELEASE_AI_MODEL") or AI_DEFAULT_MODEL).strip()
+    response = await client.beta.messages.create(
+        model=model,
+        max_tokens=AI_MAX_TOKENS,
+        thinking={"type": "adaptive"},
+        output_config={"effort": "high", "format": {"type": "json_schema", "schema": DRAFT_SCHEMA}},
+        betas=["server-side-fallback-2026-07-01"],
+        fallbacks="default",
+        system=DRAFT_SYSTEM_PROMPT % max_slides,
+        messages=[{"role": "user", "content": description}],
+    )
+    stop = getattr(response, "stop_reason", None)
+    if stop == "refusal":
+        raise RuntimeError("model odmówił odpowiedzi (refusal)")
+    if stop == "max_tokens":
+        raise RuntimeError("odpowiedź modelu ucięta (max_tokens)")
+    texts = [b.text for b in response.content if getattr(b, "type", None) == "text"]
+    if not texts:
+        raise ValueError("brak tekstu w odpowiedzi modelu")
+    return parse_ai_answer(texts[-1])
 
 
 def heuristic_draft(description: str, max_slides: int) -> list[dict[str, Any]]:
@@ -380,6 +473,9 @@ def finalize_draft(
             continue
         tag = str(raw.get("tag") or "new")
         layout = raw.get("layout")
+        accent = str(raw.get("accent") or "").strip()
+        icon = str(raw.get("icon") or "").strip()
+        flight = raw.get("flight")
         slides.append(
             {
                 "schema": SCHEMA,
@@ -387,14 +483,14 @@ def finalize_draft(
                 "title": title,
                 "body": str(raw.get("body") or "").strip()[:MAX_BODY],
                 "tag": tag if tag in ALLOWED_TAGS else "new",
-                "accent": None,
-                "icon": None,
+                "accent": accent if HEX_COLOR.fullmatch(accent) else None,
+                "icon": icon if icon in ALLOWED_ICONS else None,
                 "media": None,
                 "media2": None,
                 "layout": layout if layout in ALLOWED_LAYOUTS and layout != "duo" else None,
-                "side": "left",
+                "side": raw.get("side") if raw.get("side") in ALLOWED_SIDES else "left",
                 "focus": None,
-                "flight": None,
+                "flight": flight if flight in ALLOWED_FLIGHTS else None,
             }
         )
     if len(raw_slides) > max_slides:

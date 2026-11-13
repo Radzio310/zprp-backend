@@ -1566,7 +1566,7 @@ async def draft_release_slides(
     """Body: {version_id?, description?, max_slides?}. Opis z wersji, gdy nie podano własnego.
 
     Odpowiedź: {slides (schema 2, bez mediów), warnings[], source: "ai"|"fallback"}.
-    Gdy Groq nie odpowie, szkic powstaje heurystycznie z listy punktów opisu.
+    Szkic robi Claude (ANTHROPIC_API_KEY, RELEASE_AI_MODEL). Gdy nie odpowie, szkic powstaje heurystycznie z listy punktów opisu.
     """
     description = (req.description or "").strip()
     if not description and req.version_id:
@@ -1578,20 +1578,12 @@ async def draft_release_slides(
     source = "ai"
     raw_slides: list[dict[str, Any]] = []
     try:
-        from app.groq_client import groq_chat_completion
-
-        answer = await groq_chat_completion(
-            [
-                {"role": "system", "content": v2.DRAFT_SYSTEM_PROMPT % req.max_slides},
-                {"role": "user", "content": description},
-            ],
-            temperature=0.3,
-            max_tokens=1500,
-        )
-        raw_slides = v2.parse_draft_json(answer)
-    except Exception as exc:  # noqa: BLE001 - brak klucza, 429, zły JSON: zawsze dajemy szkic
+        raw_slides, ai_notes = await v2.ai_draft(description, req.max_slides)
+        warnings.extend(ai_notes)
+    except Exception as exc:  # noqa: BLE001 - brak klucza, limit, refusal, zły JSON: zawsze dajemy szkic
         source = "fallback"
-        warnings.append(f"Kreator AI niedostępny ({type(exc).__name__}) - szkic z listy punktów opisu.")
+        reason = str(exc).strip()[:120] or type(exc).__name__
+        warnings.append(f"Kreator AI niedostępny ({reason}) - szkic z listy punktów opisu.")
         raw_slides = v2.heuristic_draft(description, req.max_slides)
     slides, notes = v2.finalize_draft(raw_slides, req.max_slides)
     return {"slides": slides, "warnings": warnings + notes, "source": source}
