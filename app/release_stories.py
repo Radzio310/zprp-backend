@@ -829,19 +829,36 @@ async def list_release_story_summaries(_admin: str = Depends(require_release_adm
 
 
 @router.get("/admin/versions/{version_id}/release-story", summary="Pobierz szkic pokazu wersji")
-async def get_release_story(version_id: int, _admin: str = Depends(require_release_admin)):
+async def get_release_story(
+    version_id: int,
+    schema: int = 1,
+    _admin: str = Depends(require_release_admin),
+):
+    # Stary edytor (apki sprzed pokazu v2) nie zna schema 2: dostaje rzut na
+    # model 1. Nowy edytor prosi wprost o ?schema=2.
     row = await _ensure_experience(version_id)
-    return {"experience": await _serialize_story(row, schema=2, with_keys=True)}
+    out_schema = 2 if schema == 2 else 1
+    return {"experience": await _serialize_story(row, schema=out_schema, with_keys=True)}
 
 
 @router.put("/admin/versions/{version_id}/release-story", summary="Zapisz lub opublikuj pokaz wersji")
 async def save_release_story(
     version_id: int,
     req: ReleaseStoryUpsert,
+    schema: int = 1,
     _admin: str = Depends(require_release_admin),
 ):
     row = await _ensure_experience(version_id)
     current = dict(row)
+    stored_v2 = any(v2.is_v2(s) for s in (current.get("slides") or []) if isinstance(s, dict))
+    incoming_v2 = any(v2.is_v2(item) for item in req.slides)
+    if stored_v2 and not incoming_v2:
+        # Zapis ze starego edytora nadpisałby slajdy v2 (filmy, kompozycje)
+        # i posprzątał ich media. Blokujemy z jasnym komunikatem.
+        raise HTTPException(
+            status_code=409,
+            detail="Ten pokaz edytujesz w nowej wersji aplikacji. Zaktualizuj BAZĘ.",
+        )
     assets = await _assets_for(int(current["id"]))
     allowed_asset_types = {
         str(asset["object_key"]): str(asset["content_type"]) for asset in assets
@@ -899,7 +916,9 @@ async def save_release_story(
     )
     return {
         "success": True,
-        "experience": await _serialize_story(updated, schema=2, with_keys=True),
+        "experience": await _serialize_story(
+            updated, schema=2 if (schema == 2 or incoming_v2) else 1, with_keys=True
+        ),
     }
 
 
