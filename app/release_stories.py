@@ -15,7 +15,7 @@ import jwt
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Security, UploadFile, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import delete, insert, select, update
 from starlette.concurrency import run_in_threadpool
 
@@ -27,6 +27,7 @@ from app.db import (
     release_story_assets,
 )
 from app.deps import Settings, get_settings
+from app import release_slides_v2 as v2
 
 
 router = APIRouter(tags=["BAZA: Release Stories"])
@@ -116,7 +117,8 @@ class ReleaseStoryUpsert(BaseModel):
     headline: str = Field(
         default="BAZA przekracza kolejne granice", min_length=1, max_length=180
     )
-    slides: list[ReleaseStorySlide] = Field(default_factory=list, max_length=MAX_SLIDES)
+    # Slajdy schema 2 (pole "schema": 2) albo starszy model ReleaseStorySlide.
+    slides: list[dict[str, Any]] = Field(default_factory=list, max_length=MAX_SLIDES)
     bump_generation: bool = False
 
 
@@ -319,14 +321,16 @@ def _blurred_frame(image: Image.Image, out_w: int, out_h: int) -> Image.Image:
     return background
 
 
-def _run_media_command(command: list[str], error_detail: str) -> subprocess.CompletedProcess[str]:
+def _run_media_command(
+    command: list[str], error_detail: str, timeout: int = 90
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             command,
             check=True,
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         raise HTTPException(
@@ -575,11 +579,84 @@ async def _assets_for(experience_id: int) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-async def _serialize_story(row: Any, *, include_assets: bool = True) -> dict[str, Any]:
+async def _sign_media_v2(
+    media: Any, signed: dict[str, str], *, with_keys: bool
+) -> Optional[dict[str, Any]]:
+    """Media schema 2 z bazy (klucze) -> kształt z kontraktu (adresy)."""
+    if not isinstance(media, dict) or not media.get("key"):
+        return None
+    out: dict[str, Any] = {
+        "kind": media.get("kind") or "image",
+        "url": await _signed(str(media["key"]), signed),
+        "aspect": media.get("aspect") or v2.DEFAULT_ASPECT,
+    }
+    if media.get("poster_key"):
+        out["poster_url"] = await _signed(str(media["poster_key"]), signed)
+    if media.get("duration_ms"):
+        out["duration_ms"] = int(media["duration_ms"])
+    if with_keys:
+        out["key"] = str(media["key"])
+        out["poster_key"] = media.get("poster_key")
+    return out
+
+
+async def _signed(key: str, cache: dict[str, str]) -> str:
+    if key not in cache:
+        cache[key] = await run_in_threadpool(_asset_url, key)
+    return cache[key]
+
+
+async def _slides_as_v2(
+    slides: list[Any],
+    assets: list[dict[str, Any]],
+    signed: dict[str, str],
+    *,
+    with_keys: bool,
+) -> list[dict[str, Any]]:
+    """Wszystkie slajdy (także stare, tłumaczone w locie) w kształcie schema 2."""
+    known = {str(a["object_key"]) for a in assets}
+    dims = {str(a["object_key"]): (int(a["width"]), int(a["height"])) for a in assets}
+    result = []
+    for slide in slides:
+        if not isinstance(slide, dict):
+            continue
+        item = v2.migrate_slide_v1(slide, dims)
+        out = {k: v for k, v in item.items() if k not in ("media", "media2")}
+        for field in ("media", "media2"):
+            media = item.get(field)
+            if isinstance(media, dict) and media.get("key") not in known:
+                media = None  # materiał skasowany z R2 - nie wystawiamy martwego adresu
+            out[field] = await _sign_media_v2(media, signed, with_keys=with_keys)
+        result.append(out)
+    return result
+
+
+async def _serialize_story(
+    row: Any, *, include_assets: bool = True, schema: int = 1, with_keys: bool = False
+) -> dict[str, Any]:
+    """schema=1: kształt dla starych wydań aplikacji; schema=2: kontrakt premier 2."""
     data = dict(row)
     slides = _json_value(data.get("slides"), [])
     assets = await _assets_for(int(data["id"]))
     asset_by_key = {str(asset["object_key"]): asset for asset in assets}
+
+    if schema == 2:
+        signed2: dict[str, str] = {}
+        data["slides"] = await _slides_as_v2(slides, assets, signed2, with_keys=with_keys)
+        if include_assets:
+            data["assets"] = [
+                {**asset, "url": await _signed(str(asset["object_key"]), signed2)}
+                for asset in assets
+            ]
+        return data
+
+    if any(v2.is_v2(s) for s in slides):
+        # Stary klient dostaje slajd schema 2 przetłumaczony na model 1.
+        signed1: dict[str, str] = {}
+        legacy = []
+        for slide in await _slides_as_v2(slides, assets, signed1, with_keys=True):
+            legacy.append(v2.project_to_v1(slide))
+        slides = legacy
 
     signed_by_key: dict[str, str] = {}
     for slide in slides:
@@ -694,6 +771,39 @@ def _clean_and_validate_slides(
     return cleaned
 
 
+async def _preview_shots_of(version_id: int) -> list[Any]:
+    row = await database.fetch_one(
+        select(app_versions.c.preview_shots).where(app_versions.c.id == version_id)
+    )
+    return _json_value(dict(row).get("preview_shots") if row else None, [])
+
+
+async def _prune_unreferenced_assets(
+    experience_id: int,
+    version_id: int,
+    slides: list[Any],
+    assets: list[dict[str, Any]],
+    preview_shots: Optional[list[Any]] = None,
+) -> None:
+    """Kasuje materiały, których nie używa żaden slajd ani zrzut podglądu."""
+    referenced: set[str] = set()
+    for slide in slides:
+        referenced |= v2.slide_keys(slide)
+    if preview_shots is None:
+        preview_shots = await _preview_shots_of(version_id)
+    referenced |= v2.media_keys(preview_shots)
+    for asset in assets:
+        object_key = str(asset["object_key"])
+        if object_key in referenced:
+            continue
+        await run_in_threadpool(_delete_object, object_key)
+        await database.execute(
+            delete(release_story_assets).where(
+                release_story_assets.c.id == int(asset["id"])
+            )
+        )
+
+
 @router.get("/admin/release-stories", summary="Podsumowanie pokazów wszystkich wersji")
 async def list_release_story_summaries(_admin: str = Depends(require_release_admin)):
     rows = await database.fetch_all(
@@ -721,7 +831,7 @@ async def list_release_story_summaries(_admin: str = Depends(require_release_adm
 @router.get("/admin/versions/{version_id}/release-story", summary="Pobierz szkic pokazu wersji")
 async def get_release_story(version_id: int, _admin: str = Depends(require_release_admin)):
     row = await _ensure_experience(version_id)
-    return {"experience": await _serialize_story(row)}
+    return {"experience": await _serialize_story(row, schema=2, with_keys=True)}
 
 
 @router.put("/admin/versions/{version_id}/release-story", summary="Zapisz lub opublikuj pokaz wersji")
@@ -737,11 +847,23 @@ async def save_release_story(
         str(asset["object_key"]): str(asset["content_type"]) for asset in assets
     }
     publishing = req.status == "published"
-    slides = _clean_and_validate_slides(
-        req.slides,
-        publishing=publishing,
-        allowed_asset_types=allowed_asset_types,
-    )
+    if any(v2.is_v2(item) for item in req.slides):
+        slides = v2.clean_slides_v2(
+            req.slides,
+            publishing=publishing,
+            asset_types=allowed_asset_types,
+            max_slides=MAX_SLIDES,
+        )
+    else:
+        try:
+            legacy_slides = [ReleaseStorySlide(**item) for item in req.slides]
+        except (ValidationError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail="Nieprawidłowy slajd.") from exc
+        slides = _clean_and_validate_slides(
+            legacy_slides,
+            publishing=publishing,
+            allowed_asset_types=allowed_asset_types,
+        )
     generation = int(req.display_generation)
     if req.bump_generation:
         generation = max(generation, int(current.get("display_generation") or 1) + 1)
@@ -768,28 +890,17 @@ async def save_release_story(
     # Zastąpienie lub usunięcie grafiki w edytorze sprząta poprzedni obiekt.
     # Klucze są niezmienne, więc żaden opublikowany slajd nie wskazuje na plik,
     # który zmienił zawartość pod tym samym adresem.
-    referenced_keys = {
-        str(slide.get(field))
-        for slide in slides
-        if isinstance(slide, dict)
-        for field in ("media_key", "poster_key")
-        if slide.get(field)
-    }
-    for asset in assets:
-        object_key = str(asset["object_key"])
-        if object_key in referenced_keys:
-            continue
-        await run_in_threadpool(_delete_object, object_key)
-        await database.execute(
-            delete(release_story_assets).where(
-                release_story_assets.c.id == int(asset["id"])
-            )
-        )
+    await _prune_unreferenced_assets(
+        int(current["id"]), version_id, slides, assets
+    )
 
     updated = await database.fetch_one(
         select(release_experiences).where(release_experiences.c.id == int(current["id"]))
     )
-    return {"success": True, "experience": await _serialize_story(updated)}
+    return {
+        "success": True,
+        "experience": await _serialize_story(updated, schema=2, with_keys=True),
+    }
 
 
 @router.delete("/admin/versions/{version_id}/release-story", summary="Usuń pokaz wersji")
@@ -963,11 +1074,10 @@ async def delete_release_story_asset(
         raise HTTPException(status_code=404, detail="Materiał nie istnieje.")
     object_key = str(dict(asset)["object_key"])
     slides = _json_value(dict(experience).get("slides"), [])
-    if any(
-        isinstance(slide, dict)
-        and object_key in {slide.get("media_key"), slide.get("poster_key")}
-        for slide in slides
-    ):
+    used = v2.media_keys(await _preview_shots_of(version_id))
+    for slide in slides:
+        used |= v2.slide_keys(slide)
+    if object_key in used:
         raise HTTPException(status_code=409, detail="Materiał jest nadal używany przez slajd.")
     await run_in_threadpool(_delete_object, object_key)
     await database.execute(
@@ -1141,3 +1251,347 @@ async def get_published_release_catalog(
         )
     stories.sort(key=lambda story: _semver_key(story["version"]), reverse=True)
     return {"stories": stories}
+
+
+# ---------------------------------------------------------------------------
+# Premiery schema 2: materiały w oryginalnych proporcjach, meta wersji,
+# endpoint startowy aplikacji, kreator szkicu.
+# ---------------------------------------------------------------------------
+
+MAX_MEDIA_IMAGE_BYTES = 12 * 1024 * 1024
+MAX_MEDIA_VIDEO_BYTES = 60 * 1024 * 1024
+MIN_MEDIA_VIDEO_SECONDS = 1.0
+MAX_MEDIA_VIDEO_SECONDS = 30.0
+MEDIA_IMAGE_LONG_SIDE = 1600
+MEDIA_VIDEO_LONG_SIDE = 1280
+
+
+def _prepare_image_free(raw: bytes) -> tuple[bytes, int, int]:
+    """Grafika z zachowanymi proporcjami (bez kadru 9:16), dłuższy bok <= 1600 px."""
+    try:
+        with Image.open(io.BytesIO(raw)) as opened:
+            image = ImageOps.exif_transpose(opened)
+            image.load()
+    except (UnidentifiedImageError, OSError) as exc:
+        raise HTTPException(status_code=415, detail="Plik nie jest obsługiwanym obrazem.") from exc
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=422, detail="Nieprawidłowe wymiary obrazu.")
+    scale = min(1.0, MEDIA_IMAGE_LONG_SIDE / max(width, height))
+    if scale < 1.0:
+        image = image.resize(
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    if image.mode not in ("RGB", "RGBA"):
+        image = image.convert("RGB")
+    output = io.BytesIO()
+    image.save(output, format="WEBP", quality=88, method=6)
+    return output.getvalue(), image.size[0], image.size[1]
+
+
+def _prepare_video_free(raw: bytes, suffix: str) -> tuple[bytes, bytes, int, int, int]:
+    """Film do ekranu telefonu: proporcje zostają, H.264+AAC, faststart, poster z klatki.
+
+    Zwraca (mp4, poster_webp, width, height, duration_ms). Poster powstaje na
+    serwerze (FFmpeg jest w obrazie Dockera), klient nie musi go wgrywać.
+    """
+    with tempfile.TemporaryDirectory(prefix="baza-media-") as temp_dir:
+        directory = Path(temp_dir)
+        source = directory / f"source{suffix or '.mp4'}"
+        output = directory / "media.mp4"
+        poster_png = directory / "poster.png"
+        source.write_bytes(raw)
+
+        duration, width, height = _video_metadata(source)
+        if duration < MIN_MEDIA_VIDEO_SECONDS:
+            raise HTTPException(status_code=422, detail="Film musi trwać co najmniej sekundę.")
+        if duration > MAX_MEDIA_VIDEO_SECONDS + 0.1:
+            raise HTTPException(status_code=422, detail="Film może trwać maksymalnie 30 sekund.")
+        long_side = MEDIA_VIDEO_LONG_SIDE
+        scale = (
+            f"scale='if(gt(iw,ih),min({long_side},iw),-2)':"
+            f"'if(gt(iw,ih),-2,min({long_side},ih))',setsar=1"
+        )
+        _run_media_command(
+            [
+                "ffmpeg", "-y", "-i", str(source), "-map_metadata", "-1",
+                "-vf", scale,
+                "-c:v", "libx264", "-profile:v", "high", "-preset", "veryfast",
+                "-crf", "23", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+                "-movflags", "+faststart", "-t", f"{MAX_MEDIA_VIDEO_SECONDS:.1f}",
+                str(output),
+            ],
+            "Nie udało się zoptymalizować filmu. Spróbuj wyeksportować go jako MP4 H.264.",
+            timeout=300,
+        )
+        final_duration, out_w, out_h = _video_metadata(output)
+        poster_at = min(0.6, max(0.05, final_duration * 0.12))
+        _run_media_command(
+            ["ffmpeg", "-y", "-ss", f"{poster_at:.3f}", "-i", str(output),
+             "-frames:v", "1", str(poster_png)],
+            "Nie udało się przygotować podglądu filmu.",
+        )
+        poster, _, _ = _prepare_image_free(poster_png.read_bytes())
+        return output.read_bytes(), poster, out_w, out_h, int(round(final_duration * 1000))
+
+
+async def _store_asset(experience_id: int, key: str, payload: bytes, ctype: str,
+                       name: str, width: int, height: int) -> int:
+    await run_in_threadpool(_put_object, key, payload, ctype)
+    try:
+        return int(
+            await database.execute(
+                insert(release_story_assets).values(
+                    experience_id=experience_id, object_key=key,
+                    original_name=name[:512], content_type=ctype,
+                    width=width, height=height, byte_size=len(payload),
+                )
+            )
+        )
+    except Exception:
+        await run_in_threadpool(_delete_object, key)
+        raise
+
+
+@router.post(
+    "/admin/versions/{version_id}/release-story/media",
+    status_code=status.HTTP_201_CREATED,
+    summary="Wgraj grafikę lub film (mp4/mov, do 60 MB) w oryginalnych proporcjach",
+)
+async def upload_release_media(
+    version_id: int,
+    file: UploadFile = File(...),
+    _admin: str = Depends(require_release_admin),
+):
+    """Zwraca gotowy obiekt `media` z kontraktu + `key`/`poster_key` do zapisu."""
+    ctype = str(file.content_type or "").lower()
+    suffix = Path(file.filename or "").suffix.lower()
+    is_video = ctype.startswith("video/") or suffix in {".mp4", ".mov", ".m4v"}
+    raw = await _read_upload_limited(
+        file,
+        MAX_MEDIA_VIDEO_BYTES if is_video else MAX_MEDIA_IMAGE_BYTES,
+        "Film" if is_video else "Grafika",
+    )
+    if not raw:
+        raise HTTPException(status_code=400, detail="Pusty plik.")
+    version = dict(await _version_row(version_id))
+    experience = dict(await _ensure_experience(version_id))
+    config = _storage_config()
+    prefix = f"{config['prefix']}/v{str(version['version']).strip()}"
+    exp_id = int(experience["id"])
+    name = file.filename or ("film" if is_video else "grafika")
+    stem = uuid.uuid4().hex
+
+    if not is_video:
+        payload, width, height = await run_in_threadpool(_prepare_image_free, raw)
+        key = f"{prefix}/{stem}.webp"
+        asset_id = await _store_asset(exp_id, key, payload, "image/webp", name, width, height)
+        return {
+            "media": {
+                "kind": "image", "key": key, "poster_key": None,
+                "url": await run_in_threadpool(_asset_url, key),
+                "aspect": round(width / height, 4),
+            },
+            "asset_id": asset_id, "width": width, "height": height, "byte_size": len(payload),
+        }
+
+    video, poster, width, height, duration_ms = await run_in_threadpool(
+        _prepare_video_free, raw, suffix or ".mp4"
+    )
+    video_key, poster_key = f"{prefix}/{stem}.mp4", f"{prefix}/{stem}-poster.webp"
+    asset_id = await _store_asset(exp_id, video_key, video, "video/mp4", name, width, height)
+    try:
+        poster_id = await _store_asset(
+            exp_id, poster_key, poster, "image/webp", f"poster-{name}", width, height
+        )
+    except Exception:
+        await run_in_threadpool(_delete_object, video_key)
+        await database.execute(
+            delete(release_story_assets).where(release_story_assets.c.id == asset_id)
+        )
+        raise
+    return {
+        "media": {
+            "kind": "video", "key": video_key, "poster_key": poster_key,
+            "url": await run_in_threadpool(_asset_url, video_key),
+            "poster_url": await run_in_threadpool(_asset_url, poster_key),
+            "aspect": round(width / height, 4), "duration_ms": duration_ms,
+        },
+        "asset_id": asset_id, "poster_asset_id": poster_id,
+        "width": width, "height": height, "byte_size": len(video),
+    }
+
+
+def _clean_store_urls(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {"ios": "", "android": ""}
+    out = {}
+    for platform in ("ios", "android"):
+        value = str(raw.get(platform) or "").strip()
+        if value and not re.match(r"^https?://\S+$", value):
+            raise HTTPException(status_code=422, detail=f"Nieprawidłowy link do sklepu ({platform}).")
+        out[platform] = value[:1000]
+    return out
+
+
+async def _version_meta(row: Any, *, with_keys: bool) -> dict[str, Any]:
+    data = dict(row)
+    signed: dict[str, str] = {}
+    shots = []
+    for shot in _json_value(data.get("preview_shots"), []):
+        media = await _sign_media_v2(shot, signed, with_keys=with_keys)
+        if media:
+            shots.append(media)
+    stored_urls = _json_value(data.get("store_urls"), {})
+    return {
+        "version_id": int(data["id"]),
+        "version": data["version"],
+        "required": bool(data.get("required")),
+        "store_urls": {
+            "ios": str(stored_urls.get("ios") or ""),
+            "android": str(stored_urls.get("android") or ""),
+        },
+        "preview_shots": shots,
+    }
+
+
+class ReleaseMetaUpsert(BaseModel):
+    preview_shots: Optional[list[dict[str, Any]]] = Field(default=None, max_length=v2.MAX_PREVIEW_SHOTS)
+    required: Optional[bool] = None
+    store_urls: Optional[dict[str, Any]] = None
+
+
+@router.get("/admin/versions/{version_id}/release-meta", summary="Zrzuty podglądu, wymuszenie, linki do sklepów")
+async def get_release_meta(version_id: int, _admin: str = Depends(require_release_admin)):
+    return await _version_meta(await _version_row(version_id), with_keys=True)
+
+
+@router.put("/admin/versions/{version_id}/release-meta", summary="Zapisz zrzuty podglądu, wymuszenie, linki")
+async def save_release_meta(
+    version_id: int, req: ReleaseMetaUpsert, _admin: str = Depends(require_release_admin)
+):
+    await _version_row(version_id)
+    experience = dict(await _ensure_experience(version_id))
+    assets = await _assets_for(int(experience["id"]))
+    values: dict[str, Any] = {}
+    shots: Optional[list[Any]] = None
+    if req.preview_shots is not None:
+        types = {str(a["object_key"]): str(a["content_type"]) for a in assets}
+        shots = v2.clean_preview_shots(req.preview_shots, types)
+        values["preview_shots"] = shots
+    if req.required is not None:
+        values["required"] = bool(req.required)
+    if req.store_urls is not None:
+        values["store_urls"] = _clean_store_urls(req.store_urls)
+    if values:
+        await database.execute(
+            update(app_versions).where(app_versions.c.id == version_id).values(**values)
+        )
+    if shots is not None:
+        await _prune_unreferenced_assets(
+            int(experience["id"]), version_id,
+            _json_value(experience.get("slides"), []), assets, shots,
+        )
+    return {"success": True, **await _version_meta(await _version_row(version_id), with_keys=True)}
+
+
+@router.get("/app/releases/check", summary="Start aplikacji: czy jest aktualizacja i co nowego w tej wersji")
+async def check_release(
+    version: str = Query(..., min_length=1, max_length=40),
+    platform: Literal["ios", "android"] = Query(...),
+):
+    """status: ok | suggest | required; latest = najnowsza wersja platformy; whats_new = premiera zainstalowanej."""
+    platform_column = (
+        app_versions.c.available_ios if platform == "ios" else app_versions.c.available_android
+    )
+    rows = await database.fetch_all(
+        select(app_versions)
+        .where(platform_column == True)  # noqa: E712
+        .where(app_versions.c.to_show == True)  # noqa: E712
+    )
+    rows = [dict(r) for r in rows]
+    installed = version.strip()
+    installed_key = _semver_key(installed)
+    latest_row = max(rows, key=lambda r: _semver_key(str(r["version"])), default=None)
+
+    status_value = "ok"
+    latest: Optional[dict[str, Any]] = None
+    if latest_row and _semver_key(str(latest_row["version"])) > installed_key:
+        newer = [r for r in rows if _semver_key(str(r["version"])) > installed_key]
+        forced = any(bool(r.get("required")) for r in newer)
+        status_value = "required" if forced else "suggest"
+        meta = await _version_meta(latest_row, with_keys=False)
+        latest = {
+            "version": str(latest_row["version"]),
+            "title": str(latest_row.get("name") or ""),
+            "preview_shots": meta["preview_shots"],
+            "store_url": meta["store_urls"].get(platform) or "",
+            "required": forced,
+        }
+
+    whats_new = None
+    current = next((r for r in rows if str(r["version"]) == installed), None)
+    if current:
+        exp = await database.fetch_one(
+            select(release_experiences)
+            .where(release_experiences.c.version_id == int(current["id"]))
+            .where(release_experiences.c.status == "published")
+        )
+        if exp and dict(exp).get("experience_mode") != "changelog_only":
+            story = await _serialize_story(exp, include_assets=False, schema=2)
+            if story["slides"]:
+                whats_new = {
+                    "version": installed,
+                    "title": str(current.get("name") or ""),
+                    "headline": story.get("headline") or "",
+                    "display_generation": int(story.get("display_generation") or 1),
+                    "experience_mode": story.get("experience_mode"),
+                    "slides": story["slides"],
+                }
+    return {"status": status_value, "latest": latest, "whats_new": whats_new}
+
+
+class DraftSlidesRequest(BaseModel):
+    version_id: Optional[int] = None
+    description: Optional[str] = Field(default=None, max_length=8000)
+    max_slides: int = Field(default=6, ge=1, le=MAX_SLIDES)
+
+
+@router.post("/admin/release-stories/draft-slides", summary="Szkic slajdów z opisu zmian wersji (AI)")
+async def draft_release_slides(
+    req: DraftSlidesRequest, _admin: str = Depends(require_release_admin)
+):
+    """Body: {version_id?, description?, max_slides?}. Opis z wersji, gdy nie podano własnego.
+
+    Odpowiedź: {slides (schema 2, bez mediów), warnings[], source: "ai"|"fallback"}.
+    Gdy Groq nie odpowie, szkic powstaje heurystycznie z listy punktów opisu.
+    """
+    description = (req.description or "").strip()
+    if not description and req.version_id:
+        description = str(dict(await _version_row(req.version_id)).get("description") or "").strip()
+    if not description:
+        raise HTTPException(status_code=422, detail="Brak opisu zmian do przerobienia na slajdy.")
+
+    warnings: list[str] = []
+    source = "ai"
+    raw_slides: list[dict[str, Any]] = []
+    try:
+        from app.groq_client import groq_chat_completion
+
+        answer = await groq_chat_completion(
+            [
+                {"role": "system", "content": v2.DRAFT_SYSTEM_PROMPT % req.max_slides},
+                {"role": "user", "content": description},
+            ],
+            temperature=0.3,
+            max_tokens=1500,
+        )
+        raw_slides = v2.parse_draft_json(answer)
+    except Exception as exc:  # noqa: BLE001 - brak klucza, 429, zły JSON: zawsze dajemy szkic
+        source = "fallback"
+        warnings.append(f"Kreator AI niedostępny ({type(exc).__name__}) - szkic z listy punktów opisu.")
+        raw_slides = v2.heuristic_draft(description, req.max_slides)
+    slides, notes = v2.finalize_draft(raw_slides, req.max_slides)
+    return {"slides": slides, "warnings": warnings + notes, "source": source}

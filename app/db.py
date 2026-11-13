@@ -2466,6 +2466,11 @@ app_versions = Table(
     # żeby przypadkowo nie wypchnąć aktualizacji przed publikacją w sklepie.
     Column("available_ios", Boolean, nullable=False, server_default=text("false")),
     Column("available_android", Boolean, nullable=False, server_default=text("false")),
+    # Premiery 2 (schema 2): zrzuty/filmy do okna "Premiera" i karty na Domu przed
+    # aktualizacją (do 12, klucze R2 w assetach pokazu), wymuszenie i linki do sklepów.
+    Column("preview_shots", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("required", Boolean, nullable=False, server_default=text("false")),
+    Column("store_urls", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
@@ -5006,6 +5011,10 @@ with engine.connect() as _conn:
             "WHERE status IN ('approval_pending', 'open', 'applying')"
         )
     )
+    # Premiery schema 2 (13.11.2026): idempotentne, zob. docs/migracja_release_stories_v2.sql
+    _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS preview_shots jsonb NOT NULL DEFAULT '[]'::jsonb"))
+    _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS required boolean NOT NULL DEFAULT false"))
+    _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS store_urls jsonb NOT NULL DEFAULT '{}'::jsonb"))
     # Kalendarze drugorzędne Google: obie tabele stoją na produkcji.
     _conn.execute(text("ALTER TABLE calendar_tokens ADD COLUMN IF NOT EXISTS scope varchar"))
     _conn.execute(text("ALTER TABLE event_mappings ADD COLUMN IF NOT EXISTS calendar_id varchar"))
