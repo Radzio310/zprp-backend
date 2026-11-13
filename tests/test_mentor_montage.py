@@ -74,6 +74,10 @@ def test_wybor_n_klipow_z_zestawienia_w_nowej_kolejnosci():
 def test_stan_pozycji_z_planu_pobrania():
     assert MR.item_state({"can_download": True, "mp4_status": "ready"})["state"] == "ready"
     assert MR.item_state({"can_download": True, "mp4_status": "working"})["state"] == "cutting"
+    # Przed „Zrób film” nic nie jest zamówione: klip czeka na start, a nie „wycina się”.
+    assert MR.item_state({"can_download": True, "mp4_status": "none"})["state"] == "pending"
+    assert MR.counts(["pending", "ready"])["pending"] == 1
+    assert MR.next_status(["ready", "pending"], True) == "preparing"
     failed = MR.item_state({"can_download": True, "mp4_status": "failed"})
     assert failed["state"] == "failed" and failed["action"] == "retry"
     youtube = MR.item_state({"can_download": False, "reason": "NO_SOURCE"}, own_provider="youtube", can_copy=True)

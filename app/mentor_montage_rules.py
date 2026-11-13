@@ -342,7 +342,7 @@ def zoom_window(track: Sequence[Mapping[str, float]], t: float) -> Tuple[float, 
 # ─── Stany pozycji (gotowość) ──────────────────────────────────────────────
 
 #: Stan pozycji w montażu z planu pobrania klipu (`mentor_clip_download.build_plan`).
-ITEM_STATES = ("ready", "cutting", "waiting", "copying", "blocked", "failed", "skipped")
+ITEM_STATES = ("ready", "pending", "cutting", "waiting", "copying", "blocked", "failed", "skipped")
 
 
 def item_state(plan: Mapping[str, Any], *, own_provider: str = "", can_copy: bool = False,
@@ -358,6 +358,9 @@ def item_state(plan: Mapping[str, Any], *, own_provider: str = "", can_copy: boo
         if status == "failed":
             return {"state": "failed", "reason": plan.get("error_code") or "MP4_FAILED",
                     "hint": plan.get("error_message") or "Nie udało się wyciąć tego klipu. Spróbuj ponownie.", "action": "retry"}
+        if status == "none":
+            # Nic jeszcze nie zamówione (podgląd przed „Zrób film”): klip DA SIĘ wyciąć, ale nikt go nie wycina.
+            return {"state": "pending", "reason": None, "hint": hint, "action": None}
         return {"state": "cutting", "reason": None, "hint": hint, "action": None}
     if reason in ("QUEUE_LIMIT", "NOT_READY", "VEO_PROCESSING", "VEO_UNAVAILABLE"):
         return {"state": "waiting", "reason": reason, "hint": hint, "action": None}
@@ -374,7 +377,7 @@ def item_state(plan: Mapping[str, Any], *, own_provider: str = "", can_copy: boo
 
 
 def counts(states: Iterable[str]) -> Dict[str, int]:
-    out = {k: 0 for k in ("total", "ready", "cutting", "waiting", "copying", "blocked", "failed", "skipped")}
+    out = {k: 0 for k in ("total", "ready", "pending", "cutting", "waiting", "copying", "blocked", "failed", "skipped")}
     for st in states:
         out["total"] += 1
         out[st if st in out else "blocked"] += 1
@@ -385,7 +388,7 @@ def next_status(states: Sequence[str], skip_missing: bool) -> str:
     """Co dalej z montażem w przygotowaniu: `queued` (render), `preparing` (czekamy) albo `failed` (nie ma z czego).
     Pominięcie brakujących nie czeka na klipy wymagające akcji (blocked) ani na nieudane, ale czeka na te w drodze."""
     ready = sum(1 for st in states if st == "ready")
-    moving = sum(1 for st in states if st in ("cutting", "waiting", "copying"))
+    moving = sum(1 for st in states if st in ("pending", "cutting", "waiting", "copying"))
     stuck = sum(1 for st in states if st in ("blocked", "failed"))
     if ready == len(states) and states:
         return "queued"
