@@ -49,7 +49,7 @@ from app.link_preview_rules import (
 )
 from urllib.parse import urlparse
 
-USER_AGENT = "Mozilla/5.0 (compatible; BAZA-LinkPreview/1.0; +https://bazaapp.online)"
+USER_AGENT = "Mozilla/5.0 (compatible; BAZA-LinkPreview/1.0; +https://bazapodreka.app/baza)"
 
 _cache = TtlCache()
 
