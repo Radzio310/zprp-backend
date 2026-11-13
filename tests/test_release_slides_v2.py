@@ -98,7 +98,7 @@ _ANSWER = _json.dumps(
     {
         "slides": [
             {"title": "Giełda w kieszeni", "body": "Filtry po okręgu.", "tag": "new", "accent": "#112233",
-             "icon": "trophy", "layout": "rise", "side": "right", "flight": "spin"},
+             "icon": "ball", "layout": "rise", "side": "right", "flight": "spin"},
             {"title": "X", "body": "", "tag": "zly", "accent": "red", "icon": "nieistnieje",
              "layout": "duo", "side": "x", "flight": "none"},
         ],
@@ -117,7 +117,7 @@ def test_ai_draft_request_and_cleaning(monkeypatch):
     assert kw["betas"] == ["server-side-fallback-2026-07-01"] and kw["fallbacks"] == "default"
     assert "4" in kw["system"]
     slides, _ = v2.finalize_draft(raw, 4)
-    assert slides[0]["icon"] == "trophy" and slides[0]["side"] == "right" and slides[0]["flight"] == "spin"
+    assert slides[0]["icon"] == "ball" and slides[0]["side"] == "right" and slides[0]["flight"] == "spin"
     assert slides[0]["accent"] == "#112233" and slides[0]["layout"] == "rise"
     assert slides[1]["icon"] is None and slides[1]["accent"] is None and slides[1]["layout"] is None
     assert slides[1]["side"] == "left" and slides[1]["flight"] is None and slides[1]["tag"] == "new"
@@ -140,3 +140,11 @@ def test_draft_schema_is_strict():
     item = v2.DRAFT_SCHEMA["properties"]["slides"]["items"]
     assert item["additionalProperties"] is False and set(item["required"]) == set(item["properties"])
     assert "duo" not in item["properties"]["layout"]["enum"]
+
+
+def test_allowed_icons_match_app():
+    assert list(v2.ALLOWED_ICONS) == [
+        "ball", "whistle", "protocol", "calendar", "scoreboard", "stopwatch", "cards",
+        "bell", "hall", "chart", "video", "shield", "spark",
+    ]
+    assert "piłka" in v2.DRAFT_SYSTEM_PROMPT and "iskra" in v2.DRAFT_SYSTEM_PROMPT

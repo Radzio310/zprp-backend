@@ -1110,6 +1110,7 @@ async def get_published_release_experience(
     version: str = Query(..., min_length=1, max_length=40),
     platform: Literal["ios", "android"] = Query(...),
     historical: bool = Query(default=False),
+    schema: int = Query(default=1),
 ):
     platform_column = (
         app_versions.c.available_ios
@@ -1145,7 +1146,11 @@ async def get_published_release_experience(
     row = await database.fetch_one(query)
     if not row or dict(row).get("experience_mode") == "changelog_only":
         return {"experience": None}
-    return {"experience": await _serialize_story(row, include_assets=False)}
+    return {
+        "experience": await _serialize_story(
+            row, include_assets=False, schema=2 if schema == 2 else 1
+        )
+    }
 
 
 @router.get(
@@ -1156,6 +1161,7 @@ async def get_recent_published_release_experiences(
     version: str = Query(..., min_length=1, max_length=40),
     platform: Literal["ios", "android"] = Query(...),
     limit: int = Query(default=3, ge=1, le=3),
+    schema: int = Query(default=1),
 ):
     """Return published stories from the recent release window.
 
@@ -1208,7 +1214,8 @@ async def get_recent_published_release_experiences(
     )
     return {
         "experiences": [
-            await _serialize_story(row, include_assets=False) for row in story_rows
+            await _serialize_story(row, include_assets=False, schema=2 if schema == 2 else 1)
+            for row in story_rows
         ]
     }
 
@@ -1219,6 +1226,7 @@ async def get_recent_published_release_experiences(
 )
 async def get_published_release_catalog(
     platform: Literal["ios", "android"] = Query(...),
+    schema: int = Query(default=1),
 ):
     """Return native slide copy only; media is signed after an explicit tap."""
     platform_column = (

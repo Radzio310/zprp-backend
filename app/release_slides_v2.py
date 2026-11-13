@@ -329,11 +329,8 @@ _FIXED = re.compile(r"(napraw|błęd|błąd|\bfix)", re.I)
 _IMPROVED = re.compile(r"(popraw|ulepsz|szybsz|przyspiesz|zmienion|usprawni)", re.I)
 
 ALLOWED_ICONS = (
-    "sparkles", "rocket", "flash", "star", "trophy", "whistle", "timer", "stopwatch", "people", "person",
-    "calendar", "map", "navigate", "car", "wallet", "cash", "document-text", "clipboard", "create",
-    "pencil", "camera", "videocam", "images", "notifications", "chatbubbles", "shield-checkmark",
-    "lock-closed", "cloud-upload", "cloud-download", "sync", "speedometer", "bug", "build", "settings",
-    "stats-chart", "podium", "football", "search", "filter", "share-social", "qr-code", "school", "heart",
+    "ball", "whistle", "protocol", "calendar", "scoreboard", "stopwatch", "cards", "bell",
+    "hall", "chart", "video", "shield", "spark",
 )
 AI_DEFAULT_MODEL = "claude-opus-5-5"
 AI_TIMEOUT_S = 90.0
@@ -349,7 +346,10 @@ DRAFT_SYSTEM_PROMPT = (
     "- Opis: 1-2 zdania, z korzyścią dla sędziego (co zyskuje, co mu się upraszcza), najwyżej 160 znaków.\n"
     "- Nie używaj długich myślników (— ani –). Używaj przecinków, dwukropków lub krótkich zdań.\n"
     "- tag: new (nowa funkcja), improved (ulepszenie), fixed (poprawka błędu).\n"
-    "- icon: motyw wyłącznie z dozwolonej listy w schemacie; \"none\" gdy nic nie pasuje.\n"
+    "- icon: motyw wyłącznie z dozwolonej listy w schemacie: ball (piłka), whistle (gwizdek), "
+    "protocol (protokół), calendar (kalendarz), scoreboard (tablica wyników), stopwatch (stoper), "
+    "cards (kartki), bell (dzwonek), hall (hala), chart (wykres), video (film), shield (tarcza), "
+    "spark (iskra); \"none\" gdy nic nie pasuje.\n"
     "- layout, side, flight: dobieraj kompozycje tak, by sąsiednie slajdy wyraźnie się różniły "
     "(nie powtarzaj tego samego układu ani tej samej strony dwa razy z rzędu). "
     "flight \"none\" jest w porządku.\n"
