@@ -543,6 +543,15 @@ async def load_settlement(
         "penalties": penalties,
         "outside_district": {
             "clubs": scope["clubs"],
+            # Mecz -> klub, ktory go placi. Bez tego wycinek jednego sedziego
+            # z miesiaca CALEGO okregu (`_judge_payload`) dostawal liste
+            # wszystkich klubow okregu, a aplikacja pisala przy meczu nie ten
+            # klub (14.11.2026: LCK/50 w Zorach „wyplaca MKS Siemion").
+            "club_of": {
+                match_key: club
+                for match_key, club in (scope.get("club_of") or {}).items()
+                if match_key in outside_keys
+            },
             "entries": outside_entries,
             "totals": E.totals_of(outside_entries),
             "travel": E.travel_rows(outside_entries),
@@ -586,6 +595,40 @@ def _scope_for(scope: dict, keys: set[str]) -> dict:
         "excluded_keys": (scope.get("excluded_keys") or set()) & keys,
         "clubs": [{**club, "matches": counts[club["club_id"]]} for club in scope["clubs"] if club["club_id"] in counts],
     }
+
+
+def _judge_clubs(outside: dict, rows: list[dict]) -> list[dict]:
+    """
+    Kluby, ktore placa mecze JEDNEGO sedziego, i platnik przy kazdym jego meczu.
+
+    `/me` bierze wycinek z miesiaca calego okregu, gdy ten jest w pamieci - a tam
+    `clubs` to wszystkie kluby okregu placace same. Aplikacja skleja ich nazwy
+    w jeden napis, wiec sedzia z jednym meczem MTS Trendy Top Zory czytal
+    „wyplaca MKS Siemion SP4 Siemianowice Slaski…" (zgloszone 14.11.2026).
+    Zawezamy liste do klubow z `rows` i dopisujemy kazdemu wierszowi
+    `club_id`/`club_name` (wiersze zmieniamy w miejscu - to swieze slowniki
+    z `_entry_json`). Starsza aplikacja czyta tylko `clubs`, nowa - pole wiersza.
+    """
+    clubs = outside.get("clubs") or []
+    if not rows:
+        return []
+    club_of = outside.get("club_of")
+    if club_of is None:
+        # Wynik policzony przed ta zmiana - lepiej pelna lista niz pusta.
+        return clubs
+    by_id = {club["club_id"]: club for club in clubs}
+    counts: dict[str, int] = {}
+    seen: set[str] = set()
+    for row in rows:
+        club_id = club_of.get(row.get("match_key"))
+        if not club_id:
+            continue
+        row["club_id"] = club_id
+        row["club_name"] = (by_id.get(club_id) or {}).get("club_name") or ""
+        if row["match_key"] not in seen:
+            seen.add(row["match_key"])
+            counts[club_id] = counts.get(club_id, 0) + 1
+    return [{**club, "matches": counts[club["club_id"]]} for club in clubs if club["club_id"] in counts]
 
 
 def _bomb_rows(
@@ -1153,6 +1196,7 @@ async def _judge_payload(
         E.JudgeSettlement(judge_id=judge_id, judge_name=entry.judge_name),
     )
     outside_payload = _entry_json(outside_entry, with_matches=True)
+    outside_clubs = _judge_clubs(data["outside_district"], outside_payload.get("rows") or [])
     if solo is None:
         solo = await _solo_table_matches(key, [item.match_key for item in entry.matches])
     for row in payload.get("rows") or []:
@@ -1172,7 +1216,7 @@ async def _judge_payload(
         "entry": payload,
         "travel": [_travel_json(r) for r in E.travel_rows([entry])],
         "outside_district": {
-            "clubs": data["outside_district"]["clubs"],
+            "clubs": outside_clubs,
             "entry": outside_payload,
             "travel": [_travel_json(r) for r in E.travel_rows([outside_entry])],
         },
