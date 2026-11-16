@@ -30,6 +30,7 @@ from app.calendar_storage import (
     get_event_mapping,
     delete_event_mapping,
 )
+from app.calendar_auto_sync import records_print
 from app.calendar_utils import create_flow  # Twój helper do Flow
 from app.calendar_secondary_engine import (
     account_uses_secondary,
@@ -612,6 +613,7 @@ async def list_events(
 
 
 @router.post("/events", status_code=status.HTTP_201_CREATED, summary="Utwórz nowe wydarzenie")
+@records_print("write")
 async def create_event(
     payload: EventCreate,
     settings=Depends(get_settings),
@@ -737,6 +739,7 @@ async def create_event(
     status_code=status.HTTP_200_OK,
     summary="Aktualizuj istniejące wydarzenie po match_id"
 )
+@records_print("write")
 async def update_event(
     payload: EventCreate,
     match_id: str = Path(..., description="Numer meczu (matchId)"),
@@ -834,6 +837,7 @@ async def update_event(
 
 
 @router.delete("/events/{match_id:path}", status_code=status.HTTP_204_NO_CONTENT, summary="Usuń wydarzenie po match_id")
+@records_print("delete")
 async def delete_event(
     match_id: str,
     settings=Depends(get_settings),

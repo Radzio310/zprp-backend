@@ -51,6 +51,7 @@ from app.results import router as results_router
 from app.calendar import router as calendar_router
 from app.calendar_secondary_routes import router as calendar_secondary_router
 from app.calendar_feeds import router as calendar_feeds_router
+from app.calendar_auto_sync import router as calendar_auto_sync_router, run_calendar_auto_sync
 from app.calendar_refresh_errors import install_google_refresh_handlers
 from app.silesia import router as silesia_router
 from app.admin import router as admin_router
@@ -363,6 +364,8 @@ app.include_router(results_router)
 # Kalendarze sędziego PRZED trasami Google: `/calendar/events/{match_id:path}`
 # z tamtego routera złapałoby ścieżkę `/calendar/feeds/...`.
 app.include_router(calendar_feeds_router)
+# Kalendarz w tle (2.1.8) - też przed `/calendar/events/{match_id:path}`.
+app.include_router(calendar_auto_sync_router)
 app.include_router(calendar_router)
 app.include_router(calendar_secondary_router)
 app.include_router(silesia_router)
@@ -1608,6 +1611,8 @@ async def startup():
     _report_snapshot_task = asyncio.create_task(run_report_snapshot_scheduler())
     _zprp_unavailability_mail_task = asyncio.create_task(run_overlap_mail_scheduler())
     _calendar_feed_task = asyncio.create_task(run_calendar_feed_sync())
+    # Kalendarz Google w tle: nowe, zmienione i odwołane mecze bez otwierania aplikacji (2.1.8).
+    _calendar_auto_sync_task = asyncio.create_task(run_calendar_auto_sync())
     # Sprzątanie migawek meczu - PARTIAMI, żeby pierwsze uruchomienie po
     # dłuższej przerwie nie zablokowało zapisów (`app/proel_snapshots.py`).
     _snapshot_cleanup_task = asyncio.create_task(run_snapshot_cleanup())

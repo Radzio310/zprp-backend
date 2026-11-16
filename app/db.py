@@ -70,6 +70,34 @@ event_mappings = Table(
     Column("calendar_id", String, nullable=True),
 )
 
+# 3a) Kalendarz Google w tle (BAZA 2.1.8, app/calendar_auto_sync.py): ustawienia sędziego
+# z aplikacji (kolory ról, przypomnienia, numer sędziego) - serwer sam dodaje, poprawia
+# i usuwa mecze z monitora okręgu, także bez otwierania aplikacji.
+calendar_auto_sync = Table(
+    "calendar_auto_sync",
+    metadata,
+    Column("user_login", String, primary_key=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("enabled", Boolean, nullable=False, server_default=text("true")),
+    Column("match_color", String, nullable=True),
+    Column("table_color", String, nullable=True),
+    Column("reminder_rules", JSON().with_variant(JSONB, "postgresql"), nullable=True),
+    Column("last_run_at", DateTime(timezone=True), nullable=True),
+    Column("last_error", Text, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+# Odcisk ostatnio zapisanego wpisu meczu (tytuł, godzina, miejsce, przypomnienia) - po nim
+# zadanie w tle poznaje, że mecz zmienił się od ostatniego zapisu (z telefonu albo z serwera).
+calendar_event_prints = Table(
+    "calendar_event_prints",
+    metadata,
+    Column("user_login", String, primary_key=True),
+    Column("match_id", String, primary_key=True),
+    Column("fingerprint", String, nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
 # 3b) Kalendarze drugorzędne BAZY w Google (BAZA - Boiskowy / Stolikowy / Mecze):
 # ustawienia, zapamiętane identyfikatory, stary token na czas przenoszenia
 # i stan zadania w tle. Jeden wiersz na konto (klucz user_login).
