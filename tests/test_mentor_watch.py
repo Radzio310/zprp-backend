@@ -19,23 +19,14 @@ def ms(dt):
 # ─── Reguły ─────────────────────────────────────────────────────────────────
 
 
-def test_czas_gry_i_prog_konca():
-    assert W.game_seconds(300, SYNC) == 0 and W.game_seconds(2100, SYNC) == 1800
-    assert W.game_seconds(2400, SYNC) == 1800 and W.game_seconds(2400 + 600, SYNC) == 2400
-    assert W.game_seconds(100, {}) is None
-    assert W.end_threshold_s(SYNC) == 3450                       # 57:30
-    assert W.end_threshold_s({"half_minutes": 25}) == 2850        # inny czas gry: 2x25 min - 150 s
-    # bez drugiej kotwicy: przerwa liczona domyślnie (10 min)
-    assert W.game_seconds(300 + 1800 + 600 + 60, {"match_start_s": 300}) == 1860
-
-
-def test_koniec_oglądania_z_czasu_gry_a_zastepczo_z_dlugosci():
-    # 57:29 gry jeszcze nie, 57:30 już tak - niezależnie od długości pliku
-    assert W.is_finished(2400 + 1649, 9999, SYNC) is False
-    assert W.is_finished(2400 + 1650, 9999, SYNC) is True
-    # bez kalibracji: 95% długości albo ostatnie 180 s; bez długości nigdy
-    assert W.is_finished(3800, 4000, {}) is True and W.is_finished(3700, 4000, {}) is False and W.is_finished(3850, 4000, {}) is True
-    assert W.is_finished(99999, None, {}) is False
+def test_koniec_oglądania_klient_zna_czas_gry_serwer_ma_tylko_regule_zastepcza():
+    # Serwer NIE liczy czasu gry (zegar staje przy przerwach w grze, liniowo rozjeżdża się o minuty).
+    assert not hasattr(W, "game_seconds") and not hasattr(W, "end_threshold_s")
+    # Bez znacznika od klienta: tylko 95% długości albo ostatnie 180 s; bez długości nigdy.
+    assert W.is_finished(3800, 4000) is True and W.is_finished(3700, 4000) is False and W.is_finished(3850, 4000) is True
+    assert W.is_finished(99999, None) is False
+    # Klient ze śladem zegara stwierdził koniec (reached_end -> finished_at): obowiązuje niezależnie od długości nagrania.
+    assert W.is_finished(1000, 9999, NOW) is True
 
 
 def test_zapis_czysty_i_ostatni_wygrywa():
@@ -59,13 +50,25 @@ def test_zapis_czysty_i_ostatni_wygrywa():
 
 def test_ksztalt_propozycja_odrzucenie_i_procent():
     base = {"video_id": "v", "match_id": "m", "pair_id": "p", "position_s": 2461, "furthest_s": 2461, "duration_s": 4000, "device": "phone", "saved_at": NOW}
-    shaped = W.shape(base, SYNC)
-    assert shaped["propose"] is True and shaped["match_s"] == 1861 and shaped["percent"] == 51 and shaped["device"] == "phone"
-    assert W.shape({**base, "dismissed_saved_at": NOW}, SYNC)["propose"] is False
-    assert W.shape({**base, "dismissed_saved_at": NOW - timedelta(minutes=1)}, SYNC)["propose"] is True  # odrzucone było starsze miejsce
-    assert W.shape({**base, "position_s": 10, "furthest_s": 10}, SYNC)["propose"] is False
-    done = W.shape({**base, "position_s": 100, "furthest_s": 2400 + 1700}, SYNC)
+    shaped = W.shape(base)
+    assert shaped["propose"] is True and shaped["percent"] == 61 and shaped["device"] == "phone" and "match_s" not in shaped
+    assert W.shape({**base, "dismissed_saved_at": NOW})["propose"] is False
+    assert W.shape({**base, "dismissed_saved_at": NOW - timedelta(minutes=1)})["propose"] is True  # odrzucone było starsze miejsce
+    assert W.shape({**base, "position_s": 10, "furthest_s": 10})["propose"] is False
+    done = W.shape({**base, "position_s": 100, "furthest_s": 3900})
     assert done["finished"] and done["propose"] is False and done["percent"] == 100
+    flagged = W.shape({**base, "finished_at": NOW})
+    assert flagged["finished"] and flagged["percent"] == 100
+
+
+def test_reached_end_jest_lepkie_i_scala_sie_ze_starszym_zapisem():
+    first = W.merge_save(None, W.clean_save({"position_s": 3000, "saved_at": ms(NOW), "reached_end": True}, NOW))
+    assert first["values"]["finished_at"] == NOW
+    row = {**first["values"]}
+    later = W.merge_save(row, W.clean_save({"position_s": 100, "saved_at": ms(NOW + timedelta(minutes=5))}, NOW + timedelta(minutes=5)))
+    assert later["apply"] and "finished_at" not in later["values"]                   # nie nadpisuje, istniejące zostaje
+    stale = W.merge_save({"position_s": 50, "furthest_s": 50, "saved_at": NOW}, W.clean_save({"position_s": 3000, "saved_at": ms(NOW - timedelta(minutes=1)), "reached_end": True}, NOW))
+    assert stale["apply"] is False and stale["values"]["finished_at"] == NOW - timedelta(minutes=1)
 
 
 # ─── Trasy ──────────────────────────────────────────────────────────────────
@@ -108,11 +111,11 @@ def test_trasy_miejsce_prywatne_miedzy_urzadzeniami(env):
         return phone, stale, early, calib, desktop, partner, mentor_view, batch, recent, dismissed, recent_after, newer, denied, missing
 
     phone, stale, early, calib, desktop, partner, mentor_view, batch, recent, dismissed, recent_after, newer, denied, missing = env.run(go)
-    assert phone["applied"] and phone["watch"]["device"] == "phone" and phone["watch"]["match_s"] == 1861
+    assert phone["applied"] and phone["watch"]["device"] == "phone" and "match_s" not in phone["watch"]
     assert stale["applied"] is False and stale["watch"]["position_s"] == 2461      # starszy zapis z drugiego urządzenia nie nadpisuje
     assert early["applied"] is False and early["watch"]["position_s"] == 2461      # otwarcie filmu (2 s) nie kasuje miejsca
     assert calib["ignored"] == "source" and calib["watch"]["position_s"] == 2461
-    assert desktop["watch"]["propose"] is True and desktop["watch"]["percent"] == 51
+    assert desktop["watch"]["propose"] is True and desktop["watch"]["percent"] == 61
     assert partner["watch"] is None and mentor_view["watch"] is None                 # miejsce jest tylko moje
     assert list(batch["progress"]) == ["m1"] and batch["progress"]["m1"]["video_id"] == "v1"
     assert [i["match_id"] for i in recent["items"]] == ["m1"] and recent["items"][0]["video"]["id"] == "v1" and recent["items"][0]["match"]

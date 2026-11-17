@@ -38,6 +38,8 @@ class WatchBody(BaseModel):
     device: Optional[str] = Field(default=None, max_length=12)
     #: Czas zapisu z urządzenia (ms od 1970 albo ISO); brak = teraz serwera. „Ostatni wygrywa".
     saved_at: Optional[Any] = None
+    #: Klient zna DOKŁADNY czas gry (ślad zegara ProEla) i jest on >= 2 x połowa - 150 s (domyślnie 57:30): koniec oglądania.
+    reached_end: Optional[bool] = None
     #: `player` (domyślnie). `calibration` i `clip` (kreator kalibracji, podgląd klipu) są ignorowane.
     source: Optional[str] = Field(default=None, max_length=20)
 
@@ -47,16 +49,12 @@ class DismissBody(BaseModel):
     saved_at: Optional[Any] = None
 
 
-def _sync_of(video: Dict[str, Any]) -> Dict[str, Any]:
-    return R.json_value(video.get("sync_json"), {}) or {}
-
-
 async def _own_row(judge_id: str, video_id: str) -> Optional[Dict[str, Any]]:
     return await C.one(select(T).where(T.c.judge_id == judge_id).where(T.c.video_id == video_id))
 
 
 def _shape(row: Dict[str, Any], video: Dict[str, Any]) -> Dict[str, Any]:
-    return W.shape(row, _sync_of(video), float(video["duration_s"]) if video.get("duration_s") else None)
+    return W.shape(row, float(video["duration_s"]) if video.get("duration_s") else None)
 
 
 @router.put("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}/watch")

@@ -25,6 +25,8 @@ def define_tables(metadata):
         Column("device", String, nullable=True),
         #: Czas zapisu z urządzenia (obcięty do „teraz"); to on rozstrzyga, który zapis jest nowszy.
         Column("saved_at", DateTime(timezone=True), nullable=False),
+        #: Kiedy klient stwierdził, że obejrzałem do okolic końca meczu (jego zegar gry >= 2 x połowa - 150 s). Lepki.
+        Column("finished_at", DateTime(timezone=True), nullable=True),
         #: `saved_at` miejsca, które świadomie odrzuciłem; inny (nowszy) zapis znów może być proponowany.
         Column("dismissed_saved_at", DateTime(timezone=True), nullable=True),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
@@ -35,6 +37,7 @@ def define_tables(metadata):
 
 
 MIGRATIONS = (
+    "ALTER TABLE mentor_watch_progress ADD COLUMN IF NOT EXISTS finished_at timestamptz",
     "CREATE INDEX IF NOT EXISTS ix_mentor_watch_judge_match ON mentor_watch_progress (judge_id, match_id)",
     "CREATE INDEX IF NOT EXISTS ix_mentor_watch_judge_saved ON mentor_watch_progress (judge_id, saved_at)",
 )
