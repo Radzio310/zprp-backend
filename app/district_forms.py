@@ -488,6 +488,9 @@ async def create(background: BackgroundTasks, body: Dict[str, Any] = Body(...), 
             kind=kind,
             event_id=int(event["id"]) if event else None,
             web_enabled=False,
+            # `databases` nie stosuje `default=` z kolumny: bez jawnej wartości idzie NULL
+            # do NOT NULL i każde tworzenie kończy się 500 (17.11.2026).
+            silent=False,
             created_by=who.judge_id,
             created_by_name=who.actor.full_name or None,
             created_at=moment,
@@ -729,7 +732,7 @@ async def duplicate(form_id: str, body: Optional[Dict[str, Any]] = Body(None), w
             settings_json=form.get("settings_json") or {}, audience_json=form.get("audience_json") or {},
             # Kopia nie ma wydarzenia: licznik do wydarzenia odlicza do terminu.
             info_json=INFO.adapt_template_info(form.get("info_json"), has_event=False, template_title="", form_title=title),
-            event_id=None, web_enabled=False, created_by=who.judge_id, created_by_name=who.actor.full_name or None,
+            event_id=None, web_enabled=False, silent=False, created_by=who.judge_id, created_by_name=who.actor.full_name or None,
             created_at=moment, updated_at=moment, closes_at=closes_at, rev=1,
         )
     )

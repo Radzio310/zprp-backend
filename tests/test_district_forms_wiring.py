@@ -306,3 +306,22 @@ def test_tabela_wycofanych_kodow_istnieje():
     assert len(tables) == 7
     cols = set(tables[-1].c.keys())
     assert {"code", "form_id", "retired_by", "retired_at"} <= cols
+
+
+def test_insert_formularza_podaje_kolumny_z_default_w_pythonie():
+    """`databases` nie stosuje `default=` z kolumny - bez jawnej wartosci idzie NULL.
+
+    17.11.2026: kolumna `silent` (NOT NULL, default=False) wywracala kazde tworzenie
+    i duplikowanie formularza bledem 500 od 10.11.2026.
+    """
+    import re
+
+    tables = source("app/district_forms_tables.py")
+    forms = tables[tables.index('"district_forms",'):tables.index("entries = Table(")]
+    python_defaults = set(re.findall(r'Column\("(\w+)",[^\n]*nullable=False[^\n]*\bdefault=', forms))
+    assert {"silent", "web_enabled", "rev"} <= python_defaults
+    text, funcs = functions("app/district_forms.py")
+    for name in ("create", "duplicate"):
+        segment = ast.get_source_segment(text, funcs[name])
+        for column in python_defaults:
+            assert re.search(rf"\b{column}=", segment), (name, column)
