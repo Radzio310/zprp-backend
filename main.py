@@ -447,6 +447,9 @@ app.include_router(mentor_drive_router)
 # Zrzuty klatek Mentora (02.11.2026): trasy /shots - `docs/mentor-panel.md`, sekcja 13.
 from app.mentor_shots import router as mentor_shots_router
 app.include_router(mentor_shots_router)
+# Miejsce oglądania nagrania (17.11.2026): trasy /watch - zapis i odczyt, moje miejsce per nagranie.
+from app.mentor_watch import router as mentor_watch_router
+app.include_router(mentor_watch_router)
 # Kopia filmu YouTube na serwerze (02.11.2026): trasy /videos/{v}/copy - `docs/mentor-panel.md`, sekcja 14.
 from app.mentor_youtube_copy import router as mentor_youtube_copy_router
 app.include_router(mentor_youtube_copy_router)

@@ -283,6 +283,9 @@ async def _purge_row(row: Dict[str, Any]) -> str:
             return "tombstone"
         await database.execute(mentor_match_videos.delete().where(mentor_match_videos.c.id == row["id"])
                                .where(mentor_match_videos.c.deleted_at.is_not(None)))
+        from app.mentor_watch import forget_video
+
+        await forget_video(row["id"])
     return "deleted"
 
 

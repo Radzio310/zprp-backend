@@ -4778,6 +4778,10 @@ mentor_drive_connections, mentor_drive_files, mentor_drive_folders, mentor_drive
 from app.mentor_shot_tables import define_tables as _define_mentor_shot_tables
 (mentor_shots,) = _define_mentor_shot_tables(metadata)
 
+# Miejsce oglądania nagrania (17.11.2026): `mentor_watch_progress` (`app/mentor_watch_tables.py`), moje miejsce per nagranie.
+from app.mentor_watch_tables import define_tables as _define_mentor_watch_tables
+(mentor_watch_progress,) = _define_mentor_watch_tables(metadata)
+
 # Montaż zestawienia w jeden film (12.11.2026): zamówienia i księga odcinków (`app/mentor_montage_tables.py`, sekcja 15 kontraktu).
 from app.mentor_montage_tables import define_tables as _define_mentor_montage_tables
 mentor_montages, mentor_montage_assets = _define_mentor_montage_tables(metadata)
@@ -5536,6 +5540,19 @@ for _statement in _MENTOR_DRIVE_MIGRATIONS:
         import logging as _logging
 
         _logging.getLogger("app.db").warning("Migracja Teczki pary nie przeszla: %s", _statement, exc_info=True)
+
+# Miejsce oglądania: indeksy `mentor_watch_progress` (tabelę zakłada create_all) - idempotentne, każda osobno.
+from app.mentor_watch_tables import MIGRATIONS as _MENTOR_WATCH_MIGRATIONS
+
+for _statement in _MENTOR_WATCH_MIGRATIONS:
+    try:
+        with engine.connect() as _conn:
+            _conn.execute(text(_statement))
+            _conn.commit()
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("app.db").warning("Indeks miejsca oglądania nie powstał: %s", _statement, exc_info=True)
 
 # Zrzuty klatek: indeksy `mentor_shots` (`app/mentor_shot_tables.py`) - idempotentne, kazda migracja osobno.
 from app.mentor_shot_tables import MIGRATIONS as _MENTOR_SHOT_MIGRATIONS

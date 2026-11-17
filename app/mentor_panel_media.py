@@ -407,6 +407,9 @@ async def delete_video(pair_id: str, match_id: str, video_id: str, actor: Actor 
 
                 await UG.drop_members(upload, "Nagranie usunięte.")
         await database.execute(mentor_match_videos.delete().where(mentor_match_videos.c.id == video_id))
+        from app.mentor_watch import forget_video
+
+        await forget_video(video_id)
         await C.touch(ctx, actor.judge_id, "video_deleted", "videos", row["match_id"], {"id": video_id})
         return {"ok": True, "trashed": False, "orphan_clips": impact["orphan_clips"], "kept_clips": impact["kept_clips"]}
     moved = await T.move_to_trash(ctx, row, actor.judge_id)
