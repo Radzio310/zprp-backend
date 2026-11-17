@@ -113,6 +113,8 @@ def define_tables(metadata):
         Column("card_sig", String, nullable=True),
         #: Ścieżka zoomu (03.11.2026): JSON [{s, cx, cy, zoom}], `s` = bezwzględna sekunda nagrania; NULL = brak.
         Column("zoom_track_json", Text, nullable=True),
+        #: Ocena klipu (17.11.2026): `good` | `bad` | `discuss`; NULL = bez oceny. Dawniej to były trzy kategorie.
+        Column("verdict", String, nullable=True),
     )
     Index("ix_mentor_clips_pair_match", clips.c.pair_id, clips.c.match_id)
     Index("ix_mentor_clips_pair_created", clips.c.pair_id, clips.c.created_at)
@@ -367,6 +369,7 @@ MIGRATIONS = (
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS card_size BIGINT",
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS card_sig VARCHAR",
     "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS zoom_track_json TEXT",
+    "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS verdict VARCHAR",
     "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS origin VARCHAR",
     "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS source_url TEXT",
     "ALTER TABLE mentor_uploads ADD COLUMN IF NOT EXISTS refresh_at TIMESTAMPTZ",

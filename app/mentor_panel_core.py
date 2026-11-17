@@ -798,6 +798,8 @@ def category_shape(row: Dict[str, Any]) -> Dict[str, Any]:
         "id": row["id"], "key": row.get("key"), "name": row.get("name"), "color": row.get("color"),
         "icon": row.get("icon"), "description": row.get("description"), "sort": int(row.get("sort") or 0),
         "archived": bool(row.get("archived")), "global": row.get("pair_id") is None, "created_by": row.get("created_by"),
+        # Dawna kategoria, którą zastąpiła ocena klipu (`good`/`bad`/`discuss`); null = zwykła kategoria. Klient ją ukrywa.
+        "legacy_verdict": R.verdict_of_key(row.get("key")),
     }
 
 
@@ -812,6 +814,7 @@ def clip_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dict[s
         "id": row["id"], "match_id": row.get("match_id"), "video_id": row.get("video_id"),
         "start_s": row.get("start_s"), "end_s": row.get("end_s"), "title": row.get("title"), "note": row.get("note"),
         "category_ids": R.json_value(row.get("category_ids"), []), "source": row.get("source"),
+        "verdict": row.get("verdict") if row.get("verdict") in R.VERDICTS else None,
         "source_key": row.get("source_key"), "match_ms": row.get("match_ms"), "half": row.get("half"),
         "author": person(names, row.get("author_id")), **acted_fields(names, row), "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"), "can_edit": may(ctx, "edit", owner=owner),
@@ -927,7 +930,7 @@ def comment_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dic
     return shaped
 
 
-CLIP_SLIM_KEYS = ("id", "match_id", "video_id", "start_s", "end_s", "title", "source", "match_ms", "half")
+CLIP_SLIM_KEYS = ("id", "match_id", "video_id", "start_s", "end_s", "title", "source", "match_ms", "half", "verdict")
 
 
 def clip_slim(clip: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

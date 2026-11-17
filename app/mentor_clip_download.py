@@ -167,6 +167,9 @@ def _category_of(clip: Dict[str, Any], names: Dict[str, str]) -> str:
     for cid in R.json_value(clip.get("category_ids"), []) or []:
         if names.get(R.s(cid)):
             return names[R.s(cid)]
+    # Ocena klipu (17.11.2026) zastępuje dawne kategorie: folder i plansza zostają „Dobra decyzja" itd.
+    if clip.get("verdict") in R.VERDICT_LABELS:
+        return R.VERDICT_LABELS[clip["verdict"]]
     if clip.get("to_discuss"):
         return "Do dyskusji"
     if clip.get("important"):

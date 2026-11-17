@@ -241,19 +241,99 @@ ICONS = (
     "megaphone", "timer", "shield-checkmark", "warning", "bulb", "trophy",
     "football", "body", "git-compare", "bookmark", "sparkles", "school",
 )
-#: Pięć dzisiejszych rodzajów znacznika „Ważne" (`mentor_video_rules.MARKER_CATEGORIES`).
+# Ocena klipu (17.11.2026): „Dobra decyzja", „Zła decyzja", „Do dyskusji" przestały być kategoriami.
+# To osobne, opcjonalne pole klipu `verdict` (`good` | `bad` | `discuss` | brak). Dawne kategorie o tych
+# kluczach zostają w tabeli jako ZARCHIWIZOWANE wiersze (zrzuty klatek i stare odwołania po id dalej je
+# nazywają), ale nie ma ich w domyślnych, nie da się ich przywrócić ani przypisać do klipu.
+VERDICTS = ("good", "bad", "discuss")
+VERDICT_LABELS: Dict[str, str] = {"good": "Dobra decyzja", "bad": "Zła decyzja", "discuss": "Do dyskusji"}
+#: Kolor z palety kategorii przy ocenie (pigułka w kartach i eksportach). Klip bez kategorii: `NO_CATEGORY_COLOR`.
+VERDICT_COLORS: Dict[str, str] = {"good": "emerald", "bad": "rose", "discuss": "amber"}
+NO_CATEGORY_COLOR = "slate"
+#: Klucz dawnej kategorii (i dawnego znacznika z aplikacji) -> ocena.
+LEGACY_VERDICT_KEYS: Dict[str, str] = {"dobra": "good", "zla": "bad", "dyskusja": "discuss"}
+#: Kategoria po zmianie: pięć rodzajów znacznika „Ważne" zostaje w aplikacji, ale w panelu domyślne są dwa.
 DEFAULT_CATEGORIES: Tuple[Dict[str, str], ...] = (
-    {"key": "dobra", "name": "Dobra decyzja", "color": "emerald", "icon": "checkmark-circle",
-     "description": "Decyzja zgodna z przepisami i duchem gry."},
-    {"key": "zla", "name": "Zła decyzja", "color": "rose", "icon": "close-circle",
-     "description": "Decyzja do poprawy - przepis albo interpretacja."},
-    {"key": "dyskusja", "name": "Do dyskusji", "color": "amber", "icon": "chatbubbles",
-     "description": "Sytuacja graniczna, warta omówienia."},
     {"key": "pytanie", "name": "Pytanie do mentora", "color": "sky", "icon": "help-circle",
      "description": "Para prosi mentora o zdanie."},
     {"key": "kluczowa", "name": "Kluczowa akcja meczu", "color": "pink", "icon": "flash",
      "description": "Moment, który ustawił mecz."},
 )
+
+
+def clean_verdict(raw: Any) -> Optional[str]:
+    """Ocena z żądania: pusta/None = brak oceny; nieznana wartość to błąd 422."""
+    value = s(raw).lower()
+    if not value:
+        return None
+    if value not in VERDICTS:
+        raise RuleError(422, "CLIP_VERDICT", "Ocena klipu to: good, bad albo discuss.")
+    return value
+
+
+def verdict_of_key(key: Any) -> Optional[str]:
+    """Ocena odpowiadająca dawnemu kluczowi kategorii albo znacznika (`dobra`/`zla`/`dyskusja`)."""
+    return LEGACY_VERDICT_KEYS.get(s(key))
+
+
+def legacy_category_map(rows: Iterable[Mapping[str, Any]]) -> Dict[str, str]:
+    """{id kategorii: ocena} dla wierszy o dawnych kluczach (pary i globalne, także zarchiwizowane)."""
+    return {s(r.get("id")): LEGACY_VERDICT_KEYS[s(r.get("key"))] for r in rows
+            if s(r.get("key")) in LEGACY_VERDICT_KEYS and s(r.get("id"))}
+
+
+def split_legacy_categories(ids: Any, legacy: Mapping[str, str]) -> Tuple[List[str], Optional[str]]:
+    """Rozdziela id kategorii na zwykłe i dawne. Zwraca (zwykłe, ocena z PIERWSZEJ dawnej w kolejności zapisu).
+
+    Tak stara aplikacja, która wciąż wysyła id „Dobrej decyzji" w `category_ids`, nic nie psuje:
+    id znika z listy, a ocena (jeśli żądanie nie niesie własnej) trafia do pola `verdict`.
+    """
+    rest: List[str] = []
+    verdict: Optional[str] = None
+    for item in ids if isinstance(ids, (list, tuple)) else []:
+        value = s(item)
+        if not value:
+            continue
+        if value in legacy:
+            verdict = verdict or legacy[value]
+        elif value not in rest:
+            rest.append(value)
+    return rest, verdict
+
+
+def plan_verdict_migration(clips: Iterable[Mapping[str, Any]], legacy: Mapping[str, str]) -> Dict[str, Any]:
+    """Plan migracji klipów (czysty, idempotentny): `updates` [(id, {category_ids, verdict})] i liczniki.
+
+    Reguła: klip z dawną kategorią dostaje ocenę z PIERWSZEJ dawnej kategorii w swoim `category_ids`;
+    dawne id znikają z listy, pozostałe kategorie zostają. Klip, który już ma ocenę, jej nie traci
+    (konflikt jest liczony). Klip bez dawnych id nie jest ruszany - drugi przebieg nic nie zmienia.
+    """
+    updates: List[Tuple[str, Dict[str, Any]]] = []
+    stats = {"scanned": 0, "migrated": 0, "multi": 0, "conflicts": 0, "ids_removed": 0, "left_without_category": 0,
+             "good": 0, "bad": 0, "discuss": 0}
+    for clip in clips:
+        stats["scanned"] += 1
+        ids = [s(x) for x in json_value(clip.get("category_ids"), []) if s(x)]
+        found = [(i, legacy[i]) for i in ids if i in legacy]
+        if not found:
+            continue
+        rest = [i for i in ids if i not in legacy]
+        first = found[0][1]
+        have = s(clip.get("verdict"))
+        verdict = have if have in VERDICTS else first
+        if have in VERDICTS and have != first:
+            stats["conflicts"] += 1
+        if len({v for _, v in found}) > 1:
+            stats["multi"] += 1
+        stats["migrated"] += 1
+        stats["ids_removed"] += len(found)
+        stats[verdict] += 1
+        if not rest:
+            stats["left_without_category"] += 1
+        updates.append((s(clip.get("id")), {"category_ids": rest, "verdict": verdict}))
+    return {"updates": updates, "stats": stats}
+
+
 MAX_CATEGORY_NAME = 40
 MAX_CATEGORY_DESCRIPTION = 160
 MAX_CATEGORIES = 40
@@ -510,6 +590,7 @@ def markers_as_clips(video: Mapping[str, Any], markers: Iterable[Mapping[str, An
             "note": m.get("comment"),
             "category_ids": [],
             "category_key": m.get("category"),
+            "verdict": verdict_of_key(m.get("category")),
             "legacy_category": m.get("legacy_category"),
             "important": bool(m.get("important")),
             "kind": m.get("kind"),
@@ -543,6 +624,7 @@ def clip_row_from_marker(marker_clip: Mapping[str, Any], category_by_key: Mappin
         "title": plain(marker_clip.get("title"), MAX_CLIP_TITLE) or None,
         "note": plain(marker_clip.get("note"), MAX_CLIP_NOTE) or None,
         "category_ids": [category_by_key[key]] if key and key in category_by_key else [],
+        "verdict": verdict_of_key(key),
         "source": "marker", "source_key": s(marker_clip.get("marker_id")) or None,
         "match_ms": ms if isinstance(ms, (int, float)) and 0 <= ms <= 3 * 3600 * 1000 else None,
         "half": marker_clip.get("half") if marker_clip.get("half") in (1, 2) else None,
@@ -1416,6 +1498,7 @@ def public_clip(clip: Mapping[str, Any], *, video: Optional[Mapping[str, Any]], 
             {k: cats[c].get(k) for k in ("name", "color", "icon")}
             for c in json_value(clip.get("category_ids"), []) if c in cats
         ],
+        "verdict": clip.get("verdict") if clip.get("verdict") in VERDICTS else None,
         "source": source,
         "match": public_match(match),
         "youth": bool(match and is_youth(match.get("category"), match.get("competition_name"))),

@@ -160,14 +160,15 @@ def test_kategorie_seed_dodaj_i_przywroc(env):
         return first, own, changed, bad, no_global, reset
 
     first, own, changed, bad, no_global, reset = env.run(go)
-    assert [c["key"] for c in first["categories"]] == ["dobra", "zla", "dyskusja", "pytanie", "kluczowa"]
+    assert [c["key"] for c in first["categories"]] == ["pytanie", "kluczowa"]
+    assert [v["key"] for v in first["verdicts"]] == ["good", "bad", "discuss"]
     assert "emerald" in first["palette"] and "checkmark-circle" in first["icons"]
     assert own["name"] == "Ustawienie" and own["global"] is False
     assert changed["name"] == "Świetna decyzja"
     assert bad == (422, "CATEGORY_COLOR") and no_global == (403, "ADMIN_ONLY")
     by_name = {c["name"]: c for c in reset["categories"]}
-    assert by_name["Dobra decyzja"]["archived"] is False and by_name["Ustawienie"]["archived"] is True
-    assert len([c for c in reset["categories"] if not c["archived"]]) == 5
+    assert by_name["Pytanie do mentora"]["archived"] is False and by_name["Ustawienie"]["archived"] is True
+    assert len([c for c in reset["categories"] if not c["archived"]]) == 2
 
 
 def test_kategorie_kolejnosc_licznik_scalanie_i_cofniecie(env):
@@ -176,7 +177,8 @@ def test_kategorie_kolejnosc_licznik_scalanie_i_cofniecie(env):
         pair = await env.actor(JUDGES[0])
         committee = await env.actor(COMMITTEE)
         cats = (await L.list_categories(PAIR, pair))["categories"]
-        a, b, c = cats[0]["id"], cats[1]["id"], cats[2]["id"]
+        third = await L.create_category(PAIR, L.CategoryBody(name="Ustawienie", color="teal", icon="walk"), pair)
+        a, b, c = cats[0]["id"], cats[1]["id"], third["id"]
         only_a = await L.create_clip(PAIR, clip_body(env, category_ids=[a]), pair)
         both = await L.create_clip(PAIR, clip_body(env, category_ids=[a, b], start_s=200, end_s=210), pair)
         await L.create_clip(PAIR, clip_body(env, category_ids=[c], start_s=300, end_s=310), pair)
@@ -871,3 +873,49 @@ def test_pokoj_meczu_os_z_protokolu_proela(env):
     timeline = room["timeline"]
     assert timeline["available"] is True and [e["type"] for e in timeline["events"]] == ["goal", "penalty1"]
     assert timeline["events"][1]["clock"] == "15:00"
+
+
+# ─── Ocena klipu (verdict, 17.11.2026) ──────────────────────────────────────
+
+
+def test_ocena_klipu_zapis_filtr_i_zgodnosc_wstecz(env):
+    async def go():
+        L = env.library
+        pair = await env.actor(JUDGES[0])
+        cats = (await L.list_categories(PAIR, pair))["categories"]
+        q = cats[0]["id"]
+        # Dawna kategoria „Dobra decyzja" (wiersz zarchiwizowany po migracji) - id, które wciąż zna stara aplikacja.
+        old_id = "stare-dobra"
+        await env.db.execute(env.T["mentor_categories"].insert().values(
+            id=old_id, pair_id=PAIR, key="dobra", name="Dobra decyzja", color="emerald", icon="checkmark-circle", sort=0, archived=True))
+        plain = await L.create_clip(PAIR, clip_body(env), pair)
+        rated = await L.create_clip(PAIR, clip_body(env, verdict="bad", category_ids=[q], start_s=200, end_s=210), pair)
+        legacy = await L.create_clip(PAIR, clip_body(env, category_ids=[old_id, q], start_s=300, end_s=310), pair)
+        bad = await raises(L.create_clip(PAIR, clip_body(env, verdict="super", start_s=400, end_s=410), pair))
+        # Stara aplikacja zmienia kategorie klipu z oceną: ocena zostaje.
+        kept = await L.update_clip(rated["id"], L.ClipPatch(category_ids=[]), pair)
+        cleared = await L.update_clip(rated["id"], L.ClipPatch(verdict=None), pair)
+        set_again = await L.update_clip(plain["id"], L.ClipPatch(verdict="discuss"), pair)
+
+        async def listed(**kw):
+            args = dict(category="", match_id="", author="", q="", markers=False, verdict="", actor=pair)
+            args.update(kw)
+            return {c["id"] for c in (await L.list_clips(PAIR, **args))["clips"]}
+
+        out = {"good": await listed(verdict="good"), "none": await listed(verdict="none"), "cat_none": await listed(category="none"),
+               "old_filter": await listed(category=old_id), "by_cat": await listed(category=q)}
+        retired = await raises(L.update_category(old_id, L.CategoryBody(archived=False), pair))
+        usage = (await L.list_categories(PAIR, pair))["verdict_usage"]
+        return plain, rated, legacy, bad, kept, cleared, set_again, out, retired, usage
+
+    plain, rated, legacy, bad, kept, cleared, set_again, out, retired, usage = env.run(go)
+    assert plain["verdict"] is None and rated["verdict"] == "bad"
+    assert legacy["verdict"] == "good" and len(legacy["category_ids"]) == 1
+    assert bad == (422, "CLIP_VERDICT")
+    assert kept["verdict"] == "bad" and kept["category_ids"] == []
+    assert cleared["verdict"] is None and set_again["verdict"] == "discuss"
+    assert out["good"] == {legacy["id"]} and out["old_filter"] == {legacy["id"]}
+    assert out["none"] == {rated["id"]} and out["cat_none"] == {plain["id"], rated["id"]}
+    assert out["by_cat"] == {legacy["id"]}
+    assert retired == (422, "CATEGORY_RETIRED")
+    assert usage == {"good": 1, "bad": 0, "discuss": 1, "none": 1}

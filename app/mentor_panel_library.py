@@ -66,6 +66,15 @@ async def _live_clip_rows(pair_id: str) -> List[Dict[str, Any]]:
                         .where(mentor_clips.c.pair_id == pair_id).where(mentor_clips.c.deleted_at.is_(None)))
 
 
+async def verdict_usage(pair_id: str) -> Dict[str, int]:
+    """Ile żywych klipów pary niesie każdą ocenę (`good`/`bad`/`discuss`) i ile nie ma żadnej (`none`)."""
+    out = {v: 0 for v in R.VERDICTS}
+    out["none"] = 0
+    for r in await C.rows(select(mentor_clips.c.verdict).where(mentor_clips.c.pair_id == pair_id).where(mentor_clips.c.deleted_at.is_(None))):
+        out[r["verdict"] if r.get("verdict") in R.VERDICTS else "none"] += 1
+    return out
+
+
 async def category_usage(pair_id: str) -> Dict[str, int]:
     """Ile żywych klipów pary nosi każdą kategorię (licznik w Ustawieniach)."""
     usage: Dict[str, int] = {}
@@ -80,7 +89,9 @@ async def category_usage(pair_id: str) -> Dict[str, int]:
 async def categories_payload(ctx: Dict[str, Any]) -> Dict[str, Any]:
     usage = await category_usage(ctx["pair_id"])
     return {"categories": [{**C.category_shape(r), "clips_count": usage.get(r["id"], 0)} for r in await C.categories(ctx)],
-            "palette": list(R.PALETTE), "icons": list(R.ICONS)}
+            "palette": list(R.PALETTE), "icons": list(R.ICONS),
+            "verdicts": [{"key": v, "label": R.VERDICT_LABELS[v], "color": R.VERDICT_COLORS[v]} for v in R.VERDICTS],
+            "verdict_usage": await verdict_usage(ctx["pair_id"])}
 
 
 @router.get("/pairs/{pair_id}/categories")
@@ -141,6 +152,8 @@ async def update_category(category_id: str, body: CategoryBody, actor: Actor = D
         values = R.clean_category(body.model_dump(by_alias=False, exclude_unset=True), partial=True)
     except R.RuleError as exc:
         raise C.rule_error(exc) from exc
+    if body.archived is False and R.verdict_of_key(row.get("key")):
+        raise C.err(422, "CATEGORY_RETIRED", "Ta kategoria jest teraz oceną klipu (Dobra decyzja, Zła decyzja, Do dyskusji) i nie wraca.")
     if body.archived is not None:
         values["archived"] = bool(body.archived)
     if values:
@@ -220,7 +233,7 @@ async def _merge_pair(category_id: str, into: str, actor: Actor) -> tuple:
     if ctx is None:
         raise C.err(403, "GLOBAL_CATEGORY", "Kategorii globalnej nie scala się w parze.")
     target = next((r for r in await C.categories(ctx, seed=False) if r["id"] == R.s(into)), None)
-    if not target or target["id"] == source["id"]:
+    if not target or target["id"] == source["id"] or R.verdict_of_key(target.get("key")):
         raise C.err(422, "MERGE_TARGET", "Wybierz inną kategorię tej pary.")
     return ctx, source, target
 
@@ -280,6 +293,8 @@ class ClipBody(BaseModel):
     title: Optional[str] = Field(default=None, max_length=400)
     note: Optional[str] = Field(default=None, max_length=5000)
     category_ids: List[str] = Field(default_factory=list, max_length=20)
+    #: Ocena klipu: good | bad | discuss; brak albo null = bez oceny. Dawne id „Dobrej/Złej decyzji" w `category_ids` też się liczą.
+    verdict: Optional[str] = Field(default=None, max_length=20)
     source: Optional[str] = Field(default=None, max_length=20)
     source_key: Optional[str] = Field(default=None, max_length=200)
     match_ms: Optional[int] = None
@@ -296,6 +311,8 @@ class ClipPatch(BaseModel):
     title: Optional[str] = Field(default=None, max_length=400)
     note: Optional[str] = Field(default=None, max_length=5000)
     category_ids: Optional[List[str]] = Field(default=None, max_length=20)
+    #: Brak pola = bez zmiany; null albo "" = kasuje ocenę.
+    verdict: Optional[str] = Field(default=None, max_length=20)
     important: Optional[bool] = None
     to_discuss: Optional[bool] = None
     #: true = zamów MP4 (Bastion); zmiana zakresu klipu, który ma MP4, sama zakłada nowe zadanie.
@@ -324,6 +341,18 @@ async def _video_duration(video: Dict[str, Any]) -> Optional[float]:
 async def _allowed_categories(ctx: Dict[str, Any]) -> List[str]:
     return [r["id"] for r in await C.categories(ctx) if not r.get("archived")]
 
+
+async def _clean_category_input(ctx: Dict[str, Any], raw_ids: Any, explicit_verdict: Any = None, has_verdict: bool = False) -> tuple:
+    """(kategorie, ocena) z żądania. Dawne id ocen (stara aplikacja) schodzą z kategorii na ocenę; jawne `verdict` wygrywa."""
+    rows = await C.categories(ctx)
+    allowed = [r["id"] for r in rows if not r.get("archived")]
+    rest, legacy = R.split_legacy_categories(raw_ids, R.legacy_category_map(rows))
+    try:
+        explicit = R.clean_verdict(explicit_verdict) if has_verdict else None
+    except R.RuleError as exc:
+        raise C.rule_error(exc) from exc
+    verdict = explicit if has_verdict else legacy
+    return R.clean_category_ids(rest, allowed), verdict, legacy
 
 async def clip_payload(ctx: Dict[str, Any], clip_id: str) -> Dict[str, Any]:
     row = await C.one(select(mentor_clips).where(mentor_clips.c.id == clip_id))
@@ -362,7 +391,8 @@ async def create_clip(pair_id: str, body: ClipBody, actor: Actor = Depends(mento
         card = await C.match_card(ctx, body.match_id)
         video = await _video_of(ctx, card["match_id"], body.video_id)
         match_id = card["match_id"]
-    duration, allowed = await asyncio.gather(_video_duration(video), _allowed_categories(ctx))
+    duration, (category_ids, verdict, _legacy) = await asyncio.gather(
+        _video_duration(video), _clean_category_input(ctx, body.category_ids, body.verdict, body.verdict is not None))
     try:
         start, end = R.validate_clip(body.start_s, body.end_s, duration)
     except R.RuleError as exc:
@@ -377,7 +407,7 @@ async def create_clip(pair_id: str, body: ClipBody, actor: Actor = Depends(mento
         "id": R.new_id(), "pair_id": ctx["pair_id"], "match_id": match_id, "video_id": video["id"],
         "start_s": start, "end_s": end, "title": R.plain(body.title, R.MAX_CLIP_TITLE) or None,
         "note": R.plain(body.note, R.MAX_CLIP_NOTE) or None,
-        "category_ids": C.dumps(R.clean_category_ids(body.category_ids, allowed)),
+        "category_ids": C.dumps(category_ids), "verdict": verdict,
         "source": source, "source_key": R.plain(body.source_key, 120) or None,
         "match_ms": body.match_ms if body.match_ms is None or 0 <= body.match_ms <= 3 * 3600 * 1000 else None,
         "half": body.half if body.half in (1, 2) else None, "author_id": actor.judge_id,
@@ -433,8 +463,13 @@ async def update_clip(clip_id: str, body: ClipPatch, actor: Actor = Depends(ment
         values["title"] = R.plain(patch["title"], R.MAX_CLIP_TITLE) or None
     if "note" in patch:
         values["note"] = R.plain(patch["note"], R.MAX_CLIP_NOTE) or None
-    if patch.get("category_ids") is not None:
-        values["category_ids"] = C.dumps(R.clean_category_ids(patch["category_ids"], await _allowed_categories(ctx)))
+    if patch.get("category_ids") is not None or "verdict" in patch:
+        category_ids, verdict, legacy = await _clean_category_input(
+            ctx, patch.get("category_ids") or [], patch.get("verdict"), "verdict" in patch)
+        if patch.get("category_ids") is not None:
+            values["category_ids"] = C.dumps(category_ids)
+        if "verdict" in patch or legacy:
+            values["verdict"] = verdict
     newly_discuss = False
     for flag in ("important", "to_discuss"):
         if patch.get(flag) is not None:
@@ -538,16 +573,33 @@ async def marker_library_clips(ctx: Dict[str, Any], match_id: str = "") -> List[
 @router.get("/pairs/{pair_id}/clips")
 async def list_clips(pair_id: str, category: str = Query("", max_length=80), match_id: str = Query("", max_length=80),
                      author: str = Query("", max_length=40), q: str = Query("", max_length=80),
-                     markers: bool = Query(False), actor: Actor = Depends(mentor_actor)):
+                     markers: bool = Query(False), verdict: str = Query("", max_length=20), actor: Actor = Depends(mentor_actor)):
+    """Filtry: `category` = id kategorii albo `none` (klip bez kategorii); `verdict` = good|bad|discuss|none.
+    Dawne id „Dobrej/Złej decyzji/Do dyskusji" w `category` działają jak `verdict` (stara aplikacja)."""
     ctx = await C.pair_context(pair_id, actor)
+    legacy = R.legacy_category_map(await C.categories(ctx, seed=False))
+    if category in legacy:
+        verdict, category = verdict or legacy[category], ""
+    verdict = verdict.strip().lower() if isinstance(verdict, str) else ""
+    if verdict and verdict != "none" and verdict not in R.VERDICTS:
+        raise C.err(422, "CLIP_VERDICT", "Ocena klipu to: good, bad, discuss albo none.")
+
+    def keep(ids: Any, mark: Any) -> bool:
+        ids = [x for x in (R.json_value(ids, []) if not isinstance(ids, list) else ids) if x]
+        if category == "none" and ids:
+            return False
+        if category and category != "none" and category not in ids:
+            return False
+        have = mark if mark in R.VERDICTS else "none"
+        return not verdict or have == verdict
+
     query = select(mentor_clips).where(mentor_clips.c.pair_id == ctx["pair_id"]).where(mentor_clips.c.deleted_at.is_(None))
     if match_id:
         query = query.where(mentor_clips.c.match_id == match_id)
     if author:
         query = query.where(mentor_clips.c.author_id == author)
     found = await C.rows(query.order_by(mentor_clips.c.created_at.desc()).limit(1000))
-    if category:
-        found = [r for r in found if category in R.json_value(r.get("category_ids"), [])]
+    found = [r for r in found if keep(r.get("category_ids"), r.get("verdict"))]
     needle = q.strip().casefold()
     if needle:
         found = [r for r in found if needle in f"{R.s(r.get('title'))} {R.s(r.get('note'))}".casefold()]
@@ -558,8 +610,7 @@ async def list_clips(pair_id: str, category: str = Query("", max_length=80), mat
         extra = await marker_library_clips(ctx, match_id)
         if author:
             extra = [c for c in extra if R.s(c.get("author_id")) == author]
-        if category:
-            extra = [c for c in extra if category in c["category_ids"]]
+        extra = [c for c in extra if keep(c["category_ids"], c.get("verdict"))]
         if needle:
             extra = [c for c in extra if needle in f"{R.s(c.get('title'))} {R.s(c.get('note'))}".casefold()]
         for c in extra:

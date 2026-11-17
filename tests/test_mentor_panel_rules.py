@@ -117,11 +117,10 @@ def test_podpowiedz_urzadzenia():
 # ─── Kategorie ──────────────────────────────────────────────────────────────
 
 
-def test_domyslne_kategorie_to_piec_dzisiejszych():
-    rows = R.default_category_rows("p1", "1", NOW, make_id=iter(["a", "b", "c", "d", "e"]).__next__)
-    assert [r["key"] for r in rows] == ["dobra", "zla", "dyskusja", "pytanie", "kluczowa"]
-    assert rows[0]["name"] == "Dobra decyzja" and rows[0]["color"] == "emerald"
-    assert rows[3]["color"] == "sky" and rows[4]["color"] == "pink"
+def test_domyslne_kategorie_bez_ocen():
+    rows = R.default_category_rows("p1", "1", NOW, make_id=iter(["a", "b"]).__next__)
+    assert [r["key"] for r in rows] == ["pytanie", "kluczowa"]
+    assert rows[0]["color"] == "sky" and rows[1]["color"] == "pink"
     assert all(r["color"] in R.PALETTE and r["icon"] in R.ICONS for r in rows)
 
 
@@ -138,16 +137,17 @@ def test_walidacja_kategorii():
 
 def test_przywroc_domyslne():
     existing = [
-        {"id": "d1", "pair_id": "p1", "key": "dobra", "name": "Zmieniona", "archived": False},
-        {"id": "d2", "pair_id": "p1", "key": "zla", "name": "Zła", "archived": True},
+        {"id": "d1", "pair_id": "p1", "key": "pytanie", "name": "Zmieniona", "archived": False},
+        {"id": "d2", "pair_id": "p1", "key": "kluczowa", "name": "Kluczowa", "archived": True},
+        {"id": "old", "pair_id": "p1", "key": "dobra", "name": "Dobra decyzja", "archived": True},
         {"id": "own", "pair_id": "p1", "key": None, "name": "Własna", "archived": False},
         {"id": "g", "pair_id": None, "key": None, "name": "Globalna", "archived": False},
     ]
     plan = R.reset_plan(existing)
     assert [r[0] for r in plan["restore"]] == ["d1", "d2"]
-    assert plan["restore"][0][1]["name"] == "Dobra decyzja" and plan["restore"][1][1]["archived"] is False
-    assert plan["archive"] == ["own"]
-    assert [d["key"] for d in plan["create"]] == ["dyskusja", "pytanie", "kluczowa"]
+    assert plan["restore"][0][1]["name"] == "Pytanie do mentora" and plan["restore"][1][1]["archived"] is False
+    # Dawna „Dobra decyzja" jest już w archiwum i nie wraca; własna idzie do archiwum.
+    assert plan["archive"] == ["own"] and plan["create"] == []
 
 
 def test_klip_ma_kategorie_tylko_z_listy():
