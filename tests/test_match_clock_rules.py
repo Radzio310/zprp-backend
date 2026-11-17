@@ -204,6 +204,6 @@ def test_wazny_znacznik_niesie_kategorie_i_komentarz():
             {"id": "c", "label": "Bramka", "kind": "goal", "match_ms": 3000, "important": "tak", "category": "trafna", "comment": "x"},
         ]
     )
-    assert out[0]["important"] is True and out[0]["category"] == "zla" and out[0]["comment"] == "za późno - gwizdek"
-    assert out[1]["category"] == "dyskusja"
-    assert out[2]["important"] is False and out[2]["category"] is None and out[2]["comment"] is None
+    assert out[0]["important"] is True and out[0]["category"] is None and out[0]["verdict"] == "bad" and out[0]["comment"] == "za późno - gwizdek"
+    assert out[1]["category"] is None and out[1]["verdict"] is None
+    assert out[2]["important"] is False and out[2]["category"] is None and out[2]["comment"] is None and out[2]["verdict"] == "good"

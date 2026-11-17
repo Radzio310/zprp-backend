@@ -8,6 +8,10 @@ Reguła: klip z dawną kategorią dostaje ocenę z PIERWSZEJ dawnej kategorii w 
 Klip, który już ma `verdict`, go zachowuje. Wiersze kategorii o kluczach dobra/zla/dyskusja dostają
 `archived = true` (nie są kasowane: zrzuty klatek i stare odwołania dalej je nazywają).
 
+Od 17.11.2026 ten sam skrypt przepisuje też ZNACZNIKI nagrań (`mentor_match_videos.markers_json`): dawny rodzaj
+dobra/zla/dyskusja (i stare kategorie trafna, bledna, ustawienie...) staje się oceną `verdict`, a rodzaj pustym
+(zostają pytanie i kluczowa). Nagrobki i pozostałe pola znaczników bez zmian; idempotentne.
+
 Użycie (w kontenerze zprp-backend, z DATABASE_URL w środowisku):
     python -m scripts.migrate_mentor_clip_verdict            # suchy przebieg
     python -m scripts.migrate_mentor_clip_verdict --apply    # zapis
@@ -40,6 +44,39 @@ def run(conn, apply: bool) -> dict:
                          {"c": json.dumps(values["category_ids"], ensure_ascii=False), "v": values["verdict"], "id": clip_id})
         if cats:
             conn.execute(text("UPDATE mentor_categories SET archived = true WHERE key IN ('dobra','zla','dyskusja') AND archived IS NOT TRUE"))
+    stats.update(run_markers(conn, apply))
+    return stats
+
+
+def run_markers(conn, apply: bool) -> dict:
+    import json
+
+    from app.mentor_video_rules import migrate_marker_item
+
+    stats = {"videos_scanned": 0, "videos_changed": 0, "markers_changed": 0, "markers_good": 0, "markers_bad": 0, "markers_discuss": 0}
+    rows = [dict(r._mapping) for r in conn.execute(text("SELECT id, markers_json FROM mentor_match_videos WHERE markers_json IS NOT NULL"))]
+    for row in rows:
+        stats["videos_scanned"] += 1
+        try:
+            items = json.loads(row["markers_json"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(items, list):
+            continue
+        changed = 0
+        out = []
+        for item in items:
+            new, did = migrate_marker_item(item)
+            out.append(new)
+            if did:
+                changed += 1
+                stats["markers_" + str(new.get("verdict"))] = stats.get("markers_" + str(new.get("verdict")), 0) + 1
+        if changed:
+            stats["videos_changed"] += 1
+            stats["markers_changed"] += changed
+            if apply:
+                conn.execute(text("UPDATE mentor_match_videos SET markers_json = :m WHERE id = :id"),
+                             {"m": json.dumps(out, ensure_ascii=False), "id": row["id"]})
     return stats
 
 

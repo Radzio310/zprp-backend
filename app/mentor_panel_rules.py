@@ -524,7 +524,7 @@ def marker_is_clip(m: Mapping[str, Any]) -> bool:
     """
     if m.get("end_s") is not None:
         return True
-    if m.get("important") or m.get("category") or m.get("comment"):
+    if m.get("important") or m.get("category") or m.get("verdict") or m.get("comment"):
         return True
     imported = bool(m.get("source_key")) or bool(m.get("type")) or s(m.get("kind") or "manual") != "manual"
     return not imported
@@ -590,7 +590,7 @@ def markers_as_clips(video: Mapping[str, Any], markers: Iterable[Mapping[str, An
             "note": m.get("comment"),
             "category_ids": [],
             "category_key": m.get("category"),
-            "verdict": verdict_of_key(m.get("category")),
+            "verdict": m.get("verdict") if m.get("verdict") in VERDICTS else verdict_of_key(m.get("category")),
             "legacy_category": m.get("legacy_category"),
             "important": bool(m.get("important")),
             "kind": m.get("kind"),
@@ -624,7 +624,7 @@ def clip_row_from_marker(marker_clip: Mapping[str, Any], category_by_key: Mappin
         "title": plain(marker_clip.get("title"), MAX_CLIP_TITLE) or None,
         "note": plain(marker_clip.get("note"), MAX_CLIP_NOTE) or None,
         "category_ids": [category_by_key[key]] if key and key in category_by_key else [],
-        "verdict": verdict_of_key(key),
+        "verdict": marker_clip.get("verdict") if marker_clip.get("verdict") in VERDICTS else verdict_of_key(key),
         "source": "marker", "source_key": s(marker_clip.get("marker_id")) or None,
         "match_ms": ms if isinstance(ms, (int, float)) and 0 <= ms <= 3 * 3600 * 1000 else None,
         "half": marker_clip.get("half") if marker_clip.get("half") in (1, 2) else None,

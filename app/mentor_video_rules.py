@@ -50,21 +50,28 @@ MAX_SYNC_POINTS = 80
 MAX_MATCH_MS = 6 * 3600 * 1000
 MAX_MATCH_MS = 3 * 3600 * 1000
 MARKER_KINDS = ("manual", "goal", "seven", "penalty", "card", "timeout")
-#: Rodzaje akcji znacznika „Ważne" (16.10.2026: pięć zamiast ośmiu) - lustro
-#: `MARKER_CATEGORIES` w `BAZA/utils/matchVideoLinks.ts`.
-MARKER_CATEGORIES = ("dobra", "zla", "dyskusja", "pytanie", "kluczowa")
-#: Stare kategorie z zapisanych danych i starszych aplikacji -> nowy rodzaj.
-#: Oryginał zostaje w `legacy_category`, gdy niesie więcej niż nowy rodzaj.
+#: Rodzaje akcji znacznika „Ważne" (17.11.2026: tylko Pytanie i Kluczowa) - lustro
+#: `MARKER_CATEGORIES` w `BAZA/utils/matchVideoLinks.ts`. Dobra/zła/do dyskusji to od teraz OCENA (`verdict`),
+#: osobne pole znacznika, jak w klipie (`mentor_panel_rules.VERDICTS`). Rodzaj i ocena są niezależne i opcjonalne.
+MARKER_CATEGORIES = ("pytanie", "kluczowa")
+#: Ocena znacznika - ta sama kolejność i klucze co `mentor_panel_rules.VERDICTS` (Dobra, Zła, Do dyskusji).
+MARKER_VERDICTS = ("good", "bad", "discuss")
+#: Dawne rodzaje i stare kategorie (zapisane dane, starsze aplikacje) -> ocena.
+#: Oryginał zostaje w `legacy_category`, gdy niesie więcej niż ocena (np. „ustawienie").
 LEGACY_CATEGORIES: Dict[str, str] = {
-    "trafna": "dobra",
-    "bledna": "zla",
-    "dyskusja": "dyskusja",
-    "ustawienie": "dyskusja",
-    "wspolpraca": "dyskusja",
-    "kontrola": "dyskusja",
-    "gwizdek": "dyskusja",
-    "inne": "dyskusja",
+    "dobra": "good",
+    "zla": "bad",
+    "dyskusja": "discuss",
+    "trafna": "good",
+    "bledna": "bad",
+    "ustawienie": "discuss",
+    "wspolpraca": "discuss",
+    "kontrola": "discuss",
+    "gwizdek": "discuss",
+    "inne": "discuss",
 }
+#: Klucze, które mają dokładny odpowiednik w ocenie (nic do zapamiętania w `legacy_category`).
+_EXACT_LEGACY = ("dobra", "zla", "dyskusja", "trafna", "bledna")
 #: Zakres nagrany przyciskiem REC: najdłużej 30 minut (wcześniej 10 - dłuższy
 #: zakres cicho tracił koniec i stawał się punktem).
 MAX_RANGE_S = 1800
@@ -149,20 +156,49 @@ def _wall(value: Any) -> Optional[int]:
 
 
 def normalize_category(raw: Any, legacy: Any = None) -> tuple[Optional[str], Optional[str]]:
-    """Rodzaj akcji + stara kategoria, jeśli przy mapowaniu zgubiłaby treść.
+    """Rodzaj akcji (tylko pytanie/kluczowa) + stara kategoria, jeśli ocena nie odda jej treści.
 
-    trafna/bledna/dyskusja mają dokładny odpowiednik, reszta starych trafia
-    do „dyskusja" i zostaje zapamiętana w `legacy_category`.
+    Dawne dobra/zla/dyskusja i stare kategorie nie są już rodzajem: dają OCENĘ (`rating_of_category`).
     """
     key = str(raw or "")
     old = str(legacy or "")
-    old = old if old in LEGACY_CATEGORIES and LEGACY_CATEGORIES[old] != old and old not in ("trafna", "bledna") else None
+    old = old if old in LEGACY_CATEGORIES and old not in _EXACT_LEGACY else None
     if key in MARKER_CATEGORIES:
         return key, old
     if key in LEGACY_CATEGORIES:
-        mapped = LEGACY_CATEGORIES[key]
-        return mapped, (key if key not in ("trafna", "bledna", "dyskusja") else None)
-    return None, None
+        return None, (key if key not in _EXACT_LEGACY else old)
+    return None, old
+
+
+def rating_of_category(raw: Any, legacy: Any = None, verdict: Any = None) -> Optional[str]:
+    """Ocena znacznika: jawna `verdict` wygrywa, inaczej z dawnego rodzaju (`dobra`->good...) albo starej kategorii.
+
+    Tak starsza aplikacja, która nadal wysyła `category: "dobra"`, dostaje ocenę, a nic nie ginie.
+    """
+    v = str(verdict or "").strip().lower()
+    if v in MARKER_VERDICTS:
+        return v
+    return LEGACY_CATEGORIES.get(str(raw or "")) or LEGACY_CATEGORIES.get(str(legacy or ""))
+
+
+def migrate_marker_item(item: Any) -> tuple[Any, bool]:
+    """Jeden zapisany znacznik na nowy model (rodzaj + ocena), z zachowaniem WSZYSTKICH pozostałych pól.
+
+    Nagrobki i śmieci przechodzą bez zmian (clean_markers by je wyrzucił). Dawny rodzaj dobra/zla/dyskusja
+    zostaje oceną, a rodzaj pustym. Idempotentne. Zwraca (znacznik, czy zmieniony).
+    """
+    if not isinstance(item, Mapping) or "deleted_at" in item:
+        return item, False
+    category, legacy = normalize_category(item.get("category"), item.get("legacy_category"))
+    verdict = rating_of_category(item.get("category"), item.get("legacy_category"), item.get("verdict"))
+    out = dict(item)
+    if "category" in item:
+        out["category"] = category
+    if verdict:
+        out["verdict"] = verdict
+    if legacy:
+        out["legacy_category"] = legacy
+    return out, out != dict(item)
 
 
 def clean_markers(raw: Any) -> List[Dict[str, Any]]:
@@ -194,8 +230,8 @@ def clean_markers(raw: Any) -> List[Dict[str, Any]]:
         wall_err = _num(item.get("wall_err_s"))
         important = item.get("important") is True
         category, legacy = normalize_category(item.get("category"), item.get("legacy_category"))
-        if important and category is None:
-            category = "dyskusja"
+        # Ocena i rodzaj są niezależne i opcjonalne; ocena nie wymaga „Ważne" (nic nie może zginąć).
+        verdict = rating_of_category(item.get("category"), item.get("legacy_category"), item.get("verdict"))
         # Koniec zakresu (REC) - tylko przy znaczniku z czasem nagrania.
         end_s = _num(item.get("end_s"))
         end_s = int(round(end_s)) if end_s is not None and video_s is not None and video_s < end_s <= min(video_s + MAX_RANGE_S, MAX_VIDEO_SECONDS) else None
@@ -217,6 +253,7 @@ def clean_markers(raw: Any) -> List[Dict[str, Any]]:
                 # „Ważne do oceny" - para wskazuje mentorowi, na co patrzeć.
                 "important": important,
                 "category": category if important else None,
+                "verdict": verdict,
                 "legacy_category": legacy if important and legacy else None,
                 "comment": comment if important else None,
                 # Autor (sędzia, który dodał); scalanie na serwerze nadpisuje to

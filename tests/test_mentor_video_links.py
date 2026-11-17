@@ -232,11 +232,12 @@ def test_markers_categories_map_legacy_and_keep_ranges():
         {"id": "h", "video_s": 100, "end_s": 100 + 1801},
     ]
     out = {m["id"]: m for m in clean_markers(raw)}
-    assert out["a"]["category"] == "zla" and out["a"]["end_s"] == 122
-    assert out["b"]["category"] == "dobra" and out["b"]["legacy_category"] is None
-    assert out["c"]["category"] == "dyskusja" and out["c"]["legacy_category"] == "ustawienie"
-    assert out["d"]["legacy_category"] == "gwizdek"
-    assert out["e"]["category"] == "dyskusja"
+    # 17.11.2026: dawne rodzaje dobra/zla/dyskusja to ocena (verdict), rodzaj zostaje pusty.
+    assert out["a"]["category"] is None and out["a"]["verdict"] == "bad" and out["a"]["end_s"] == 122
+    assert out["b"]["verdict"] == "good" and out["b"]["legacy_category"] is None
+    assert out["c"]["verdict"] == "discuss" and out["c"]["legacy_category"] == "ustawienie"
+    assert out["d"]["legacy_category"] == "gwizdek" and out["d"]["verdict"] == "discuss"
+    assert out["e"]["category"] is None and out["e"]["verdict"] is None
     assert out["f"]["end_s"] is None and out["g"]["end_s"] is None and out["h"]["end_s"] is None
 
 
