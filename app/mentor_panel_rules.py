@@ -1044,7 +1044,26 @@ def base_card(match_id: str) -> Dict[str, Any]:
         "round_name": None, "home": {"name": None, "logo_url": None, "score": None},
         "away": {"name": None, "logo_url": None, "score": None}, "halftime": None, "venue_city": None,
         "match_code": None, "delegate_name": None, "stream_url": None, "source": None,
+        # Szukanie meczów między sezonami (17.11.2026): cała obsada i hala, nie tylko delegat i miasto.
+        "venue_name": None, "officials": [],
     }
+
+
+#: Role obsady na karcie (kolejność wyświetlania w podpowiedziach szukania).
+OFFICIAL_ROLES = ("referee", "delegate", "secretary", "timekeeper")
+
+
+def officials_of(*pairs: Tuple[str, Any]) -> List[Dict[str, str]]:
+    """[(rola, nazwisko)] -> [{role, name}] bez pustych i zastępczych („--- ---”) i bez powtórzeń."""
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for role, raw in pairs:
+        name = s(raw)
+        if not name or is_blank_name(name) or (role, name.casefold()) in seen:
+            continue
+        seen.add((role, name.casefold()))
+        out.append({"role": role, "name": name})
+    return out
 
 
 def card_from_public(row: Mapping[str, Any], logos: Optional[Mapping[str, Any]] = None, category: Any = None) -> Dict[str, Any]:
@@ -1060,6 +1079,10 @@ def card_from_public(row: Mapping[str, Any], logos: Optional[Mapping[str, Any]] 
         "halftime": f"{ht[0]}:{ht[1]}" if ht[0] is not None and ht[1] is not None else None,
         "venue_city": row.get("venue_city"), "match_code": row.get("match_code"),
         "delegate_name": row.get("delegate_1_name"), "stream_url": row.get("stream_url"), "source": "public",
+        "venue_name": row.get("venue_name"),
+        "officials": officials_of(("referee", row.get("referee_1_name")), ("referee", row.get("referee_2_name")),
+                                  ("delegate", row.get("delegate_1_name")), ("delegate", row.get("delegate_2_name")),
+                                  ("secretary", row.get("secretary_name")), ("timekeeper", row.get("timekeeper_name"))),
     })
     return card
 
@@ -1082,6 +1105,10 @@ def card_from_state(match_id: Any, state: Mapping[str, Any], match_at: Any = Non
         "delegate_name": None if is_blank_name(state.get("NrSedzia_delegat_nazwisko")) else state.get("NrSedzia_delegat_nazwisko"),
         "stream_url": state.get("transmisja") or None,
         "source": "province",
+        "venue_name": state.get("Hala_nazwa") or None,
+        "officials": officials_of(*((role, state.get(f"NrSedzia_{field}_nazwisko")) for role, field in (
+            ("referee", "pierwszy"), ("referee", "drugi"), ("delegate", "delegat"), ("delegate", "delegat2"),
+            ("secretary", "sekretarz"), ("timekeeper", "czas")))),
     })
     return card
 
@@ -1101,6 +1128,10 @@ def card_from_archive(row: Mapping[str, Any]) -> Dict[str, Any]:
         if _int_or_none(slim.get("htH")) is not None and _int_or_none(slim.get("htA")) is not None else None,
         "venue_city": slim.get("city"), "match_code": slim.get("code") or row.get("code"),
         "delegate_name": names.get("delegate"), "source": "archive",
+        "venue_name": slim.get("hall") or None,
+        "officials": officials_of(*((role, names.get(key)) for role, key in (
+            ("referee", "first"), ("referee", "second"), ("delegate", "delegate"), ("delegate", "delegate2"),
+            ("secretary", "secretary"), ("timekeeper", "timer")))),
     })
     return card
 
@@ -1112,7 +1143,7 @@ def _fill(target: Dict[str, Any], other: Mapping[str, Any]) -> None:
             for sub, sub_value in (value or {}).items():
                 if side.get(sub) in (None, "") and sub_value not in (None, ""):
                     side[sub] = sub_value
-        elif target.get(key) in (None, "") and value not in (None, ""):
+        elif target.get(key) in (None, "", []) and value not in (None, "", []):
             target[key] = value
 
 
