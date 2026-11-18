@@ -8,6 +8,8 @@ na mecz: wynik ZPRP, inaczej zakończony protokół, inaczej bieżący wynik w t
 
 from __future__ import annotations
 
+from app.match_minute import match_minute
+
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -173,4 +175,6 @@ def compute_today(items: List[Dict[str, Any]], scope: "R.Scope", frame: "R.Frame
 
 def _minute(clock: Dict[str, Any]) -> Optional[int]:
     main = clock.get("main_ms")
-    return int(main) // 60_000 + 1 if main else None
+    half = 1 if clock.get("first_half") is True else 2 if clock.get("first_half") is False else None
+    # Zegar na żywo: 40:00 to już trwająca 41. minuta; bez długości połowy - standardowe 2 x 30 min.
+    return match_minute(main, clock.get("half_ms") or 30 * 60_000, half) if main else None

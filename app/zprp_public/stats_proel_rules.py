@@ -14,6 +14,8 @@ efekt czasu drużyny = bilans 5 min przed i 5 min po.
 
 from __future__ import annotations
 
+from app.match_minute import match_minute
+
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -292,8 +294,14 @@ def _ref(m: "R.Match", frame: "R.Frame") -> Dict[str, Any]:
     return ref
 
 
-def _minute(t: Any) -> int:
-    return int(t) // 60_000 + 1
+def _hms(frame: Any, m: Any) -> Any:
+    """Długość połowy meczu z protokołu (bez niej - pełna minuta należy do minuty, która się na niej kończy)."""
+    return (frame.proel.get(m.match_id) or {}).get("half_ms")
+
+
+def _minute(t: Any, half_ms: Any = None) -> int:
+    """Minuta jak w protokole, nigdy poza czasem gry (60:00 = 60', nie 61')."""
+    return match_minute(t, half_ms)
 
 
 def _usable(m: "R.Match") -> bool:
@@ -391,9 +399,9 @@ def aggregate(frame: "R.Frame", scope: "R.Scope") -> Dict[str, Any]:
         "lead_changes_avg": R.avg(lead, n), "ties_avg": R.avg(ties, n),
         "first_goal_winner_pct": R.pct(first_w, first_n),
         "halftime_leader_win_pct": R.pct(ht_w, ht_n),
-        "longest_runs": [{"match": _ref(m, frame), "side": r[0], "goals": r[1], "from_minute": _minute(r[2]),
-                          "to_minute": _minute(r[3])} for r, m in runs[:R.TOP_N]],
-        "best_5min": [{"match": _ref(m, frame), "side": b[0], "goals": b[1], "from_minute": _minute(b[2])}
+        "longest_runs": [{"match": _ref(m, frame), "side": r[0], "goals": r[1], "from_minute": _minute(r[2], _hms(frame, m)),
+                          "to_minute": _minute(r[3], _hms(frame, m))} for r, m in runs[:R.TOP_N]],
+        "best_5min": [{"match": _ref(m, frame), "side": b[0], "goals": b[1], "from_minute": _minute(b[2], _hms(frame, m))}
                       for b, m in best5[:R.TOP_N]],
     }
 
@@ -407,7 +415,7 @@ def records(frame: "R.Frame", scope: "R.Scope") -> List[Dict[str, Any]]:
     if firsts:
         f, m = min(firsts, key=lambda x: (x[0][1], x[1].match_id))
         out.append(R.record("fastest_goal", "Najszybsza bramka meczu", round(f[1] / 1000), "s", _ref(m, frame),
-                            side=f[0], minute=_minute(f[1]), detail=L.mmss(f[1]), source="proel"))
+                            side=f[0], minute=_minute(f[1], _hms(frame, m)), detail=L.mmss(f[1]), source="proel"))
     backs = [(s["deficit"][w], w, m) for s, m in items if (w := _winner(m, s)) and s["deficit"][w] >= COMEBACK_MIN]
     if backs:
         d, w, m = max(backs, key=lambda x: (x[0], x[2].match_id))
@@ -417,18 +425,18 @@ def records(frame: "R.Frame", scope: "R.Scope") -> List[Dict[str, Any]]:
     if five:
         b, m = max(five, key=lambda x: (x[0][1], x[1].match_id))
         out.append(R.record("most_goals_5min", "Najwięcej bramek w 5 minut", b[1], R.plural(b[1], "bramka", "bramki", "bramek"),
-                            _ref(m, frame), side=b[0], minute=_minute(b[2]), source="proel"))
+                            _ref(m, frame), side=b[0], minute=_minute(b[2], _hms(frame, m)), source="proel"))
     runs = [(s["run"], m) for s, m in items if s.get("run")]
     if runs:
         r, m = max(runs, key=lambda x: (x[0][1], -(x[0][3] - x[0][2]), x[1].match_id))
         out.append(R.record("longest_run", "Najdłuższa seria bramek z rzędu", r[1], R.plural(r[1], "bramka", "bramki", "bramek"),
-                            _ref(m, frame), side=r[0], minute=_minute(r[2]),
+                            _ref(m, frame), side=r[0], minute=_minute(r[2], _hms(frame, m)),
                             detail=f"{L.mmss(r[2])}-{L.mmss(r[3])}", source="proel"))
     late = [(s["decider"], m) for s, m in items if s.get("decider") and m.res in ("W", "L") and s["decider"][0] == _winner(m, s)]
     if late:
         d, m = max(late, key=lambda x: (x[0][1], x[1].match_id))
-        out.append(R.record("latest_winner", "Najpóźniejsza zwycięska bramka", _minute(d[1]), "min", _ref(m, frame),
-                            side=d[0], minute=_minute(d[1]), detail=L.mmss(d[1]), source="proel"))
+        out.append(R.record("latest_winner", "Najpóźniejsza zwycięska bramka", _minute(d[1], _hms(frame, m)), "min", _ref(m, frame),
+                            side=d[0], minute=_minute(d[1], _hms(frame, m)), detail=L.mmss(d[1]), source="proel"))
     return out
 
 
@@ -476,11 +484,12 @@ def ticker(tl: Dict[str, Any], clock: Dict[str, Any], doc_at: Optional[datetime]
             if second and g.get("half") == 1:
                 back += HALF_BREAK_MS
             at = datetime.fromtimestamp((saved_ms - back) / 1000, tz=timezone.utc).isoformat()
-        out.append({"side": g["side"], "kind": g["kind"], "t_ms": int(g["t"]), "minute": _minute(g["t"]), "clock": L.mmss(g["t"]),
+        out.append({"side": g["side"], "kind": g["kind"], "t_ms": int(g["t"]), "minute": match_minute(g["t"], tl.get("half_ms") or clock.get("half_ms"), g.get("half")), "clock": L.mmss(g["t"]),
                     "half": g.get("half"), "score": dict(g["score"]), "number": g.get("number"), "at": at})
     return out
 
 
 def live_minute(clock: Dict[str, Any]) -> Optional[int]:
     main = clock.get("main_ms")
-    return _minute(main) if main else None
+    half = 1 if clock.get("first_half") is True else 2 if clock.get("first_half") is False else None
+    return match_minute(main, clock.get("half_ms") or 30 * 60_000, half) if main else None

@@ -17,6 +17,8 @@ wspólne miejsce (ex aequo). Punkty: 3/2/1/0 (Z/Zk/Pk/P) w lidze „za 3",
 
 from __future__ import annotations
 
+from app.match_minute import match_minute
+
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app import standings_provisional as SP
@@ -433,7 +435,7 @@ def protocol_extras(matches: Iterable[dict], timelines: Dict[str, dict]) -> Opti
         if side and worst >= COMEBACK_MIN:
             comebacks.append({**_match_brief(m), "team": _team_brief(m, side), "deficit": worst})
         if side and state == side and ahead_since is not None and ahead_since >= 2 * hms - 5 * 60_000:
-            late.append({**_match_brief(m), "team": _team_brief(m, side), "minute": ahead_since // 60_000 + 1})
+            late.append({**_match_brief(m), "team": _team_brief(m, side), "minute": match_minute(ahead_since, hms)})
     return {"matches": len(used), "half_minutes": half // 60_000, "goals_by_period": periods,
             "comebacks": sorted(comebacks, key=lambda x: -x["deficit"])[:TOP_MATCHES], "lead_changes": lead_changes,
             "late_winners": sorted(late, key=lambda x: -x["minute"])[:TOP_MATCHES]}
