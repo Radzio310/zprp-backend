@@ -1754,6 +1754,9 @@ async def startup():
     # Montaż zestawień w jeden film (12.11.2026): przygotowanie i render (1 naraz, osobno od ffmpeg klipów).
     from app.mentor_montage import run_montage_worker
     asyncio.create_task(run_montage_worker())
+    # Połówki meczów z kanałów YouTube pary: pobranie na serwer i sklejenie (`app/mentor_channels.py`).
+    from app.mentor_channels import run_channel_worker
+    asyncio.create_task(run_channel_worker())
     asyncio.create_task(run_retention())
     asyncio.create_task(run_email_digest())
     # Handball Bastion: trwały worker klipów MP4 (stan i dzierżawa w bazie, restart go wznawia). Tylko za BASTION_ENABLED.

@@ -929,3 +929,34 @@ wraca do kolejki (odcinki z księgi wracają od razu). Gotowy film: push „Film
 - **Podpowiedzi transmisji bez martwych filmów.** Przed pokazaniem `suggested_streams` (i w odpowiedziach `streams/search` / `streams/reject`) serwer pyta oEmbed YouTube (bez klucza i bez jednostek puli): 401/403/404 = film prywatny, usunięty albo bez osadzania - podpowiedź znika. Wynik pamiętany w procesie (dostępny 3 h, niedostępny 6 h); brak odpowiedzi = podpowiedź zostaje. Web: zamknięcie podpowiedzi (×) woła `POST .../streams/reject`, więc nie wraca po odświeżeniu.
 - **Punkty kontrolne synchronizacji.** `sync.points: [{key, match_ms, half: 1|2, video_s}]` przy nagraniu (najwyżej 80, `video_s` z dokładnością 0,1 s, ten sam `key` = ostatni wygrywa, kolejność połowa + czas meczu; `mentor_video_rules.clean_points`). Zapis zwykłym `PATCH .../videos/{id}` z `{sync: {points: [...]}}` - lista zastępuje poprzednią, gwizdki zostają. Znaczenie: zdarzenie ProEla o kluczu `key` jest naprawdę w `video_s`. Klient (web `player/syncPoints.ts`, aplikacja `utils/syncPoints.ts`) liczy resztę zdarzeń: d = wskazane - położenie z synchronizacji, gwizdek połowy to punkt z d = 0, między punktami d płynnie (liniowo), przed pierwszym i po ostatnim - d najbliższego, każda połowa osobno. Serwer punktów nie używa przy przeliczaniu klipów między nagraniami (tam dalej oba gwizdki).
 
+
+## 16. Kanały YouTube pary - „Szukaj moich meczów na kanale” (18.11.2026)
+
+Ustawienia pary: para dodaje kanał (link `youtube.com/@kanal`, `/channel/UC...`, `/c/...` albo `@uchwyt`), serwer na żądanie
+czyta jego filmy i dla każdego szuka meczu **wśród meczów pary** (`pair_match_cards`) po tytule. Kod: `app/mentor_channels.py`,
+reguły `app/mentor_channel_rules.py`, tabele `app/mentor_channel_tables.py` (`mentor_channels`, `mentor_channel_videos`).
+
+- Czytanie kanału: z `YOUTUBE_API_KEY` playlista „uploads” (do 1000 filmów, limit dobowy wspólny z transmisjami, `channels`
+  + `playlistItems` + `videos` po 1 jednostce); bez klucza strona kanału (ostatnie ~30 filmów, `scan_complete=false`, gdy więcej).
+- Rozbiór tytułu: data (`dd.mm.rrrr`, `dd.mm.rr`, ISO), połowa (`I/II połowa`, `1/2 poł.`), przedrostek numeru (`IMC_`),
+  drużyny rozdzielone `vs`, `-`, `–`, `:` albo 3+ spacjami. Pewność: `sure` (ta sama data i obie drużyny), `likely` (data ±1
+  dzień i obie drużyny / ta sama data i jedna / bez daty i obie silnie), `possible` (obie drużyny, inna data). Dwa równie
+  dobre mecze = najwyżej `likely`. Powody: `data`, `data ±1 dzień`, `gospodarz`, `gość`, `numer IMC`, `drużyny odwrotnie`.
+- Trasy (`/mentor-panel`): `GET /pairs/{p}/channels` -> `{channels: [ChannelShape], api: bool}`;
+  `POST /pairs/{p}/channels {url}` (akcja `video`, najwyżej 5 kanałów; ten sam kanał = ponowny przegląd) i
+  `POST /channels/{id}/scan` -> `ChannelPayload`; `GET /channels/{id}` -> `ChannelPayload`;
+  `POST /channels/{id}/accept {video_ids, matches?: {video_id: match_id}}`; `POST /channels/{id}/dismiss {video_ids, undo?}`;
+  `DELETE /channels/{id}` (nagrania już dodane do meczów zostają).
+- `ChannelShape = {id, url, channel_id, handle, title, thumbnail_url, scanned_at, scan_source: api|page, scan_complete,
+  scan_error, video_count, counts: {sure, likely, possible, none, added, dismissed, total}}`;
+  `ChannelPayload = {channel: ChannelShape, videos: [{video_id, title, thumbnail_url, duration_s, published_at, url, parsed:
+  {date, home, away, half, code}, confidence, chosen, reasons, match: SlimCard|null, alternatives: [{match_id, confidence,
+  reasons, match}], state: new|added|dismissed, added_video_id, group_id, half_of, merge}]}`.
+- „Dodaj”: pojedynczy film = nagranie-link meczu (`insert_link_video`, jak „Dodaj nagranie”). Obie połówki jednego meczu
+  w wyborze = grupa wgrań z dwóch części (`mentor_uploads.origin = 'youtube_part'`, `status = 'downloading'`, `source_url`):
+  worker `run_channel_worker` pobiera każdą część (yt-dlp jak kopia na serwer), kładzie ją pod kluczem członka grupy
+  (`uploaded`), a komplet `seal_group` zamienia w JEDNO nagranie („… (obie połowy)”) sklejane w kolejce ffmpeg (sekcja 4.5).
+  Postęp w `videos[].merge = {status: downloading|processing|ready|failed, done, count, video_id, error, progress}`.
+  Bez magazynu R2 łączenie połówek odpowiada 503 `STORAGE_OFF`.
+- Ponowny przegląd aktualizuje propozycje, ale nie cofa decyzji (dodane, odrzucone, wybór ręczny). Film już podpięty do
+  meczu pary (ten sam adres YouTube) wraca jako `added`.

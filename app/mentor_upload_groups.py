@@ -215,6 +215,19 @@ async def complete_member(ctx: Dict[str, Any], row: Dict[str, Any], raw_parts: A
                                .where(mentor_uploads.c.status == "uploading").values(status=G.WAITING))
         await C.touch(ctx, actor.judge_id, "upload_completed", "videos", row["match_id"], {"id": row["id"], "group_id": row["group_id"]})
     group_id = row["group_id"]
+    video_id, state = await seal_group(ctx["pair_key"], group_id)
+    if video_id:
+        await C.touch(ctx, actor.judge_id, "upload_group_completed", "videos", row["match_id"], {"id": group_id, "video": video_id})
+        M.wake_worker()
+        return {"status": "processing", "video_id": video_id, "group_id": group_id}
+    if state["status"] == "uploading":
+        return {"status": "waiting_group", "group_id": group_id, "done": state["done"], "count": state["count"]}
+    return {"status": state["status"], "video_id": state["video_id"], "group_id": group_id, "error": state["error"]}
+
+
+async def seal_group(pair_key: str, group_id: str, title: Optional[str] = None) -> "tuple[Optional[str], Dict[str, Any]]":
+    """Komplet plików w magazynie -> JEDNO nagranie meczu i praca dla kolejki (`processing`); inaczej stan grupy.
+    Wspólne dla wgrywania z przeglądarki i połówek pobieranych z kanału YouTube (`app/mentor_channels.py`)."""
     video_id: Optional[str] = None
     state: Dict[str, Any] = {}
     async with database.transaction():
@@ -225,20 +238,14 @@ async def complete_member(ctx: Dict[str, Any], row: Dict[str, Any], raw_parts: A
             video_id = R.new_id()
             marker = f"upload:{lead['id']}"
             await database.execute(mentor_match_videos.insert().values(
-                id=video_id, match_id=lead["match_id"], pair_key=ctx["pair_key"], url=marker, normalized_url=marker,
+                id=video_id, match_id=lead["match_id"], pair_key=pair_key, url=marker, normalized_url=marker,
                 provider="upload", added_by=lead["uploader_id"], created_at=C.now(), kind="upload", upload_id=lead["id"],
-                title=G.group_title(lead["filename"], len(rows))))
+                title=title or G.group_title(lead["filename"], len(rows))))
             await database.execute(update(mentor_uploads).where(mentor_uploads.c.group_id == group_id).values(status="processing"))
             await database.execute(update(mentor_uploads).where(mentor_uploads.c.id == lead["id"]).values(video_id=video_id))
         else:
             state = G.group_state(rows)
-    if video_id:
-        await C.touch(ctx, actor.judge_id, "upload_group_completed", "videos", row["match_id"], {"id": group_id, "video": video_id})
-        M.wake_worker()
-        return {"status": "processing", "video_id": video_id, "group_id": group_id}
-    if state["status"] == "uploading":
-        return {"status": "waiting_group", "group_id": group_id, "done": state["done"], "count": state["count"]}
-    return {"status": state["status"], "video_id": state["video_id"], "group_id": group_id, "error": state["error"]}
+    return video_id, state
 
 
 # ─── Worker ─────────────────────────────────────────────────────────────────

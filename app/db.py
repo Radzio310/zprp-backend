@@ -4786,6 +4786,10 @@ from app.mentor_watch_tables import define_tables as _define_mentor_watch_tables
 from app.mentor_montage_tables import define_tables as _define_mentor_montage_tables
 mentor_montages, mentor_montage_assets = _define_mentor_montage_tables(metadata)
 
+# Kanały YouTube pary (18.11.2026): przegląd kanału i propozycje meczów (`app/mentor_channel_tables.py`, sekcja 16 kontraktu).
+from app.mentor_channel_tables import define_tables as _define_mentor_channel_tables
+mentor_channels, mentor_channel_videos = _define_mentor_channel_tables(metadata)
+
 # Mecze ręczne wspólne (31.10.2026) i ręczne podpięcie ProEla w panelu pary (`app/shared_match_tables.py`, kontrakt `docs/mecze-wspolne-api.md`).
 from app.shared_match_tables import define_tables as _define_shared_match_tables
 (
