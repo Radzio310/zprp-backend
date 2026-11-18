@@ -602,6 +602,7 @@ def _assemble() -> APIRouter:
     from app.mentor_panel_media import router as media_router
     from app.mentor_montage import router as montage_router
     from app.mentor_channels import router as channels_router
+    from app.mentor_speech import router as speech_router
     from app.mentor_panel_reports import router as reports_router
     from app.mentor_panel_streams import router as streams_router
     from app.mentor_upload_groups import router as upload_groups_router
@@ -609,7 +610,7 @@ def _assemble() -> APIRouter:
 
     combined = APIRouter()
     for part in (auth_router, router, library_router, media_router, reports_router, handoff_router, streams_router, bastion_router, download_router, veo_router,
-                 upload_groups_router, montage_router, channels_router):
+                 upload_groups_router, montage_router, channels_router, speech_router):
         combined.include_router(part)
     return combined
 
