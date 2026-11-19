@@ -3,6 +3,8 @@
 import base64
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from tests.mentor_panel_support import JUDGES, PAIR, Env
 
@@ -89,3 +91,52 @@ def test_obcy_nie_dyktuje_w_parze(d, monkeypatch):
 
     err = d.run(go)
     assert getattr(err, "status_code", None) in (403, 404)
+
+
+# ─── Ścieżka trasy (19.11.2026) ─────────────────────────────────────────────
+# Router dyktowania nie miał `prefix="/mentor-panel"` i trasa wisiała pod `/pairs/{id}/speech`, a obaj klienci
+# (panel web `MENTOR_API` i aplikacja `MENTOR_PANEL_URL`) wołają `/mentor-panel/pairs/{id}/speech` -> 404 na produkcji.
+
+
+def _panel_app(env):
+    app = FastAPI()
+    app.include_router(env.panel.panel_router)
+
+    @app.on_event("startup")
+    async def start():
+        await env.db.connect()
+        await env.seed()
+
+    @app.on_event("shutdown")
+    async def stop():
+        await env.db.disconnect()
+
+    return app
+
+
+def test_trasa_dyktowania_pod_prefiksem_panelu(d):
+    paths = _panel_app(d).openapi()["paths"]
+    assert "post" in paths.get("/mentor-panel/pairs/{pair_id}/speech", {})
+    assert "/pairs/{pair_id}/speech" not in paths
+
+
+def test_dyktowanie_wymaga_logowania_do_panelu(d, monkeypatch):
+    async def fake_bearer(request, token):
+        return {"sub": "x", "judge_id": token}
+
+    async def fake(*a):
+        return "próba"
+
+    monkeypatch.setattr(d.auth, "_decode_bearer", fake_bearer)
+    monkeypatch.setattr(d.speech, "_transcribe", fake)
+    body = {"audio_base64": base64.b64encode(b"0" * 64).decode(), "mime": "audio/webm"}
+    url = f"/mentor-panel/pairs/{PAIR}/speech"
+
+    with TestClient(_panel_app(d)) as client:
+        anon = client.post(url, json=body)
+        # 401 z kodem panelu, nie goły 404 FastAPI („trasy nie ma”).
+        assert anon.status_code == 401 and anon.json()["detail"]["code"] == "UNAUTHENTICATED"
+        assert client.post(url, json=body, headers={"authorization": "Bearer 999"}).status_code in (403, 404)
+        ok = client.post(url, json=body, headers={"authorization": f"Bearer {JUDGES[0]}"})
+        assert ok.status_code == 200 and ok.json() == {"text": "Próba"}
+        assert client.post(f"/pairs/{PAIR}/speech", json=body, headers={"authorization": f"Bearer {JUDGES[0]}"}).status_code == 404

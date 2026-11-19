@@ -25,7 +25,7 @@ from app import mentor_panel_core as C
 from app.mentor_panel_auth import mentor_actor
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(prefix="/mentor-panel", tags=["Mentor"])
 
 Actor = C.MentorActor
 
