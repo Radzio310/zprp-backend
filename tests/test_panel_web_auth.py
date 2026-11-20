@@ -82,7 +82,9 @@ def web(monkeypatch, tmp_path):
     for limiter in (A._QR_LIMITER, A._APPROVE_LIMITER, A._TOKEN_LIMITER):
         monkeypatch.setattr(limiter, "blocked", lambda *keys: False)
 
-    tokens = {"app-anna": {"sub": "anna.nowak", "judge_id": "101"}, "app-form": {"sub": "anna.nowak", "scope": "form-web"}}
+    tokens = {"app-anna": {"sub": "anna.nowak", "judge_id": "101"}, "app-form": {"sub": "anna.nowak", "scope": "form-web"},
+              # Panel w przeglądarce telefonu, konto okręgu (komisja) - bez numeru sędziego.
+              "web-okreg": {"sub": "ks_slzpr", "judge_id": "", "account_type": "org"}}
 
     async def fake_bearer(request, token):
         if token not in tokens:
@@ -93,6 +95,10 @@ def web(monkeypatch, tmp_path):
 
     async def fake_panel_login(username, password):
         calls.append(("panel", username, password))
+        if username == "ks_slzpr" and password == "Okreg-1":
+            return {"success": True, "judge_id": None, "account_type": "org", "display_name": "Śląski ZPR",
+                    "available_tabs": ["Terminarz", "Rozgrywki"], "vip": {"record": {"username": "ks_slzpr", "permissions_json": {"admin": True}}},
+                    "tab_access": {"terminarz": True}}
         if password != "Haslo-ZPRP":
             return {"success": False, "error": "Niepoprawny użytkownik lub hasło"}
         return {"success": True, "judge_id": "101", "account_type": "judge", "display_name": "Anna NOWAK | Śląski ZPR",
@@ -189,3 +195,15 @@ def test_wygasla_pieczec_nie_daje_tokenu(web, monkeypatch):
     old, _ = S.seal("Haslo-ZPRP", SECRET, now=datetime.now(timezone.utc) - S.SEAL_TTL - timedelta(minutes=1))
     res = client.post("/panel-web/auth/token", json={"username": "anna.nowak", "password": S.rsa_wrap(PUB, old)})
     assert res.status_code == 401 and res.json()["detail"]["code"] == "SESSION_EXPIRED"
+
+
+def test_konto_okregu_z_panelu_na_telefonie_loguje_komputer(web):
+    client, calls = web
+    qr = client.post("/panel-web/auth/qr").json()
+    ok = _approve(client, qr["code"], token="web-okreg", username="ks_slzpr", password="Okreg-1")
+    assert ok.status_code == 200, ok.text
+    done = client.get(f"/panel-web/auth/qr/{qr['code']}", params={"poll_token": qr["poll_token"], "wait": 0}).json()
+    assert done["status"] == "approved" and done["username"] == "ks_slzpr"
+    assert done["login"]["account_type"] == "org" and done["login"]["vip"]["record"]["permissions_json"]["admin"] is True
+    # Konto okręgu nie ma profilu sędziego - serwer go nie pobiera.
+    assert not any(c[0] == "profile" for c in calls)

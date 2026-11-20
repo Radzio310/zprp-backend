@@ -14,8 +14,10 @@ Trasy (`docs/panel-web-qr.md`):
   POST /panel-web/auth/qr/{code}/approve    zatwierdzenie z aplikacji (JWT + dane)
   POST /panel-web/auth/token                świeży JWT dla komputera z pieczęci
 
-Zatwierdza zawsze to konto, na które aplikacja jest teraz zalogowana: login
-w danych musi być loginem z JWT aplikacji.
+Zatwierdza zawsze to konto, które jest zalogowane na zatwierdzającym urządzeniu:
+login w danych musi być loginem z JWT. Zatwierdzać może aplikacja BAZA (konta
+sędziowskie) albo panel /panel w przeglądarce telefonu (także konto okręgu,
+np. komisja - wtedy `approved_by` to login, bo nie ma numeru sędziego).
 """
 
 from __future__ import annotations
@@ -98,14 +100,14 @@ async def _decode_bearer(request: Request, token: str) -> Dict[str, Any]:
 async def _app_payload(request: Request) -> Dict[str, Any]:
     auth = request.headers.get("authorization") or ""
     if not auth.lower().startswith("bearer "):
-        raise _err(401, "APP_ONLY", "Logowanie komputera zatwierdza się w aplikacji BAZA.")
+        raise _err(401, "APP_ONLY", "Logowanie komputera zatwierdza się w aplikacji BAZA albo w panelu zalogowanym na telefonie.")
     try:
         payload = await _decode_bearer(request, auth.split(" ", 1)[1].strip())
     except HTTPException as exc:
         raise _err(401, "APP_SESSION", "Sesja aplikacji wygasła. Zaloguj się ponownie w aplikacji.") from exc
     if payload.get("scope"):
         # Tokeny stron (egzamin, formularze) nie zatwierdzają logowania komputera.
-        raise _err(403, "APP_ONLY", "Logowanie komputera zatwierdza się w aplikacji BAZA.")
+        raise _err(403, "APP_ONLY", "Logowanie komputera zatwierdza się w aplikacji BAZA albo w panelu zalogowanym na telefonie.")
     return payload
 
 

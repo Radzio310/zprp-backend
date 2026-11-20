@@ -9,10 +9,13 @@ Panel okręgowy (`www.bazapodreka.app/panel`) logował się tylko loginem i has�
 
 ## Przebieg
 1. Komputer: `POST /panel-web/auth/qr` zwraca `code`, `poll_token` i `approve_url = https://www.bazapodreka.app/okreg/zaloguj/{code}`. Kod żyje 3 minuty.
-2. Telefon skanuje kod. Otwiera kafel „Panel na komputerze” w Więcej panelu okręgu albo link `…/okreg/zaloguj/{code}` lub `refhandballapp://panel/login/{code}`.
-3. Telefon wysyła `POST /panel-web/auth/qr/{code}/approve` z JWT aplikacji. W treści są login i hasło ZPRP, zaszyfrowane kluczem publicznym serwera (`prepareEncryptedPayload`).
+2. Kod zatwierdza drugie urządzenie, jedną z dwóch dróg:
+   - **panel w przeglądarce telefonu** (dowolne konto zalogowane hasłem, także konto okręgu, np. komisja): karta konta → „Zaloguj inne urządzenie” (`/okreg/skanuj`) albo zwykły aparat telefonu. Obie prowadzą do strony `…/okreg/zaloguj/{code}` z przyciskiem „Zaloguj komputer”;
+   - **aplikacja BAZA** (konta sędziowskie): kafel „Panel na komputerze” w Więcej panelu okręgu albo `refhandballapp://panel/login/{code}` (przycisk na tej samej stronie).
+   Link `/okreg/zaloguj/*` celowo nie jest w AASA ani w filtrach Androida, więc kod zawsze otwiera przeglądarkę.
+3. Zatwierdzające urządzenie wysyła `POST /panel-web/auth/qr/{code}/approve` ze swoim JWT. W treści są login i hasło ZPRP, zaszyfrowane kluczem publicznym serwera (`prepareEncryptedPayload`).
 4. Serwer sprawdza dwie rzeczy:
-   - login z danych to login z JWT, czyli zatwierdza konto zalogowane w aplikacji;
+   - login z danych to login z JWT, czyli zatwierdza konto zalogowane na zatwierdzającym urządzeniu;
    - ZPRP przyjmuje dane (`/baza_web/login`, a dla sędziego także profil).
    Potem zapisuje wynik przy kodzie.
 5. Komputer odpytuje `GET /panel-web/auth/qr/{code}` z `poll_token` (długie odpytywanie). Po zatwierdzeniu odbiera jednorazowo:
@@ -32,7 +35,8 @@ Panel okręgowy (`www.bazapodreka.app/panel`) logował się tylko loginem i has�
 - Po `sealed_expires_at` strona uznaje sesję za wygasłą: `AuthContext` traktuje to jak brak hasła.
 
 ## Bezpieczeństwo
-- Zatwierdzenie wymaga JWT aplikacji. Tokeny stron (`scope`) są odrzucane.
+- Zatwierdzenie wymaga JWT konta (aplikacja albo panel zalogowany hasłem). Tokeny stron (`scope`) są odrzucane.
+- Urządzenie zalogowane kodem nie zatwierdzi kolejnego: ma tylko pieczęć, a pieczęć jako hasło jest odrzucana.
 - Pieczęci nie da się użyć do zatwierdzenia kolejnego komputera.
 - Do wygaśnięcia pieczęć jest równoważna hasłu dla tras, które go używają. Jest krótsza i bezpieczniejsza niż dotychczasowe hasło jawnym tekstem w `localStorage`. Wylogowanie usuwa ją z przeglądarki.
 - Limity: 30 kodów na IP, 10 nieudanych zatwierdzeń na konto i 60 tokenów na IP, każdy w oknie 10 minut.
