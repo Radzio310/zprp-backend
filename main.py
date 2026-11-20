@@ -424,6 +424,9 @@ app.include_router(mentor_evaluations_router)
 # Panel „Mentor" pary (web BAZA pod Ręką + aplikacja) - kontrakt `docs/mentor-panel.md`.
 from app.mentor_panel import panel_router as mentor_panel_router
 app.include_router(mentor_panel_router)
+# Panel okręgowy: logowanie komputera kodem QR z aplikacji (`app/panel_web_auth.py`).
+from app.panel_web_auth import router as panel_web_auth_router
+app.include_router(panel_web_auth_router)
 # Mentor x Bastion: „Szukaj w Bastionie” (Archiwista) i nagrania sezonu - `docs/mentor-panel.md` 8.10.
 from app.mentor_bastion_search import router as mentor_bastion_search_router
 app.include_router(mentor_bastion_search_router)

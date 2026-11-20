@@ -5030,6 +5030,11 @@ from app.young_rating_drafts_tables import define_tables as _define_young_rating
 
 (young_rating_drafts,) = _define_young_rating_drafts_tables(metadata)
 
+# Panel okręgowy (/panel): logowanie komputera kodem QR z aplikacji (`app/panel_web_auth.py`).
+from app.panel_web_tables import define_tables as _define_panel_web_tables
+
+(panel_web_qr_logins,) = _define_panel_web_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 

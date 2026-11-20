@@ -83,9 +83,10 @@ def apple_app_site_association(team_id: str) -> Dict[str, Any]:
             # Ten sam plik podaje www.bazapodreka.app (rewrite na Vercelu, 24.10.2026):
             # kody QR panelu Mentor i egzaminu na komputerze otwierają aplikację.
             {"/": "/mentor/zaloguj/*", "comment": "Logowanie komputera do panelu Mentor"},
+            {"/": "/okreg/zaloguj/*", "comment": "Logowanie komputera do panelu okręgowego"},
             {"/": "/egzamin/p/*", "comment": "Egzamin na komputerze: logowanie i telefon-strażnik"},
         ]
-        paths = ["/e/*", "/mentor/zaloguj/*", "/egzamin/p/*"]
+        paths = ["/e/*", "/mentor/zaloguj/*", "/okreg/zaloguj/*", "/egzamin/p/*"]
         # Formularze okręgowe: /f/<kod> (formularz) i /f/p/<kod> (logowanie strony kodem QR).
         # Tylko BAZA ze sklepu (decyzja z 11.11.2026): link wysłany sędziom ma otwierać
         # sklepową aplikację także na telefonie, na którym obok stoi BAZA dev.

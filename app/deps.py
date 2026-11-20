@@ -58,7 +58,11 @@ def get_rsa_keys():
         backend=default_backend(),
     )
     public_key = private_key.public_key()
-    return private_key, public_key
+    # Panel okręgowy po logowaniu kodem QR wysyła zamiast hasła pieczęć
+    # (`app/panel_web_seal.py`); ten klucz ją otwiera, inne szyfrogramy bez zmian.
+    from app.panel_web_seal import SealAwareKey
+
+    return SealAwareKey(private_key, lambda: get_settings().SECRET_KEY), public_key
 
 # ====================================
 # AUTHENTICATION DEPENDENCY
