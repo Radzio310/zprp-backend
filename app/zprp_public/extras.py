@@ -927,7 +927,9 @@ async def referee_refresh(referee_id: str) -> dict[str, Any]:
 
     if RP.is_placeholder_id(referee_id):  # brak obsady nie ma czego odświeżać
         return {"checked": 0, "refreshed": 0, "changed": False}
-    since = datetime.now(timezone.utc) - timedelta(days=1)
+    # `scheduled_at` to naiwny czas warszawski (kolumna bez strefy): porównanie z datą ze
+    # strefą Postgres odrzucał i trasa zwracała 500 przy każdym wejściu na profil sędziego.
+    since = TP.warsaw_now() - timedelta(days=1)
     rows = await database.fetch_all(
         select(M.c.match_id)
         .where(and_(_who(referee_id), M.c.scheduled_at >= since))

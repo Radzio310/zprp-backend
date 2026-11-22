@@ -279,3 +279,31 @@ def test_mecze_przy_stoliku_i_jako_delegat(env):
     assert [p["name"] for p in st["partners"]] == ["CZWARTY Ewa"]
     r6 = next(e for e in index if e["referee_id"] == "r6")
     assert r6["matches"] == 4
+
+
+def test_odswiezenie_obejmuje_stolik_i_data_bez_strefy(env, monkeypatch):
+    """POST /referees/{id}/refresh: `scheduled_at` jest bez strefy - data ze strefą to 500 na Postgresie."""
+    import app.zprp_public.ondemand as OD
+
+    seen: list = []
+
+    async def fake_refresh(match_id):
+        seen.append(match_id)
+        return {"refreshed": False, "changed": False}
+
+    monkeypatch.setattr(OD, "refresh_match", fake_refresh)
+
+    async def go(x, _p):
+        params: list = []
+        real = x.database.fetch_all
+
+        async def spy(q, *a, **kw):
+            params.extend(v for v in q.compile().params.values() if isinstance(v, datetime))
+            return await real(q, *a, **kw)
+
+        monkeypatch.setattr(x.database, "fetch_all", spy)
+        return await x.referee_refresh("r6"), params
+
+    out, params = run(env, go)
+    assert out["checked"] == 2 and len(seen) == 2          # dziś przy stoliku i za 5 dni jako delegat
+    assert params and all(p.tzinfo is None for p in params)
