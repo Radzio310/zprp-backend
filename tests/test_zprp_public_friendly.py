@@ -197,3 +197,5 @@ def test_proby_w_proelu_nie_sa_meczem():
     assert not FR.is_presentable({**real, "matchConfig": thin}, "finished", now=now)
     assert FR.is_real_team_name("Zew Świebodzin") and FR.is_real_team_name("Nowa sól")
     assert not FR.is_real_team_name("1") and not FR.is_real_team_name("Vhggj") and not FR.is_real_team_name("AAA")
+    assert not FR.is_real_team_name("Test1") and not FR.is_real_team_name("Drużyna A") and not FR.is_real_team_name("próba 2")
+    assert FR.is_real_team_name("Kolstad") and FR.is_real_team_name("Vive Kielce") and FR.is_real_team_name("Czersk")

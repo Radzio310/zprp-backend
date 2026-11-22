@@ -91,10 +91,22 @@ FUTURE_SLACK_DAYS = 1  # data meczu najdalej dobę po dziś (strefy, mecz po pó
 _VOWELS = set("aeiouyąęó")
 
 
+#: Nazwy, którymi wpisuje się próbę zamiast drużyny (po zdjęciu cyfr i odstępów, małymi literami).
+_TRIAL_NAMES = frozenset({
+    "test", "testy", "testowy", "testowa", "proba", "próba", "probny", "próbny", "asd", "asdf", "qwe", "qwerty",
+    "abc", "xxx", "xyz", "druzyna", "drużyna", "gospodarz", "gospodarze", "gosc", "gość", "goscie", "goście",
+    "home", "away", "team", "zespol", "zespół",
+})
+
+
 def is_real_team_name(name: Any) -> bool:
-    """Nazwa drużyny, nie próba klawiatury: min. 3 litery, co najmniej dwie różne, jest samogłoska."""
+    """Nazwa drużyny, nie próba klawiatury: min. 3 litery, co najmniej dwie różne, jest samogłoska,
+    i nie „Test1", „Próba", „Drużyna A"."""
     letters = [c.lower() for c in _text(name) if c.isalpha()]
-    return len(letters) >= 3 and len(set(letters)) >= 2 and any(c in _VOWELS for c in letters)
+    if len(letters) < 3 or len(set(letters)) < 2 or not any(c in _VOWELS for c in letters):
+        return False
+    words = [w for w in "".join(c.lower() if c.isalpha() else " " for c in _text(name)).split() if len(w) > 1]
+    return not words or words[0] not in _TRIAL_NAMES
 
 
 def is_presentable(blob: Any, status: Any, doc_at: Any = None, now: Optional[datetime] = None) -> bool:
