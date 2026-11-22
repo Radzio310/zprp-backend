@@ -27,6 +27,7 @@ async def schedule_province_push(
     body: str,
     data: Optional[Dict[str, Any]] = None,
     seconds_from_now: int = 60,
+    preference_key: Optional[str] = None,
 ) -> dict:
     """
     Planuje push do wszystkich urządzeń z danego województwa.
@@ -70,6 +71,12 @@ async def schedule_province_push(
             legacy_installation_id = str(device_key or "").strip()
             if legacy_installation_id.startswith("ins_"):
                 installation_ids.add(legacy_installation_id)
+
+    muted = 0
+    if preference_key and installation_ids:
+        # Przełącznik z ustawień telefonu (np. „Ogłoszenia okręgu"): urządzenie,
+        # które go wyłączyło, wypada z wysyłki. Brak klucza = zgoda.
+        installation_ids, muted = await _without_muted(installation_ids, preference_key)
 
     targeted = len(installation_ids)
     ok = 0
@@ -116,11 +123,34 @@ async def schedule_province_push(
             failed += 1
 
     logger.info(
-        "[notify_utils] province=%r (norm=%r) targeted=%d ok=%d failed=%d",
+        "[notify_utils] province=%r (norm=%r) targeted=%d ok=%d failed=%d muted=%d",
         province,
         province_norm,
         targeted,
         ok,
         failed,
+        muted,
     )
-    return {"targeted": targeted, "ok": ok, "failed": failed}
+    return {"targeted": targeted, "ok": ok, "failed": failed, "muted": muted}
+
+
+async def _without_muted(installation_ids: set, preference_key: str) -> "tuple[set, int]":
+    """Instalacje bez wyłączonego przełącznika `preference_key` (push_tokens.notification_prefs)."""
+    from app.db import push_tokens
+    from app.push.preferences import notification_type_allowed
+
+    try:
+        rows = await database.fetch_all(
+            select(push_tokens.c.installation_id, push_tokens.c.notification_prefs).where(
+                push_tokens.c.installation_id.in_(sorted(installation_ids))
+            )
+        )
+    except Exception:  # noqa: BLE001 - bez preferencji wysyłamy jak dotąd
+        logger.warning("[notify_utils] odczyt preferencji nieudany", exc_info=True)
+        return installation_ids, 0
+    muted = {
+        str(r["installation_id"])
+        for r in rows
+        if not notification_type_allowed(r["notification_prefs"], preference_key)
+    }
+    return {i for i in installation_ids if i not in muted}, len(muted & installation_ids)

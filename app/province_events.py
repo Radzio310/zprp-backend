@@ -419,6 +419,8 @@ async def _push(judge_ids: List[str], title: str, body: str, event: Mapping[str,
                 "province": _s(event.get("province")),
                 "notice": kind,
             },
+            # Przełącznik „Wydarzenia okręgu" w ustawieniach (brak klucza = włączone).
+            preference_key="districtEvents",
         )
     except Exception:  # noqa: BLE001
         logger.warning("wydarzenia: powiadomienie nieudane", exc_info=True)

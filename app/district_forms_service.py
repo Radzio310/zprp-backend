@@ -72,7 +72,9 @@ async def retired_code(clean: str) -> bool:
     """Czy kod z adresu to link wycofany przez „Wygeneruj nowy link”."""
     return bool(await database.fetch_one(select(RETIRED.c.code).where(RETIRED.c.code == clean)))
 
-PUSH_PREFERENCE = "province_events"
+#: Formularz okręgu milknie, gdy wyłączony jest dawny przełącznik wydarzeń ALBO
+#: nowy „Formularze okręgu" (`districtForms`, brak klucza = włączone).
+PUSH_PREFERENCE = ("province_events", "districtForms")
 PUSH_VARIANT = "baza"
 UPLOAD_MAX_BYTES = 10 * 1024 * 1024
 

@@ -2,7 +2,7 @@ import logging
 import os
 import hashlib
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional, Sequence, TypedDict, Union
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -71,7 +71,7 @@ async def send_push_to_judges_report(
     data: Optional[Dict[str, Any]] = None,
     app_variant: Optional[str] = None,
     market_broadcast: bool = False,
-    preference_key: Optional[str] = None,
+    preference_key: Optional[Union[str, Sequence[str]]] = None,
     min_app_version: Optional[str] = None,
 ) -> PushDeliveryReport:
     """
@@ -138,7 +138,7 @@ async def send_push_to_judges_report(
     if market_broadcast:
         from app.match_market_rules import market_pushes_allowed
     if preference_key:
-        from .preferences import notification_type_allowed
+        from .preferences import notification_types_allowed
 
     # Ile urządzeń odpowiedziało NA SĘDZIEGO, a nie łącznie. Suma nie odróżnia
     # „poszło na trzy telefony jednego admina" od „poszło do trzech adminów",
@@ -163,7 +163,7 @@ async def send_push_to_judges_report(
         # przez wołającego (np. niedyspozycje partnera).
         muted_here = (
             (market_broadcast and not market_pushes_allowed(row["notification_prefs"]))
-            or (preference_key and not notification_type_allowed(row["notification_prefs"], preference_key))
+            or (preference_key and not notification_types_allowed(row["notification_prefs"], preference_key))
         )
         if muted_here:
             muted += 1
@@ -231,7 +231,7 @@ async def send_push_to_judges(
     data: Optional[Dict[str, Any]] = None,
     app_variant: Optional[str] = None,
     market_broadcast: bool = False,
-    preference_key: Optional[str] = None,
+    preference_key: Optional[Union[str, Sequence[str]]] = None,
 ) -> int:
     """Zachowuje dotychczasowy kontrakt pozostałych modułów: liczba urządzeń."""
     result = await send_push_to_judges_report(

@@ -174,6 +174,8 @@ async def _fire_ann_push(
                 "announcement_id": ann_id,
             },
             seconds_from_now=60,
+            # Przełącznik „Ogłoszenia okręgu" (brak klucza = włączone).
+            preference_key="districtAnnouncements",
         )
     except Exception as e:
         import logging

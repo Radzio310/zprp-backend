@@ -87,6 +87,25 @@ def notification_type_allowed(preferences: Any, key: str) -> bool:
     return _type_enabled(preferences, key)
 
 
+def notification_types_allowed(preferences: Any, keys: Any) -> bool:
+    """Wszystkie podane przełączniki włączone (brak klucza = zgoda).
+
+    `keys` to jeden klucz albo kilka - powiadomienie z kilkoma przełącznikami
+    (np. formularz okręgu: dawny `province_events` i nowy `districtForms`) idzie
+    tylko wtedy, gdy żaden z nich nie jest wyłączony.
+    """
+    if isinstance(keys, str):
+        keys = (keys,)
+    return all(_type_enabled(preferences, str(key)) for key in keys or () if str(key))
+
+
+#: Przełączniki powiadomień okręgu (Ustawienia panelu okręgowego, 22.11.2026).
+#: Brak klucza w `notificationTypes` = włączone.
+DISTRICT_ANNOUNCEMENTS_KEY = "districtAnnouncements"
+DISTRICT_EVENTS_KEY = "districtEvents"
+DISTRICT_FORMS_KEY = "districtForms"
+
+
 def market_broadcast_allowed(preferences: Any) -> bool:
     """Czy urządzenie chce rozsyłkę o nowej ofercie na Giełdzie."""
     return _type_enabled(preferences, "matchMarket")
