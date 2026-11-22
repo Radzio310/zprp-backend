@@ -5035,6 +5035,11 @@ from app.panel_web_tables import define_tables as _define_panel_web_tables
 
 (panel_web_qr_logins,) = _define_panel_web_tables(metadata)
 
+# Tryb prezentacji (`app/presentation.py`): stan, dziennik udawanych operacji, nakładka.
+from app.presentation_tables import define_tables as _define_presentation_tables
+
+presentation_state, presentation_ops, presentation_overlay = _define_presentation_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
