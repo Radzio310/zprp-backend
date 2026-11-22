@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import base64
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -75,6 +75,49 @@ def is_friendly_blob(blob: Any) -> bool:
     if not cfg or zprp_id_of(blob):
         return False
     return bool(_text(cfg.get("hostTeamName")) and _text(cfg.get("guestTeamName")))
+
+
+# ---------------------------------------------------------------------------
+# Czy towarzyski wygląda na PRAWDZIWY mecz (decyzja właściciela 22.11.2026)
+# ---------------------------------------------------------------------------
+# „Takich meczów bez sensu nie powinno pokazywać": portal pokazywał każdy zapis
+# ProEla bez IdZawody, także próby („W - Y" z datą za dwa lata, „Hdhh - Vhggj",
+# „1 - 2" 11:11). Publiczny jest tylko mecz, który realnie ktoś rozegrał.
+# Reszta znika z portalu (Na żywo, historia, link), a zapis w ProElu zostaje.
+
+MIN_PLAYERS = 5  # tylu zawodników na kartach każdej strony (piłka ręczna zaczyna w piątkę)
+MIN_GOALS_FINISHED = 10  # zakończony mecz z mniejszą sumą bramek to próba, nie mecz
+FUTURE_SLACK_DAYS = 1  # data meczu najdalej dobę po dziś (strefy, mecz po północy)
+_VOWELS = set("aeiouyąęó")
+
+
+def is_real_team_name(name: Any) -> bool:
+    """Nazwa drużyny, nie próba klawiatury: min. 3 litery, co najmniej dwie różne, jest samogłoska."""
+    letters = [c.lower() for c in _text(name) if c.isalpha()]
+    return len(letters) >= 3 and len(set(letters)) >= 2 and any(c in _VOWELS for c in letters)
+
+
+def is_presentable(blob: Any, status: Any, doc_at: Any = None, now: Optional[datetime] = None) -> bool:
+    """Towarzyski wygląda na rozegrany naprawdę: sensowne i różne nazwy drużyn, data nie w
+    dalekiej przyszłości, sędzia w obsadzie, skład na kartach obu stron, a po końcowym
+    gwizdku wynik meczu, nie próby."""
+    cfg = _cfg(blob)
+    host, guest = _text(cfg.get("hostTeamName")), _text(cfg.get("guestTeamName"))
+    if not (is_real_team_name(host) and is_real_team_name(guest)) or host.casefold() == guest.casefold():
+        return False
+    at = played_at(blob, doc_at)
+    now = now or datetime.now(WARSAW)
+    today = now.astimezone(WARSAW).replace(tzinfo=None) if now.tzinfo else now
+    if at is not None and at > today + timedelta(days=FUTURE_SLACK_DAYS):
+        return False
+    if not any(o["role"] == "Sędzia" for o in officials(blob)):
+        return False
+    roster = PL.proel_roster(blob, True)
+    if any(len(roster[side]["players"]) < MIN_PLAYERS for side in PL.SIDES):
+        return False
+    if status in FINISHED and _int(blob.get("scoreHost")) + _int(blob.get("scoreGuest")) < MIN_GOALS_FINISHED:
+        return False
+    return True
 
 
 def started(status: Any, live_started_at: Any) -> bool:
