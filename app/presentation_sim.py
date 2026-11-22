@@ -485,10 +485,83 @@ async def merge_market_detail(ctx: Ctx, data: Any) -> Any:
     return _apply_patch(data, patch, viewer.get("judge_id") or "", cards)
 
 
+async def _lineup_my_matches(ctx: Ctx, data: Dict[str, Any], viewer: Dict[str, Any]) -> None:
+    """„Moje mecze" po udawanym zapisie obsady: mecz, który sędzia dostał, przychodzi;
+    mecz, z którego zszedł (wymiana zatwierdzona), znika. Tylko gniazda giełdy."""
+    from app import presentation_lineup as L
+
+    vid, name = viewer.get("judge_id") or "", viewer.get("full_name") or ""
+    lineups = await L.load()
+    if not vid or not lineups:
+        return
+    try:
+        from app import match_market as M
+        from app.match_market_rules import can_offer, slot_label, slots_held_by
+    except Exception:  # noqa: BLE001
+        return
+    province = data.get("province") or viewer.get("province") or ""
+    matches = [m for m in data.get("matches") or [] if isinstance(m, dict)]
+    by_id = {_s(m.get("matchId")): m for m in matches}
+    hours = int(data.get("deadlineHours") or (viewer.get("cfg") or {}).get("offer_deadline_hours") or 48)
+    now = _now()
+    horizon = now + timedelta(days=int(getattr(M, "MY_MATCHES_HORIZON_DAYS", 60) or 60))
+    recheck = ctx.path.rstrip("/").endswith("/recheck")
+    for mid, lu in lineups.items():
+        if not L.same_province(lu.get("province"), province):
+            continue
+        row = await _province_match(lu.get("province") or province, mid)
+        if not row:
+            continue
+        state = L.patch_state(row.get("state_json") or {}, lu["slots"])
+        held = slots_held_by(state, vid, name)
+        match_at = _dt(row.get("match_at"))
+        current = by_id.get(mid)
+        if current is not None and not held:
+            matches.remove(current)
+            continue
+        if not held:
+            continue
+        if current is not None:
+            known = {_s(x.get("slot")): x for x in current.get("slots") or []}
+            current["slots"] = [known.get(slot) or {"slot": slot, "label": slot_label(slot), "offerId": None, "offerStatus": None} for slot in held]
+            current["match"] = M._match_view(state, row.get("match_at"))
+            continue
+        if recheck or match_at is None or match_at < now or match_at > horizon:
+            continue
+        offerable = bool(can_offer(match_at, now, hours))
+        approved = bool(row.get("approved"))
+        late = not offerable and match_at > now
+        blocked = None
+        if approved:
+            blocked = "Protokół jest już zatwierdzony."
+        elif late:
+            blocked = f"Do meczu zostało mniej niż {hours} h. Możesz poprosić obsadowego o pilne wystawienie."
+        matches.append({
+            "matchId": mid,
+            "match": M._match_view(state, row.get("match_at")),
+            "slots": [{"slot": slot, "label": slot_label(slot), "offerId": None, "offerStatus": None} for slot in held],
+            "canOffer": offerable and not approved,
+            "canRequestApproval": late and not approved,
+            "blockedReason": blocked,
+            "assignable": True,
+            "assignableReason": "OK",
+            "checkedAt": now.isoformat(),
+            "liveChecked": True,
+            "liveNote": "",
+        })
+    far = "9999"
+    matches.sort(key=lambda m: (not (m.get("match") or {}).get("matchAt"), _s((m.get("match") or {}).get("matchAt")) or far, _s(m.get("matchId"))))
+    data["matches"] = matches
+
+
 async def merge_my_matches(ctx: Ctx, data: Any) -> Any:
     if data is None:
         return None
     viewer = await market_viewer(ctx)
+    try:
+        await _lineup_my_matches(ctx, data, viewer)
+    except Exception:  # noqa: BLE001 - zostaje lista bez zmian obsady
+        log.exception("tryb prezentacji: moje mecze bez nakładki obsady")
     vid = viewer.get("judge_id") or ""
     taken: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for _rid, d in await PS.overlay_list("market_offer"):
@@ -686,6 +759,35 @@ async def _real_offer_and_claim(offer_id: int, claim_id: int) -> Tuple[str, str]
         return "", ""
 
 
+async def _real_offer_place(offer_id: int) -> Dict[str, str]:
+    """Mecz, gniazdo i okręg prawdziwej oferty (odczyt)."""
+    try:
+        from sqlalchemy import select
+
+        from app.db import database, match_market_offers as O
+
+        row = await database.fetch_one(select(O.c.match_id, O.c.slot, O.c.province).where(O.c.id == offer_id))
+        data = dict(row._mapping) if hasattr(row, "_mapping") else (dict(row) if row else {})
+        return {k: _s(data.get(k)) for k in ("match_id", "slot", "province")}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+async def _apply_swap_to_lineup(ctx: Ctx, place: Dict[str, Any], taker: str, card: Optional[Dict[str, Any]]) -> None:
+    """Zatwierdzona wymiana „wchodzi do ZPRP": oddający wychodzi z gniazda, biorący wchodzi."""
+    from app import presentation_lineup as L
+
+    if not taker or not place.get("match_id") or not L.board_slot(place.get("slot")):
+        return
+    await L.record(
+        place["match_id"],
+        {place["slot"]: {"number": taker, "name": _s((card or {}).get("full_name"))}},
+        province=place.get("province"),
+        source="market_approve",
+        account=ctx.account,
+    )
+
+
 async def market_approve(ctx: Ctx, route) -> Result:
     """Zatwierdzenie wymiany BEZ zapisu w ZPRP (apply_referee_assignment nie rusza)."""
     offer_id, claim_id = ctx.pid(), int(ctx.b("claim_id") or 0)
@@ -703,6 +805,8 @@ async def market_approve(ctx: Ctx, route) -> Result:
                 c["status"] = "declined"
         d["row"].update(status="done", decided_by=ctx.judge_id, decided_at=now_iso, applied_at=now_iso, updated_at=now_iso)
         await PS.overlay_put(rid, d)
+        place = {k: _s(d["row"].get(k)) for k in ("match_id", "slot", "province")}
+        chosen_card = next((c.get("card") for c in d.get("claims") or [] if _s(c.get("judge_id")) == taker), None)
     else:
         rid, patch = await market_patch(offer_id)
         added = next((c for c in patch.get("claims_add") or [] if int(c.get("id") or 0) == claim_id), None)
@@ -716,11 +820,17 @@ async def market_approve(ctx: Ctx, route) -> Result:
             status="done", decided_by=ctx.judge_id, decided_at=now_iso, applied_at=now_iso, chosen_judge_id=taker
         )
         await _save_patch(offer_id, rid, patch)
+        place = await _real_offer_place(offer_id)
+        chosen_card = (added or {}).get("card")
     cards = await judge_cards([giver, taker])
+    await _apply_swap_to_lineup(ctx, place, taker, cards.get(taker) or chosen_card)
     return Result(
         200,
         {"id": offer_id, "status": "done", "applied": True, "from": person(giver, cards.get(giver)), "to": person(taker, cards.get(taker))},
-        f"Zatwierdzenie wymiany w ofercie {offer_id} (bez zapisu w ZPRP)",
+        f"Zatwierdzenie wymiany w ofercie {offer_id}: mecz {place.get('match_id') or '?'}, {giver or '?'} -> {taker or '?'} "
+        "(zapis w ZPRP udawany)",
+        extra={"applied_to_zprp": "simulated", "match_id": place.get("match_id"), "slot": place.get("slot"),
+               "from": giver, "to": taker},
     )
 
 
@@ -1158,10 +1268,113 @@ async def merge_bootstrap(ctx: Ctx, data: Any) -> Any:
     found = await PS.overlay_get("draft", _canonical(ctx.query.get("province")))
     if found:
         data["draft"] = found[1]
+    if isinstance(data.get("matches"), list):
+        await _lineup_items(data["matches"], ctx.query.get("province"))
     return data
 
 
 merge_bootstrap.strip_etag = True  # type: ignore[attr-defined]
+
+
+# ───────────────────────────── obsada po udawanym zapisie ─────────────────────────────
+
+
+async def _lineup_items(items: List[Dict[str, Any]], province: Any) -> int:
+    """Mecze listy Obsady / bootstrapu z gniazdami z nakładki. Zwraca liczbę zmienionych."""
+    from app import presentation_lineup as L
+
+    lineups = await L.load()
+    changed = 0
+    for item in items:
+        lu = lineups.get(_s((item or {}).get("match_id"))) if isinstance(item, dict) else None
+        if lu and L.same_province(lu.get("province"), province):
+            L.patch_assignment_item(item, lu["slots"], lu.get("updated_at"))
+            changed += 1
+    return changed
+
+
+async def merge_assignments_list(ctx: Ctx, data: Any) -> Any:
+    if data is None or not isinstance(data, dict):
+        return None
+    await _lineup_items(data.get("matches") or [], ctx.query.get("province"))
+    return data
+
+
+async def merge_assignments_detail(ctx: Ctx, data: Any) -> Any:
+    from app import presentation_lineup as L
+
+    if data is None or not isinstance(data, dict):
+        return None
+    lu = (await L.load()).get(_s(ctx.params.get("match_id")))
+    if lu and isinstance(data.get("match"), dict):
+        L.patch_assignment_item(data["match"], lu["slots"], lu.get("updated_at"))
+    return data
+
+
+async def merge_obsada_view(ctx: Ctx, data: Any) -> Any:
+    """Obsada na żywo: gniazda z nakładki i nowy `rev` (ETag liczony z treści)."""
+    from app import presentation_lineup as L
+
+    if data is None or not isinstance(data, dict):
+        return None
+    lineups = await L.load()
+    hit = False
+    for match in data.get("matches") or []:
+        lu = lineups.get(_s(match.get("match_id")))
+        if lu and L.same_province(lu.get("province"), data.get("province")):
+            L.patch_view_match(match, lu["slots"], lu.get("updated_at"))
+            hit = True
+    if hit:
+        try:
+            from app.obsada_view_rules import compute_rev
+
+            data["rev"] = compute_rev(data["matches"], f"{data.get('updated_at')}|{data.get('mode')}|presentation")
+        except Exception:  # noqa: BLE001
+            data["rev"] = f"{_s(data.get('rev'))}p"
+    return data
+
+
+merge_obsada_view.strip_etag = True  # type: ignore[attr-defined]
+
+
+async def merge_obsada_changes(ctx: Ctx, data: Any) -> Any:
+    """Dziennik zmian Obsady na żywo: udawana zmiana obsady na górze."""
+    from app import presentation_lineup as L
+
+    if data is None or not isinstance(data, dict):
+        return None
+    province = data.get("province") or _canonical(ctx.query.get("province"))
+    extra = []
+    for mid, lu in (await L.load()).items():
+        if not L.same_province(lu.get("province"), province):
+            continue
+        row = await _province_match(province, mid)
+        if not row:
+            continue
+        state = row.get("state_json") or {}
+        before, after = L.view_names(state), L.view_names(L.patch_state(state, lu["slots"]))
+        if before == after:
+            continue
+        extra.append({
+            "match_id": mid, "code": _s(state.get("RozgrywkiCode") or row.get("match_code")),
+            "host": _s(state.get("ID_zespoly_gosp_ZespolNazwa")), "guest": _s(state.get("ID_zespoly_gosc_ZespolNazwa")),
+            "match_at": PS._iso(row.get("match_at")), "kind": "crew_change" if any(before.values()) else "new_crew",
+            "before": before, "after": after, "at": lu.get("updated_at"),
+        })
+    if extra:
+        extra.sort(key=lambda c: _s(c.get("at")), reverse=True)
+        data["changes"] = (extra + list(data.get("changes") or []))[:200]
+    return data
+
+
+async def merge_match_form(ctx: Ctx, data: Any) -> Any:
+    """Formularz ZPRP meczu (panel otwiera mecz): wybrane osoby jak po udawanym zapisie."""
+    from app import presentation_lineup as L
+
+    if data is None or not isinstance(data, dict):
+        return None
+    lu = (await L.load()).get(_s(data.get("IdZawody")) or _s(ctx.b("IdZawody")))
+    return L.patch_match_form(data, lu["slots"]) if lu else data
 
 
 # ───────────────────────────── obsada: zapisy do ZPRP ─────────────────────────────
@@ -1181,9 +1394,13 @@ async def obsada_save(ctx: Ctx, route) -> Result:
     if isinstance(expect, dict):
         # Obsada 2.0 przysyła `expect` w nazwach gniazd tablicy (pierwszy, drugi...).
         expect = {**{normalize_slot(k): v for k, v in expect.items()}, **expect}
+    from app import presentation_lineup as L
+
+    assigned = ctx.b("assigned") if isinstance(ctx.b("assigned"), dict) else {}
     before = {}
     verified = {}
     sent = []
+    changes: Dict[str, Dict[str, str]] = {}
     for label in ZPRP_SLOTS:
         select_name = SLOT_TO_SELECT[label]
         seen_name = _s(expect.get(label) or expect.get(normalize_slot(label))) if isinstance(expect, dict) else ""
@@ -1191,9 +1408,17 @@ async def obsada_save(ctx: Ctx, route) -> Result:
         value = ctx.b(select_name)
         if value is not None:
             sent.append(label)
-            verified[label] = {"value": _s(value), "name": _s(ctx.b(f"{select_name}_name")) if _s(value) else ""}
+            # Obsada 2.0 wysyła pustą wartość i samo nazwisko (ZPRP szuka po nazwisku);
+            # pusta wartość i puste nazwisko = zwolnij gniazdo.
+            name = _s(ctx.b(f"{select_name}_name"))
+            verified[label] = {"value": _s(value), "name": name}
+            board = L.board_slot(label)
+            # Numer sędziego tylko z `assigned` - wartość opcji formularza ZPRP nim nie jest.
+            changes[board] = {"number": _s(assigned.get(board) or assigned.get(label)), "name": name}
         else:
             verified[label] = {"value": None, "name": seen_name}
+    if changes:
+        await L.record(ctx.b("IdZawody"), changes, province=ctx.b("province"), source="obsada_save", account=ctx.account)
     result: Dict[str, Any] = {
         "success": True,
         "code": None,
@@ -1241,11 +1466,19 @@ async def obsada_save_date(ctx: Ctx, route) -> Result:
 
 
 async def obsada_table_save(ctx: Ctx, route) -> Result:
+    from app import presentation_lineup as L
+
     body = {"ok": True, "name": _s(ctx.b("name")), "role": _s(ctx.b("role")), "fetched_at": _fetched_at()}
+    await L.record(ctx.b("IdZawody"), {_s(ctx.b("role")): {"number": "", "name": body["name"]}},
+                   source="table_officials", account=ctx.account)
     return Result(200, body, f"Stolikowy {body['role']}: {body['name']} - bez ZPRP")
 
 
 async def obsada_table_clear(ctx: Ctx, route) -> Result:
+    from app import presentation_lineup as L
+
+    await L.record(ctx.b("IdZawody"), {_s(ctx.b("role")): {"number": "", "name": ""}},
+                   source="table_officials", account=ctx.account)
     return Result(200, {"ok": True, "role": _s(ctx.b("role")), "fetched_at": _fetched_at()}, "Usunięcie stolikowego - bez ZPRP")
 
 
@@ -1614,3 +1847,9 @@ SIMS: Dict[str, Callable[..., Awaitable[Result]]] = {
 MERGES: Dict[str, Callable[..., Awaitable[Any]]] = {
     name: fn for name, fn in dict(globals()).items() if name.startswith("merge_") and callable(fn)
 }
+
+# Oceny młodych sędziów - osobny moduł (`app/presentation_ratings.py`).
+from app import presentation_ratings as _ratings  # noqa: E402
+
+SIMS.update(_ratings.SIMS)
+MERGES.update(_ratings.MERGES)

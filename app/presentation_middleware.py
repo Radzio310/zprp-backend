@@ -13,6 +13,8 @@ Droga żądania:
    konto), a dla tras z `identity="body"` także treść żądania (RSA `username`,
    `judge_id`, jawne `user`/`judge_id`). Treść buforujemy WYŁĄCZNIE w tym
    przypadku i oddajemy aplikacji nietkniętą, gdy pyta ktoś spoza trybu.
+   `identity="synthetic"`: udawany numer w ścieżce wystarcza (wiersza i tak
+   nie ma w bazie).
 4. Konto prezentacji + trasa zapisu -> aplikacja NIE jest wołana; wpis w
    dzienniku, udawana odpowiedź (`app/presentation_sim.py`). Błąd symulatora
    też NIE przepuszcza zapisu - wraca zwykłe „ok".
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import gzip
 import json
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -164,8 +167,15 @@ class Captured:
         return ""
 
     def json(self) -> Any:
+        raw = bytes(self.body)
+        if "gzip" in self.header("content-encoding").lower():
+            # Bootstrap Obsady pakuje się sam (gdy klient przyjmuje gzip).
+            try:
+                raw = gzip.decompress(raw)
+            except (OSError, EOFError):
+                return None
         try:
-            return json.loads(bytes(self.body).decode("utf-8"))
+            return json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             return None
 
@@ -228,10 +238,14 @@ class PresentationMiddleware:
 
         raw: Optional[bytes] = None
         body: Any = None
+        route = write[0] if write is not None else read[0]
         # Token BAZA, jeśli jest, rozstrzyga sam: w treści bywa numer sędziego, któremu
         # ktoś INNY coś zapisuje (Calendar Master, partner) - to nie jest pytający.
-        body_identity = payload is None and write is not None and write[0].identity == "body"
-        if write is not None and (account is not None or body_identity):
+        body_identity = payload is None and route.identity == "body"
+        if account is None and route.identity == "synthetic" and PS.is_synthetic(params.get("id")):
+            # Udawany numer w ścieżce: wiersza nie ma w bazie, więc to i tak sprawa nakładki.
+            account = "synthetic"
+        if (write is not None and account is not None) or body_identity:
             raw = await _read_body(receive)
             holder["replay"] = _replay(raw, receive)
             ctype = headers.get("content-type", "")

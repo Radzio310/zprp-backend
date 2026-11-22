@@ -28,7 +28,17 @@ from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 log = logging.getLogger("presentation")
 
-AREAS: Tuple[str, ...] = ("market", "obsada", "settlements", "offtimes", "announcements", "events")
+AREAS: Tuple[str, ...] = ("market", "obsada", "settlements", "offtimes", "announcements", "events", "ratings")
+#: Polskie nazwy obszarów (Ustawienia panelu).
+AREA_LABELS: Dict[str, str] = {
+    "market": "Giełda",
+    "obsada": "Obsada",
+    "settlements": "Rozliczenia",
+    "offtimes": "Niedyspozycje",
+    "announcements": "Ogłoszenia",
+    "events": "Wydarzenia i formularze",
+    "ratings": "Oceny młodych",
+}
 DEFAULT_MINUTES = 180
 MIN_MINUTES = 15
 MAX_MINUTES = 480
@@ -100,11 +110,41 @@ def clean_accounts(raw: Any) -> List[Dict[str, str]]:
     return out[:50]
 
 
+#: Obszary, które znał zapis stanu sprzed dodania „ratings" (zapis jako zwykła lista).
+LEGACY_AREAS: Tuple[str, ...] = ("market", "obsada", "settlements", "offtimes", "announcements", "events")
+
+
 def clean_areas(raw: Any) -> List[str]:
     if raw is None:
         return list(AREAS)
     wanted = {_s(a) for a in raw} if isinstance(raw, list) else set()
     return [a for a in AREAS if a in wanted]
+
+
+def unknown_areas(raw: Any) -> List[str]:
+    """Nazwy spoza `AREAS` - PUT /presentation/state odpowiada na nie 400."""
+    return [_s(a) for a in raw or [] if _s(a) not in AREAS] if isinstance(raw, list) else ["?"]
+
+
+def stored_areas(raw: Any) -> List[str]:
+    """Obszary z zapisu stanu. Obszar dodany PO zapisie jest domyślnie włączony.
+
+    Zapis to `{"on": [...], "known": [...]}`; starszy zapis (sama lista) znał
+    `LEGACY_AREAS`. Czego zapis nie znał, tego nikt nie wyłączył.
+    """
+    data = _loads(raw, None)
+    if data is None:
+        return list(AREAS)
+    if isinstance(data, dict):
+        on, known = data.get("on") or [], data.get("known") or list(LEGACY_AREAS)
+    else:
+        on, known = data, list(LEGACY_AREAS)
+    wanted = {_s(a) for a in on} | {a for a in AREAS if a not in {_s(k) for k in known}}
+    return [a for a in AREAS if a in wanted]
+
+
+def areas_record(areas: List[str]) -> Dict[str, Any]:
+    return {"on": [a for a in AREAS if a in set(areas)], "known": list(AREAS)}
 
 
 def clamp_minutes(raw: Any) -> int:
@@ -201,7 +241,7 @@ def _state_from_row(row: Optional[Dict[str, Any]]) -> State:
     return State(
         enabled=bool(row.get("enabled")),
         accounts=clean_accounts(_loads(row.get("accounts_json"), [])),
-        areas=frozenset(clean_areas(_loads(row.get("areas_json"), None))),
+        areas=frozenset(stored_areas(row.get("areas_json"))),
         expires_at=_utc(row.get("expires_at")),
         enabled_by=_s(row.get("enabled_by")) or None,
         updated_at=_utc(row.get("updated_at")),
@@ -287,7 +327,7 @@ async def save_state(
     values = {
         "enabled": bool(enabled),
         "accounts_json": _dumps(accounts),
-        "areas_json": _dumps(areas),
+        "areas_json": _dumps(areas_record(areas)),
         "expires_at": expires,
         "enabled_by": enabled_by if enabled and not previous.active(now) else (previous.enabled_by or enabled_by),
         "updated_at": now,

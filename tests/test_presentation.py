@@ -114,7 +114,7 @@ def env(monkeypatch, tmp_path):
     fake.__getattr__ = lambda name: MagicMock()
     monkeypatch.setitem(sys.modules, "app.db", fake)
     for name in [n for n in sys.modules if n.startswith("app.presentation") or n in ("app.province_me", "app.zprp.assignments")]:
-        sys.modules.pop(name, None)
+        _forget(name)
 
     PS = importlib.import_module("app.presentation_state")
     sim = importlib.import_module("app.presentation_sim")
@@ -207,7 +207,24 @@ def env(monkeypatch, tmp_path):
     yield types.SimpleNamespace(PS=PS, sim=sim, mw=mw, app=app, db=fake.database, calls=calls, fake=fake, pres=pres)
     # Moduły zaimportowane z atrapą bazy nie mogą zostać dla innych testów.
     for name in [n for n in sys.modules if n.startswith("app.") and (n not in before or n.startswith("app.presentation"))]:
-        sys.modules.pop(name, None)
+        _forget(name)
+
+
+def _forget(name: str) -> None:
+    """Moduł znika z `sys.modules` i z pakietu-rodzica.
+
+    Samo `sys.modules.pop` nie wystarcza: `from app import presentation_x`
+    bierze atrybut pakietu `app`, jeśli istnieje - i dostałby stary moduł,
+    zaimportowany z atrapą bazy poprzedniego testu.
+    """
+    sys.modules.pop(name, None)
+    parent, _, child = name.rpartition(".")
+    package = sys.modules.get(parent)
+    if package is not None and getattr(package, child, None) is not None:
+        try:
+            delattr(package, child)
+        except AttributeError:
+            pass
 
 
 async def _true_if(value):
@@ -252,7 +269,8 @@ def test_przelaczanie_tylko_admin(env):
     # admin, który włącza, dopisany automatycznie; login małymi literami
     values = {(a["kind"], a["value"]) for a in state["accounts"]}
     assert ("judge", ADMIN) in values and ("login", "ks_slzpr") in values
-    assert state["areas"] == ["market", "obsada", "settlements", "offtimes", "announcements", "events"]
+    assert state["areas"] == ["market", "obsada", "settlements", "offtimes", "announcements", "events", "ratings"]
+    assert state["area_labels"]["ratings"] == "Oceny młodych"
 
 
 def test_wylaczony_tryb_przepuszcza_zapis(env):

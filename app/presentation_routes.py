@@ -12,7 +12,11 @@ skąd wiemy, kto pyta). Symulatory: `app/presentation_sim.py` (nazwy z `SIMS`).
   * "body" - także treść żądania: zaszyfrowane RSA `username`/`judge_id`
              (trasy /zprp/*, niedyspozycje ZPRP, ogłoszenia - multipart) albo
              jawne `judge_id`. Treść czytamy TYLKO, gdy tryb jest włączony
-             i trasa jest na tej liście.
+             i trasa jest na tej liście. Dotyczy też odczytów (match-form);
+  * "synthetic" - token BAZA albo udawany numer w ścieżce (`{id}` >=
+             `SYNTH_BASE`): takiego wiersza nie ma w bazie, więc żądanie bez
+             tokenu (aplikacja usuwa ocenę gołym `fetch`) i tak dotyczy tylko
+             nakładki. Prawdziwy numer bez tokenu idzie do handlera jak dotąd.
 """
 
 from __future__ import annotations
@@ -42,14 +46,15 @@ class ReadRoute:
     pattern: "re.Pattern[str]"
     area: str
     merge: str
+    identity: str = "jwt"
 
 
 def _w(method: str, path: str, area: str, sim: str, status: int = 200, identity: str = "jwt", label: str = "") -> WriteRoute:
     return WriteRoute(method, re.compile("^" + path + "/?$"), area, sim, status, identity, label or f"{method} {path}")
 
 
-def _r(method: str, path: str, area: str, merge: str) -> ReadRoute:
-    return ReadRoute(method, re.compile("^" + path + "/?$"), area, merge)
+def _r(method: str, path: str, area: str, merge: str, identity: str = "jwt") -> ReadRoute:
+    return ReadRoute(method, re.compile("^" + path + "/?$"), area, merge, identity)
 
 
 MM = "/match-market"
@@ -59,6 +64,7 @@ PS = "/province/settlements"
 PE = "/province-events"
 DF = "/district-forms"
 ANN = "/silesia/announcements"
+YR = "/young_referees/ratings"
 
 WRITE_ROUTES: Tuple[WriteRoute, ...] = (
     # ── giełda ─────────────────────────────────────────────────────────────
@@ -192,6 +198,10 @@ WRITE_ROUTES: Tuple[WriteRoute, ...] = (
     _w("POST", f"{DF}/{ID}/rows/(?P<judge_id>{SEG})/clear", "events", "ok_true", label="Formularz: wyczyszczenie wiersza"),
     _w("POST", f"{DF}/{ID}/rows/bulk", "events", "ok_true", label="Formularz: zmiany grupowe"),
     _w("POST", f"{DF}/{ID}/uploads", "events", "ok_true", label="Formularz: plik"),
+    # ── oceny młodych sędziów ──────────────────────────────────────────────
+    _w("POST", YR, "ratings", "rating_create", 201, label="Ocena młodego sędziego"),
+    _w("PUT", f"{YR}/{ID}", "ratings", "rating_update", identity="synthetic", label="Zmiana oceny młodego sędziego"),
+    _w("DELETE", f"{YR}/{ID}", "ratings", "rating_delete", identity="synthetic", label="Usunięcie oceny młodego sędziego"),
 )
 
 READ_ROUTES: Tuple[ReadRoute, ...] = (
@@ -204,9 +214,17 @@ READ_ROUTES: Tuple[ReadRoute, ...] = (
     _r("GET", f"{CREW}/{ID}", "market", "merge_crew_detail"),
     _r("GET", f"{PA}/draft", "obsada", "merge_draft"),
     _r("GET", f"{PA}/bootstrap", "obsada", "merge_bootstrap"),
+    # obsada po udawanym zapisie (nakładka `lineup`, `app/presentation_lineup.py`)
+    _r("GET", "/province/assignments", "obsada", "merge_assignments_list"),
+    _r("GET", f"/province/assignments/(?P<match_id>{SEG})", "obsada", "merge_assignments_detail"),
+    _r("GET", "/province/obsada-view/data", "obsada", "merge_obsada_view"),
+    _r("GET", "/province/obsada-view/changes", "obsada", "merge_obsada_changes"),
+    _r("POST", "/zprp/obsada/match-form", "obsada", "merge_match_form", identity="body"),
     _r("GET", ANN, "announcements", "merge_announcements"),
     _r("GET", f"{PE}/feed", "events", "merge_event_feed"),
     _r("GET", f"{PE}/item/{ID}", "events", "merge_event_item"),
+    _r("GET", YR, "ratings", "merge_ratings_list"),
+    _r("GET", f"{YR}/{ID}", "ratings", "merge_rating_detail", identity="synthetic"),
 )
 
 
@@ -237,4 +255,7 @@ def route_table() -> List[Dict[str, str]]:
     return [
         {"method": r.method, "path": r.pattern.pattern, "area": r.area, "sim": r.sim, "label": r.label}
         for r in WRITE_ROUTES
+    ] + [
+        {"method": r.method, "path": r.pattern.pattern, "area": r.area, "sim": r.merge, "label": "odczyt z nakładką"}
+        for r in READ_ROUTES
     ]
