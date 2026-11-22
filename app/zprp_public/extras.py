@@ -930,7 +930,7 @@ async def referee_refresh(referee_id: str) -> dict[str, Any]:
     since = datetime.now(timezone.utc) - timedelta(days=1)
     rows = await database.fetch_all(
         select(M.c.match_id)
-        .where(and_(or_(M.c.referee_1_id == referee_id, M.c.referee_2_id == referee_id), M.c.scheduled_at >= since))
+        .where(and_(_who(referee_id), M.c.scheduled_at >= since))
         .order_by(M.c.scheduled_at.asc()).limit(10)
     )
     async def run() -> dict[str, Any]:
@@ -957,11 +957,22 @@ _REF_TTL = 120.0
 
 
 def _ref_cols() -> tuple:
-    return (M.c.referee_1_id, M.c.referee_1_name, M.c.referee_2_id, M.c.referee_2_name)
+    return tuple(M.c[col] for slot in RP.OFFICIAL_SLOTS for col in slot)
 
 
 def _who(referee_id: str):
-    return or_(M.c.referee_1_id == referee_id, M.c.referee_2_id == referee_id)
+    """Każde miejsce w obsadzie: para, delegaci, sekretarz i mierzący czas (zgłoszenie
+    z 22.11.2026: mecz przy stoliku nie pojawiał się w profilu sędziego)."""
+    return or_(*(M.c[idc] == referee_id for idc, _ in RP.OFFICIAL_SLOTS))
+
+
+async def _role_cards(rows: list[dict], referee_id: str) -> list[dict]:
+    """Karty meczów z rolą sędziego w obsadzie (`role` = napis, `role_kind` = field | table | delegate)."""
+    cards = await _cards(rows)
+    for card in cards:
+        label, kind, _ = RS.role_of(card, referee_id)
+        card["role"], card["role_kind"] = label, kind
+    return cards
 
 
 def _placeholder_404() -> HTTPException:
@@ -972,7 +983,7 @@ def _placeholder_404() -> HTTPException:
 async def _referee_names(referee_id: str) -> Counter:
     """Nazwiska przy tym numerze (oczyszczone, z liczbą meczów) - także znaczniki braku obsady."""
     names: Counter = Counter()
-    for idc, nmc in RP.REFEREE_SLOTS:
+    for idc, nmc in RP.OFFICIAL_SLOTS:
         for r in await database.fetch_all(
             select(M.c[nmc].label("name"), func.count().label("n")).where(M.c[idc] == referee_id).group_by(M.c[nmc])
         ):
@@ -1054,9 +1065,9 @@ async def _referee_profile(referee_id: str, limit: int) -> dict[str, Any]:
         e["matches"] += int(g["n"])
     cards: list[dict] = []
     if limit:
-        cards = await _cards(await database.fetch_all(
+        cards = await _role_cards([_dict(r) for r in await database.fetch_all(
             select(*_card_cols(), *_ref_cols()).where(_who(referee_id)).order_by(M.c.scheduled_at.desc()).limit(limit)
-        ))
+        )], referee_id)
     career = scope["career"]
     P.note_referee_total(referee_id, career["matches"])  # wyszukiwarka pokaże tę samą liczbę
     return {
@@ -1091,7 +1102,7 @@ async def _referee_matches(referee_id: str, season_id: str, limit: int, offset: 
         "finished": finished,
         "not_played": len(rows) - finished,
         "limit": limit, "offset": offset,
-        "items": await _cards(rows[offset: offset + limit]),
+        "items": await _role_cards(rows[offset: offset + limit], referee_id),
     }
 
 
@@ -1141,14 +1152,13 @@ async def _referee_stats(referee_id: str, season_id: str) -> dict[str, Any]:
     clubs = [{"club_id": cid, "name": (lookup.get(cid) or {}).get("name"), "logo_url": (lookup.get(cid) or {}).get("logo_url"),
               "city": (lookup.get(cid) or {}).get("city"), "matches": n} for cid, n in club_counts]
 
-    cards = await _cards(rows)  # wiersze mają kolumny pary, więc karta niesie obu sędziów
+    cards = await _role_cards(rows, referee_id)  # wiersze mają kolumny obsady, więc karta niesie parę i rolę
     now = TP.warsaw_now()
     upcoming = sorted((c for c in cards if c["status"] == "scheduled" and c.get("scheduled_at")
                        and TP.is_upcoming_at(c["scheduled_at"], now, R.UPCOMING_GRACE)),
                       key=lambda c: TP.kickoff_sort_key(c["scheduled_at"]))
     recent = [c for c in cards if c["status"] == "finished"][:5]
-    names = Counter(n for n in (_clean_ref_name((r["referee_1_name"] if r["referee_1_id"] == referee_id else r["referee_2_name"]) or "")
-                                for r in rows) if not RP.is_blank_name(n))
+    names = Counter(n for n in (_clean_ref_name(RS.role_of(r, referee_id)[2] or "") for r in rows) if not RP.is_blank_name(n))
     return {
         "referee_id": referee_id,
         "name": (names.most_common(1)[0][0] if names else None) or scope["name"],

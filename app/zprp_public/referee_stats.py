@@ -1,7 +1,8 @@
 """Statystyki sezonu sędziego dla Pod Ręką (czyste funkcje, bez bazy).
 
-Wejście: wiersze meczów, w których sędzia stał w parze (kolumny kart +
-`referee_1_*`/`referee_2_*`), oraz sumy z protokołów zawodników per mecz.
+Wejście: wiersze meczów, w których sędzia stał w obsadzie - w parze, przy
+stoliku albo jako delegat (kolumny kart + `referee_*`, `delegate_*`,
+`secretary_*`, `timekeeper_*`), oraz sumy z protokołów zawodników per mecz.
 Wyjście: podział na rozgrywki i kategorie, partnerzy w parze, hale i miasta,
 przybliżone kilometry, średnie bramek i kar 2 min, czerwone kartki, kluby.
 
@@ -45,7 +46,7 @@ def career_totals(groups: list[dict]) -> dict[str, Any]:
     """Kariera bez limitów z wierszy (season_id, competition_id, n) - jedno GROUP BY w bazie.
 
     Ta sama definicja meczu co profil i wyszukiwarka: mecz, w którym sędzia stał
-    na którejkolwiek pozycji pary, liczony raz."""
+    na którejkolwiek pozycji obsady (para, stolik, delegat), liczony raz."""
     by_season: Counter = Counter()
     comps: set = set()
     total = 0
@@ -76,6 +77,29 @@ def partner_of(row: dict, referee_id: str) -> tuple[Optional[str], Optional[str]
     else:
         return None, None
     return RP.clean_official(pid, pname)
+
+
+#: Rola w obsadzie meczu (kolumna bez `_id`) -> (napis, rodzaj). Kolejność = pierwszeństwo,
+#: gdy ten sam numer stoi w dwóch miejscach obsady.
+ROLES = (
+    ("referee_1", "Sędzia", "field"),
+    ("referee_2", "Sędzia", "field"),
+    ("delegate_1", "Delegat", "delegate"),
+    ("delegate_2", "Delegat", "delegate"),
+    ("secretary", "Sekretarz", "table"),
+    ("timekeeper", "Mierzący czas", "table"),
+)
+
+
+def role_of(row: dict, referee_id: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """(napis roli, rodzaj, nazwisko z obsady) osoby w meczu albo (None, None, None).
+
+    Profil sędziego pokazuje KAŻDY mecz, w którym ten numer stoi w obsadzie: na
+    boisku, przy stoliku (sekretarz, mierzący czas) i jako delegat."""
+    for col, label, kind in ROLES:
+        if referee_id and row.get(f"{col}_id") == referee_id:
+            return label, kind, row.get(f"{col}_name")
+    return None, None, None
 
 
 def _finished(row: dict) -> bool:

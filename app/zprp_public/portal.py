@@ -1054,12 +1054,13 @@ def _match_referees(rows: list[dict], q: str, limit: int) -> list[dict]:
 
 
 async def _referee_match_totals() -> dict[str, int]:
-    """Mecze sędziego w całej karierze: różne mecze z jego id na którejkolwiek pozycji pary,
-    także te bez nazwiska w terminarzu - ta sama definicja co profil (`career.matches`)."""
-    pairs = union(
-        select(M.c.match_id, M.c.referee_1_id.label("rid")).where(and_(M.c.referee_1_id.isnot(None), M.c.referee_1_id != "")),
-        select(M.c.match_id, M.c.referee_2_id.label("rid")).where(and_(M.c.referee_2_id.isnot(None), M.c.referee_2_id != "")),
-    ).subquery()
+    """Mecze sędziego w całej karierze: różne mecze z jego id na którejkolwiek pozycji obsady
+    (para, delegaci, stolik), także te bez nazwiska w terminarzu - ta sama definicja co profil
+    (`career.matches`)."""
+    pairs = union(*(
+        select(M.c.match_id, M.c[idc].label("rid")).where(and_(M.c[idc].isnot(None), M.c[idc] != ""))
+        for idc, _ in RP.OFFICIAL_SLOTS
+    )).subquery()
     rows = await database.fetch_all(select(pairs.c.rid, func.count().label("n")).group_by(pairs.c.rid))
     return {r["rid"]: int(r["n"]) for r in rows}
 
@@ -1074,7 +1075,7 @@ def note_referee_total(referee_id: str, matches: int) -> None:
 async def _build_referee_index() -> list[dict]:
     acc: dict[str, dict] = {}
     marked: dict[str, int] = {}  # mecze numeru przy znaczniku braku obsady („--- ---")
-    for idc, nmc in RP.REFEREE_SLOTS:
+    for idc, nmc in RP.OFFICIAL_SLOTS:
         rows = await database.fetch_all(
             select(M.c[idc].label("rid"), M.c[nmc].label("rname"), func.count().label("n"))
             .where(and_(M.c[idc].isnot(None), M.c[idc] != "", M.c[nmc].isnot(None), M.c[nmc] != ""))
