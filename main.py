@@ -252,6 +252,11 @@ app = FastAPI(title="BAZA - API")
 # ją owija - preflight i odpowiedź 401 mają nagłówki CORS. Bez CLIENT_KEYS
 # w env jest wyłączona (nic się nie zmienia).
 from app.client_key_guard import ClientKeyMiddleware, router as client_key_router
+# Tryb prezentacji (app/presentation_middleware.py): dodany PRZED bramką klucza,
+# więc leży POD nią - bramka i CORS obsługują też udawane odpowiedzi. Przy
+# wyłączonym trybie przepuszcza wszystko bez czytania treści żądania.
+from app.presentation_middleware import PresentationMiddleware
+app.add_middleware(PresentationMiddleware)
 app.add_middleware(ClientKeyMiddleware)
 
 app.add_middleware(
@@ -343,6 +348,10 @@ app.mount("/static", _CachedStaticFiles(directory=STATIC_DIR), name="static")
 
 app.include_router(auth_router)
 app.include_router(client_key_router)
+from app.presentation import router as presentation_router
+from app.province_me import router as province_me_router
+app.include_router(presentation_router)
+app.include_router(province_me_router)
 app.include_router(proxy_router)
 app.include_router(edit_router)
 # Przełącznik tokenu ProEl przy meczu. Stoi przy rodzinie akcji ZPRP

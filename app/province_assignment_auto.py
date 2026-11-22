@@ -867,7 +867,11 @@ async def run_auto(payload: AutoRequest):
     }
 
     rows = plan_rows(plan, needs)
-    run_id = await database.fetch_val(
+    from app.presentation_state import dry_run
+
+    # Tryb prezentacji (`app/presentation_sim.py`): propozycje liczone naprawdę,
+    # ale przebieg nie trafia do historii widocznej dla innych obsadowych.
+    run_id = None if dry_run() else await database.fetch_val(
         insert(province_assignment_runs)
         .values(
             province=key,
