@@ -75,13 +75,18 @@ def env(monkeypatch, tmp_path):
         sys.modules.pop(name, None)
 
 
+def _squad(first: int, n: int = 6):
+    """Reszta składu na karcie - prawdziwy mecz ma co najmniej piątkę z każdej strony."""
+    return [{"number": first + i, "fullName": f"Gracz{first + i} Jan"} for i in range(n)]
+
+
 def _blob(host="Polska", guest="Słowenia", **cfg):
     return {
         "matchConfig": {"matchNumber": "EHF/1", "hostTeamName": host, "guestTeamName": guest, "halfTime": 30,
                         "referee1": "Kowalski Jan", "referee2": "--- ---", "venueCity": "Gliwice",
                         "extras": {"matchDate": "2026-11-06", "matchTime": "18:30"},
-                        "hostPlayerCards": [{"number": 7, "fullName": "Nowak Adam"}],
-                        "guestPlayerCards": [{"number": 3, "fullName": "Horvat Luka"}],
+                        "hostPlayerCards": [{"number": 7, "fullName": "Nowak Adam"}] + _squad(8),
+                        "guestPlayerCards": [{"number": 3, "fullName": "Horvat Luka"}] + _squad(4),
                         **cfg},
         "scoreHost": 1, "scoreGuest": 0, "mainTime": 300_000, "isFirstHalf": True, "isGameRunning": True,
         "savedAtMs": 1_700_000_000_000,
@@ -172,3 +177,25 @@ def test_obcy_klucz_i_szkoleniowy_to_404(env):
         return out
 
     assert run(env, go) == [404, 404, 404]
+
+
+def test_proby_w_proelu_nie_sa_meczem():
+    """Decyzja 22.11.2026: „W - Y" z datą za dwa lata, „Hdhh - Vhggj", 2:2 bez składu - nie do portalu."""
+    now = datetime(2026, 11, 22, 18, 0)
+    real = {**_blob("Niemcy", "Dania"), "scoreHost": 20, "scoreGuest": 18}
+    assert FR.is_presentable(real, "finished", now=now)
+    assert FR.is_presentable(_blob(), "in_progress", now=now)  # mecz w trakcie: wynik jeszcze mały
+    assert not FR.is_presentable({**real, "matchConfig": {**real["matchConfig"], "hostTeamName": "W", "guestTeamName": "Y"}}, "finished", now=now)
+    assert not FR.is_presentable({**real, "matchConfig": {**real["matchConfig"], "hostTeamName": "Hdhh"}}, "finished", now=now)
+    assert not FR.is_presentable({**real, "matchConfig": {**real["matchConfig"], "guestTeamName": "niemcy"}}, "finished", now=now)
+    future = {**real["matchConfig"], "extras": {"matchDate": "2028-11-11", "matchTime": "12:00"}}
+    assert not FR.is_presentable({**real, "matchConfig": future}, "finished", now=now)
+    assert not FR.is_presentable({**real, "scoreHost": 2, "scoreGuest": 2}, "finished", now=now)
+    no_ref = {**real["matchConfig"], "referee1": "", "referee2": "--- ---"}
+    assert not FR.is_presentable({**real, "matchConfig": no_ref}, "finished", now=now)
+    thin = {**real["matchConfig"], "guestPlayerCards": [{"number": 3, "fullName": "Horvat Luka"}]}
+    assert not FR.is_presentable({**real, "matchConfig": thin}, "finished", now=now)
+    assert FR.is_real_team_name("Zew Świebodzin") and FR.is_real_team_name("Nowa sól")
+    assert not FR.is_real_team_name("1") and not FR.is_real_team_name("Vhggj") and not FR.is_real_team_name("AAA")
+    assert not FR.is_real_team_name("Test1") and not FR.is_real_team_name("Drużyna A") and not FR.is_real_team_name("próba 2")
+    assert FR.is_real_team_name("Kolstad") and FR.is_real_team_name("Vive Kielce") and FR.is_real_team_name("Czersk")

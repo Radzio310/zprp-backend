@@ -100,7 +100,9 @@ async def load_cards(rows: List[Dict[str, Any]], want: Optional[int] = None) -> 
             continue
         got = await database.fetch_one(select(T.c.data_json).where(T.c.match_number == key))
         blob = _blob(_row(got).get("data_json") if got else None)
-        if not F.is_friendly_blob(blob):
+        # Próba w ProElu („W - Y", 2:2, bez składu i sędziów) nie jest meczem - znika z portalu,
+        # zapis zostaje (decyzja właściciela 22.11.2026).
+        if not F.is_friendly_blob(blob) or not F.is_presentable(blob, r.get("status"), r.get("doc_at")):
             if len(_cards_cache) > _CACHE_MAX:
                 _cards_cache.clear()
             _cards_cache[ck] = None

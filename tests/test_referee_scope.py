@@ -126,14 +126,14 @@ async def _seed(db, T):
     n = 0
 
     async def match(sid, comp, days_ago, *, r1="r1", r1_name="WITKOWICZ Radosław", r2="r2", r2_name="PARA Adam",
-                    city="Kielce", hall="Hala Kielce", played=True, home="c1", away="c2"):
+                    city="Kielce", hall="Hala Kielce", played=True, home="c1", away="c2", **extra):
         nonlocal n
         n += 1
         await ins("zprp_public_matches", match_id=f"m{n}", season_id=sid, competition_id=comp, competition_name=f"Liga {comp}",
                   home_team_id=f"t{home}", away_team_id=f"t{away}", home_club_id=home, away_club_id=away,
                   home_team_name=home, away_team_name=away, score_home=25 if played else None, score_away=22 if played else None,
                   scheduled_at=now - timedelta(days=days_ago), venue_name=hall, venue_city=city,
-                  referee_1_id=r1, referee_1_name=r1_name, referee_2_id=r2, referee_2_name=r2_name, **_h())
+                  referee_1_id=r1, referee_1_name=r1_name, referee_2_id=r2, referee_2_name=r2_name, **extra, **_h())
 
     # S1 (bieżący): 2 rozegrane + 1 przed nami, jeden w Opolu.
     await match("S1", "K1", 10)
@@ -149,6 +149,14 @@ async def _seed(db, T):
         await match("Sm", "Km", 800 - i, r1_name="", city="Wieś Nieznana")
     # r3 gwizdał tylko w S0 - domyślny zakres to ostatni sezon z meczami.
     await match("S0", "K0", 300, r1="r3", r1_name="TRZECI Jan", r2="r4", r2_name="CZWARTY Ewa")
+    # r6: raz na boisku, raz przy stoliku (dziś wieczorem), raz jako delegat i raz jako mierzący czas.
+    await match("S1", "K1", 20, r1="r6", r1_name="STOLIKOWY Krzysztof", r2="r4", r2_name="CZWARTY Ewa")
+    await match("S1", "K1", -0.2, r1="r7", r1_name="SIODMY Jan", r2="r8", r2_name="OSMY Ewa", played=False,
+                secretary_id="r6", secretary_name="STOLIKOWY Krzysztof")
+    await match("S1", "K1", -5, r1="r7", r1_name="SIODMY Jan", r2="r8", r2_name="OSMY Ewa", played=False,
+                delegate_1_id="r6", delegate_1_name="STOLIKOWY Krzysztof")
+    await match("S1", "K1", 7, r1="r7", r1_name="SIODMY Jan", r2="r8", r2_name="OSMY Ewa",
+                timekeeper_id="r6", timekeeper_name="STOLIKOWY Krzysztof")
 
 
 def run(env, factory):
@@ -250,3 +258,52 @@ def test_wyszukiwarka_liczy_kariere_jak_profil(env):
     assert r1["matches"] == TOTAL == prof["matches_total"]   # także 4 mecze bez nazwiska w terminarzu
     assert r1["name"] == "WITKOWICZ Radosław"
     assert hits[0]["referee_id"] == "r1" and hits[0]["matches"] == TOTAL
+
+
+def test_mecze_przy_stoliku_i_jako_delegat(env):
+    """Zgłoszenie z 22.11.2026: mecz, w którym sędzia jest sekretarzem, nie pojawiał się w profilu."""
+    async def go(x, portal):
+        index = await portal._build_referee_index()
+        return (await x.referee_profile("r6", 0), await x.referee_matches("r6", "", 1000, 0),
+                await x.referee_stats("r6", ""), index)
+
+    prof, ms, st, index = run(env, go)
+    assert prof["matches_total"] == 4 and prof["name"] == "STOLIKOWY Krzysztof"
+    assert ms["count"] == 4 == st["matches"]
+    roles = {i["role"]: i["role_kind"] for i in ms["items"]}
+    assert roles == {"Sędzia": "field", "Sekretarz": "table", "Delegat": "delegate", "Mierzący czas": "table"}
+    # Najbliższy mecz to dzisiejszy przy stoliku, nie dalszy jako delegat.
+    assert st["next"]["role"] == "Sekretarz" and st["upcoming_count"] == 2
+    assert st["name"] == "STOLIKOWY Krzysztof"
+    # Partner tylko z meczu na boisku.
+    assert [p["name"] for p in st["partners"]] == ["CZWARTY Ewa"]
+    r6 = next(e for e in index if e["referee_id"] == "r6")
+    assert r6["matches"] == 4
+
+
+def test_odswiezenie_obejmuje_stolik_i_data_bez_strefy(env, monkeypatch):
+    """POST /referees/{id}/refresh: `scheduled_at` jest bez strefy - data ze strefą to 500 na Postgresie."""
+    import app.zprp_public.ondemand as OD
+
+    seen: list = []
+
+    async def fake_refresh(match_id):
+        seen.append(match_id)
+        return {"refreshed": False, "changed": False}
+
+    monkeypatch.setattr(OD, "refresh_match", fake_refresh)
+
+    async def go(x, _p):
+        params: list = []
+        real = x.database.fetch_all
+
+        async def spy(q, *a, **kw):
+            params.extend(v for v in q.compile().params.values() if isinstance(v, datetime))
+            return await real(q, *a, **kw)
+
+        monkeypatch.setattr(x.database, "fetch_all", spy)
+        return await x.referee_refresh("r6"), params
+
+    out, params = run(env, go)
+    assert out["checked"] == 2 and len(seen) == 2          # dziś przy stoliku i za 5 dni jako delegat
+    assert params and all(p.tzinfo is None for p in params)
