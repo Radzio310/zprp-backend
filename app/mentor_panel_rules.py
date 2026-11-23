@@ -1345,15 +1345,37 @@ def situations_from_sheet(evaluation: Mapping[str, Any], source: str, author: An
         if not isinstance(item, Mapping):
             continue
         time_text = s(item.get("time"))
-        out.append({
+        row = {
             "source": source,
             "author": author,
             "category": item.get("category"),
             "description": item.get("description"),
             "time": time_text or None,
             "match_ms": clock_to_ms(time_text),
-        })
+        }
+        row["key"] = situation_key(row)
+        out.append(row)
     return out
+
+
+def situation_key(row: Mapping[str, Any]) -> str:
+    """Stabilny klucz sytuacji z arkusza (do poprawionego czasu): skrót źródła, czasu, kategorii i opisu.
+    Autor nie wchodzi do klucza - współautor dopisany później nie gubi poprawki."""
+    import hashlib
+
+    raw = "|".join(s(row.get(k)).strip().lower() for k in ("source", "time", "category", "description"))
+    return "s_" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:14]
+
+
+def unique_situation_keys(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Dwie identyczne sytuacje w jednym meczu (np. ten sam wpis w dwóch arkuszach) dostają kolejne przyrostki."""
+    seen: Dict[str, int] = {}
+    for row in rows:
+        k = row.get("key") or situation_key(row)
+        n = seen.get(k, 0)
+        seen[k] = n + 1
+        row["key"] = k if n == 0 else f"{k}-{n + 1}"
+    return rows
 
 
 def clock_to_ms(text: Any) -> Optional[int]:

@@ -4790,6 +4790,10 @@ mentor_montages, mentor_montage_assets = _define_mentor_montage_tables(metadata)
 from app.mentor_channel_tables import define_tables as _define_mentor_channel_tables
 mentor_channels, mentor_channel_videos = _define_mentor_channel_tables(metadata)
 
+# Sytuacje z arkuszy: wspólnie poprawiony czas w nagraniu (23.11.2026, `app/mentor_situation_tables.py`, sekcja 17 kontraktu).
+from app.mentor_situation_tables import define_tables as _define_mentor_situation_tables
+(mentor_situation_times,) = _define_mentor_situation_tables(metadata)
+
 # Mecze ręczne wspólne (31.10.2026) i ręczne podpięcie ProEla w panelu pary (`app/shared_match_tables.py`, kontrakt `docs/mecze-wspolne-api.md`).
 from app.shared_match_tables import define_tables as _define_shared_match_tables
 (

@@ -416,10 +416,14 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
         situations += R.situations_from_sheet(R.json_value(r.get("evaluation_json"), {}), "delegate", r.get("delegate_name"))
     for m in mentor_shapes:
         situations += R.situations_from_sheet(m["sheet"], "mentor", " + ".join(a["name"] for a in m["authors"]))
+    R.unique_situation_keys(situations)
+    from app.mentor_situations import room_times
     return {
         "match": card, "videos": videos, "clips": clips, "shots": await room_shots(ctx, mid), "markers_from_app": markers,
         "timeline": timeline,
         "sheet_situations": situations,
+        # Wspólnie poprawiony czas sytuacji w nagraniach (sekcja 17): sytuacja gra wtedy jak klip.
+        "situation_times": await room_times(ctx, mid) if situations else [],
         "delegate_sheets": [delegate_sheet_shape(r) for r in delegate], "mentor_sheets": mentor_shapes,
         **({"sealed": sealed} if sealed and sealed.get("sheets") else {}),
         "threads": threads, "rev": ctx["rev"],
@@ -602,6 +606,7 @@ def _assemble() -> APIRouter:
     from app.mentor_panel_media import router as media_router
     from app.mentor_montage import router as montage_router
     from app.mentor_channels import router as channels_router
+    from app.mentor_situations import router as situations_router
     from app.mentor_speech import router as speech_router
     from app.mentor_panel_reports import router as reports_router
     from app.mentor_panel_streams import router as streams_router
@@ -610,7 +615,7 @@ def _assemble() -> APIRouter:
 
     combined = APIRouter()
     for part in (auth_router, router, library_router, media_router, reports_router, handoff_router, streams_router, bastion_router, download_router, veo_router,
-                 upload_groups_router, montage_router, channels_router, speech_router):
+                 upload_groups_router, montage_router, channels_router, speech_router, situations_router):
         combined.include_router(part)
     return combined
 

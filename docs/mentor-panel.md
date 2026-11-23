@@ -960,3 +960,14 @@ reguły `app/mentor_channel_rules.py`, tabele `app/mentor_channel_tables.py` (`m
   Bez magazynu R2 łączenie połówek odpowiada 503 `STORAGE_OFF`.
 - Ponowny przegląd aktualizuje propozycje, ale nie cofa decyzji (dodane, odrzucone, wybór ręczny). Film już podpięty do
   meczu pary (ten sam adres YouTube) wraca jako `added`.
+
+## 17. Sytuacje z arkuszy - poprawiony czas w nagraniu (23.11.2026)
+
+Sytuacja z arkusza (`sheet_situations`) ma teraz stabilny `key` (`s_` + skrót źródła, czasu, kategorii i opisu; autor nie
+wchodzi do klucza; dubel w meczu dostaje `-2`, `-3`). Panel wylicza z minuty meczu sekundę nagrania; para i mentorzy z prawem
+`video` mogą ją poprawić RAZ dla wszystkich - początek i koniec w konkretnym nagraniu (sytuacja gra wtedy jak klip).
+
+- `PUT /pairs/{p}/matches/{m}/situations/{key}/time` `{video_id, start_s, end_s}` - zapis/zmiana (koniec po początku, max `MAX_CLIP_S`,
+  dziesiąte części sekundy). Odpowiedź: `{key, video_id, start_s, end_s, updated_by, updated_at}`.
+- `DELETE /pairs/{p}/matches/{m}/situations/{key}/time?video_id=` - powrót do czasu automatycznego.
+- Pokój meczu: `situation_times: [...]` (ten sam kształt). Zmiany podbijają `rev` w zakresie `videos` (odświeżenie na żywo).
