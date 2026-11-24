@@ -118,6 +118,7 @@ async def refresh_pairs(judge_ids: Iterable[Any], actor_id: str = "", match_id: 
         for pair in touched:
             C.forget_matches(pair["pair_key"])
             await C.touch(pair["pair_id"], actor_id, "shared_match_changed", "matches", card_id(match_id) if match_id else None, {})
+            C.forget_matches(pair["pair_key"])  # po podbiciu rev: odczyt w trakcie nie zostawia starej listy w pamięci
         return len(touched)
     except Exception:  # noqa: BLE001 - odświeżenie panelu nie cofa zapisu meczu
         logger.warning("mecz wspólny: odświeżenie par nieudane", exc_info=True)
