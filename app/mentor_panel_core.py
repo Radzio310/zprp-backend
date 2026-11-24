@@ -764,6 +764,88 @@ async def enriched_pair_cards(ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [dict(c, home=dict(c["home"]), away=dict(c["away"])) for c in found]
 
 
+# ─── Usunięte mecze (zdjęte z obsady / skasowane ręczne), których dane żyją ──
+
+REMOVED_LIMIT = 200
+
+
+async def _orphan_ids(ctx: Dict[str, Any], current_ids: Iterable[str], only: str = "") -> List[str]:
+    """`match_id` z danymi pary (nagrania, klipy, wątki, oceny), których nie ma wśród aktualnych kart.
+
+    Mecz bez żadnych danych nie trafia tu - po prostu znika z panelu. Trybuna (`tr_`) ma własne źródło.
+    """
+    pair_id, key = ctx["pair_id"], ctx["pair_key"]
+    found: set = set()
+
+    def take(value: Any) -> None:
+        mid = R.s(value)
+        if mid and not mid.startswith("tr_") and (not only or mid == only):
+            found.add(mid)
+
+    try:
+        for query in (
+            select(mentor_match_videos.c.match_id).where(mentor_match_videos.c.pair_key == key).where(mentor_match_videos.c.deleted_at.is_(None)),
+            select(mentor_clips.c.match_id).where(mentor_clips.c.pair_id == pair_id).where(mentor_clips.c.deleted_at.is_(None)),
+            select(mentor_threads.c.match_id).where(mentor_threads.c.pair_id == pair_id),
+            select(mentor_evaluations.c.match_id).where(mentor_evaluations.c.pair_key == key),
+        ):
+            for r in await rows(query.distinct()):
+                take(r.get("match_id"))
+        for d in await delegate_sheet_rows(ctx["judge_ids"], [only] if only else []):
+            take(d.get("match_id"))
+    except Exception:  # noqa: BLE001 - sekcja usuniętych nie psuje listy meczów
+        logger.warning("mentor: odczyt danych usuniętych meczów nieudany", exc_info=True)
+    current = {R.s(i) for i in current_ids}
+    return sorted(i for i in found if i not in current)[:REMOVED_LIMIT]
+
+
+async def _removed_base_card(match_id: str) -> Dict[str, Any]:
+    """Karta usuniętego meczu z tego, co po nim zostało (wiersz meczu wspólnego, monitor, hurtownia, archiwum)."""
+    if match_id.startswith("my:"):
+        from app.db import shared_match_members, shared_matches
+        from app.shared_match_pair import card_from_shared
+
+        row = await one(select(shared_matches).where(shared_matches.c.id == match_id[3:]))
+        if row:
+            crew = await rows(select(shared_match_members).where(shared_match_members.c.match_id == row["id"]))
+            return card_from_shared(row, crew)
+    else:
+        row = await one(select(province_matches.c.match_id, province_matches.c.match_at, province_matches.c.state_json)
+                        .where(province_matches.c.match_id == match_id).order_by(province_matches.c.updated_at.desc()).limit(1))
+        if row:
+            return R.card_from_state(match_id, R.json_value(row.get("state_json"), {}), row.get("match_at"))
+        row = await one(select(zprp_public_matches).where(zprp_public_matches.c.match_id == match_id))
+        if row:
+            return R.card_from_public(row, {}, None)
+        row = await one(select(zprp_archive_matches.c.match_id, zprp_archive_matches.c.code, zprp_archive_matches.c.match_at,
+                               zprp_archive_matches.c.slim_json).where(zprp_archive_matches.c.match_id == match_id).limit(1))
+        if row:
+            return R.card_from_archive(row)
+    return R.base_card(match_id)
+
+
+async def removed_pair_cards(ctx: Dict[str, Any], current_cards: List[Dict[str, Any]], only: str = "") -> List[Dict[str, Any]]:
+    """Karty meczów zdjętych z obsady / skasowanych, które mają dane pary (z flagą `removed`), od najnowszego."""
+    current = set()
+    for c in current_cards:
+        current.update({R.s(c.get("match_id")), R.s(c.get("zprp_match_id"))})
+        if R.s(c.get("shared_id")):
+            current.add("my:" + R.s(c["shared_id"]))
+    ids = await _orphan_ids(ctx, current, only)
+    if not ids:
+        return []
+    cards = []
+    for mid in ids:
+        card = await _removed_base_card(mid)
+        card["removed"] = True
+        cards.append(card)
+    cards = await enrich_cards(ctx, cards)
+    for c in cards:
+        c["removed"] = True
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return sorted(cards, key=lambda c: R.aware(c.get("scheduled_at")) or epoch, reverse=True)
+
+
 async def match_card(ctx: Dict[str, Any], match_id: str, *, required: bool = True) -> Optional[Dict[str, Any]]:
     if R.s(match_id).startswith("tr_"):
         # Mecz z Trybuny (cudzy mecz oglądany przez parę): ta sama karta, inne źródło (`mentor_watched_matches`).
@@ -776,6 +858,10 @@ async def match_card(ctx: Dict[str, Any], match_id: str, *, required: bool = Tru
         cards = [c for c in all_cards if R.s(c.get("shared_id")) == R.s(match_id)[3:]]
     if not cards:  # aplikacja zna numer ZPRP meczu wspólnego, a dane pary wiszą pod `my:` (collapse_linked)
         cards = [c for c in all_cards if R.s(c.get("zprp_match_id")) == R.s(match_id) and R.s(c.get("match_id")).startswith("my:")]
+    if not cards:  # mecz zdjęty z obsady / skasowany, ale z danymi pary: wejście do karty działa jak dotąd
+        gone = await removed_pair_cards(ctx, all_cards, only=R.s(match_id))
+        if gone:
+            return gone[0]
     if not cards:
         if required:
             raise err(404, "MATCH_NOT_FOUND", "To nie jest mecz tej pary.")

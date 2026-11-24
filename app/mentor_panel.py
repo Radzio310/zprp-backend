@@ -285,6 +285,8 @@ async def matches(pair_id: str, season: str = Query("", max_length=20), starred:
     return {
         "matches": R.filter_cards(cards, season=season, starred=_tristate(starred), submitted=_tristate(submitted), q=q),
         "seasons": R.seasons_of(cards),
+        # Mecze zdjęte z obsady / skasowane, które mają dane pary (sekcja „Usunięte mecze”); bez danych nie ma ich wcale.
+        "removed": await C.removed_pair_cards(ctx, cards),
         "rev": ctx["rev"],
     }
 
