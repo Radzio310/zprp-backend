@@ -28,6 +28,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import district_form_info as INFO
 from app import district_form_schema as SC
+from app import district_form_slots as SLOTS
 from app import district_forms_rules as R
 from app.db import (
     database,
@@ -105,6 +106,7 @@ def parse_form(raw: Any) -> Dict[str, Any]:
     form["audience_json"] = R.loads(form.get("audience_json"), {})
     form["cover_json"] = R.loads(form.get("cover_json"), {}) or None
     form["info_json"] = INFO.stored_info(R.loads(form.get("info_json"), {}))
+    form["slot_plans"] = R.loads(form.get("slot_plans"), {}) or {}
     return form
 
 
@@ -360,6 +362,10 @@ def detail(ctx: Ctx, *, event: Optional[Mapping[str, Any]] = None, viewer_name: 
             "viewer": INFO.viewer_info(me, full_name),
         }
     )
+    if ctx.kind == "form":
+        board = slot_board(ctx, names=not bool((ctx.form.get("settings_json") or {}).get("anonymous")))
+        if board:
+            out["slot_board"] = board
     if ctx.manager:
         out["web_code"] = ctx.form.get("web_code")
     return out
@@ -647,6 +653,7 @@ async def write_answers(
         same_retry = bool(client) and _s(target.get("client_id")) == client
         if answered and not same_retry and not settings.get("allow_edit", True):
             raise R.FormError("already_answered", "Twoja odpowiedź jest już zapisana - ten formularz nie pozwala jej poprawiać.", 409)
+        await _check_slot_seats(form, sections, clean, target)
         values: Dict[str, Any] = {"answers_json": clean, "updated_at": stamp}
         if not answered:
             values["submitted_at"] = stamp
@@ -677,6 +684,70 @@ async def write_answers(
     if source == "web" and judge_id:
         await notify_web_review(form, judge_id, "wysłano odpowiedź", stamp)
     return fresh
+
+
+async def _check_slot_seats(form: Mapping[str, Any], sections: List[SC.FormSection], clean: Mapping[str, Any],
+                            target: Mapping[str, Any]) -> None:
+    """„Kto pierwszy, ten lepszy”: pełny termin odrzucony przez serwer, nie po cichu.
+
+    Wołane W transakcji zapisu. Blokada wiersza formularza ustawia zapisy jeden za drugim,
+    więc dwie osoby nie zajmą ostatniego miejsca naraz. Terminy, które osoba już trzyma,
+    zostają (komisja mogła zmniejszyć limit po zapisie).
+    """
+    first_come = [q for q in SLOTS.slot_questions(sections) if q.slot_mode == "first_come" and SLOTS.picks(clean, q.id)]
+    if not first_come:
+        return
+    await database.fetch_one(select(FORMS.c.id).where(FORMS.c.id == form["id"]).with_for_update())
+    rows = await database.fetch_all(
+        select(ENTRIES.c.id, ENTRIES.c.answers_json).where(
+            and_(ENTRIES.c.form_id == form["id"], ENTRIES.c.submitted_at.isnot(None))
+        )
+    )
+    mine = target.get("id")
+    others = [R.loads(r["answers_json"], {}) for r in rows if r["id"] != mine]
+    errors: Dict[str, str] = {}
+    for q in first_come:
+        taken: Dict[str, int] = {}
+        for answers in others:
+            for sid in SLOTS.picks(answers, q.id):
+                taken[sid] = taken.get(sid, 0) + 1
+        held = SLOTS.picks(target.get("answers_json") or {}, q.id) if target.get("submitted_at") else []
+        full = SLOTS.full_conflicts(q, SLOTS.picks(clean, q.id), held, taken)
+        if full:
+            errors[q.id] = SLOTS.full_message(q, full)
+    if errors:
+        raise R.FormError("slot_full", next(iter(errors.values())), 409, errors=errors)
+
+
+def slot_board(ctx: "Ctx", *, names: bool) -> Dict[str, Any]:
+    """Obsada terminów dla uczestnika: zajęte i wolne miejsca, nazwiska (first_come, bez anonimowości)
+    i jego własny zatwierdzony przydział (optimize)."""
+    sections = SC.sections_of(ctx.form.get("schema_json"))
+    qs = SLOTS.slot_questions(sections)
+    if not qs:
+        return {}
+    owners = [(_s(jid), e.get("answers_json") or {}) for jid, e in ctx.entries.items() if e.get("submitted_at")]
+    plans = ctx.form.get("slot_plans") or {}
+    me = ctx.who.judge_id if ctx.who else ""
+    out: Dict[str, Any] = {}
+    for q in qs:
+        occ = SLOTS.occupancy(q, owners)
+        plan = plans.get(q.id) if isinstance(plans, Mapping) else None
+        approved = bool(plan and plan.get("approved_at"))
+        board: Dict[str, Any] = {"mode": q.slot_mode, "approved_at": plan.get("approved_at") if approved else None, "slots": {}}
+        for x in q.slots:
+            taken = occ.get(x.id) or []
+            item: Dict[str, Any] = {"taken": len(taken), "free": max(0, x.capacity - len(taken))}
+            if names and q.slot_mode == "first_come":
+                item["people"] = [
+                    {"judge_id": j, "name": judge_name(ctx.by_id, j), "photo_url": _s((ctx.by_id.get(j) or {}).get("photo_url")) or None}
+                    for j in taken
+                ]
+            board["slots"][x.id] = item
+        if approved:
+            board["mine"] = [sid for sid, members in (plan.get("assign") or {}).items() if me in (members or [])]
+        out[q.id] = board
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -1171,7 +1171,7 @@ def deadline_label(closes_at: Any) -> str:
 
 
 def notification_action(kind: str) -> str:
-    return {"published": "open", "web_review": "review_web"}.get(kind, "fill")
+    return {"published": "open", "web_review": "review_web", "slot_plan": "open"}.get(kind, "fill")
 
 
 def ip_from(forwarded_for: str, peer: str) -> str:

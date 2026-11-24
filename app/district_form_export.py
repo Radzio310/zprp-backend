@@ -98,13 +98,19 @@ def list_table(
     return header, rows, tones
 
 
+_ASSIGNED = "__slot_assigned__"
+
+
 def form_table(
     schema: Mapping[str, Any],
     responses: Sequence[Mapping[str, Any]],
     *,
     with_person: bool,
+    plans: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[List[str], List[List[str]]]:
-    """Wiersz = odpowiedź, kolumna = pytanie (siatka rozkłada się na kolumnę na wiersz siatki)."""
+    """Wiersz = odpowiedź, kolumna = pytanie (siatka rozkłada się na kolumnę na wiersz siatki).
+
+    Pytanie „Terminy” z zatwierdzonym przydziałem dostaje obok kolumnę „Przydział” (po `judge_id`)."""
     sections = SC.sections_of(schema)
     plan: List[Tuple[str, str, Optional[str]]] = [("Wysłano", "", None)]
     if with_person:
@@ -116,6 +122,9 @@ def form_table(
                 plan.append((f"{q.title} - {r.label}", q.id, r.id))
         else:
             plan.append((q.title, q.id, None))
+        stored = (plans or {}).get(q.id) if q.type == "slots" else None
+        if with_person and isinstance(stored, Mapping) and stored.get("approved_at"):
+            plan.append((f"Przydział: {q.title}", q.id, _ASSIGNED))
     by_id = {q.id: q for q in SC.questions(sections)}
     rows: List[List[str]] = []
     for response in responses:
@@ -128,6 +137,11 @@ def form_table(
                 row.append(_s(response.get("name")))
             elif title == "Źródło" and not qid:
                 row.append(R.SOURCE_LABELS.get(_s(response.get("self_source")), ""))
+            elif grid_row == _ASSIGNED:
+                q = by_id[qid]
+                mine = [sid for sid, members in ((plans or {}).get(qid, {}).get("assign") or {}).items()
+                        if _s(response.get("judge_id")) and _s(response.get("judge_id")) in (members or [])]
+                row.append(SC.answer_text(q, [x.id for x in q.slots if x.id in mine]))
             elif grid_row is not None:
                 value = (answers.get(qid) or {}).get(grid_row) if isinstance(answers.get(qid), Mapping) else None
                 q = by_id[qid]

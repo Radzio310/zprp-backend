@@ -28,6 +28,7 @@ from sqlalchemy import and_, insert, select, update
 from app import district_form_export as X
 from app import district_form_info as INFO
 from app import district_form_schema as SC
+from app import district_form_slots as SLOTS
 from app import district_form_studio as ST
 from app import district_form_templates as T
 from app import district_forms_rules as R
@@ -995,10 +996,12 @@ async def export(form_id: str, format: str = Query("xlsx"), who: Who = Depends(w
                 "submitted_at": e.get("submitted_at"),
                 "self_source": e.get("self_source"),
                 "name": S.judge_name(ctx.by_id, e.get("judge_id")) if e.get("judge_id") else e.get("guest_name"),
+                "judge_id": e.get("judge_id"),
             }
             for e in await _form_responses(ctx)
         ]
-        header, table = X.form_table(ctx.form.get("schema_json") or {}, answers, with_person=not anonymous)
+        header, table = X.form_table(ctx.form.get("schema_json") or {}, answers, with_person=not anonymous,
+                                     plans=ctx.form.get("slot_plans"))
         tones = None
         totals = X.summary_rows("form", form_stats(ctx, await _form_responses(ctx)), [])
     data = await asyncio.to_thread(
@@ -1094,8 +1097,9 @@ async def studio_doc(
         anonymous = bool((ctx.form.get("settings_json") or {}).get("anonymous"))
         schema = ctx.form.get("schema_json") or {}
         responses = [{"answers": r.get("answers") or {}, "submitted_at": r.get("submitted_at"),
-                      "self_source": r.get("self_source"), "name": r["name"]} for r in rows]
-        header, table = X.form_table(schema, responses, with_person=not anonymous)
+                      "self_source": r.get("self_source"), "name": r["name"],
+                      "judge_id": None if r.get("guest") else r.get("key")} for r in rows]
+        header, table = X.form_table(schema, responses, with_person=not anonymous, plans=ctx.form.get("slot_plans"))
         tones = None
         sections = SC.sections_of(schema)
         sent = [r for r in rows if r.get("submitted_at")]
@@ -1210,6 +1214,90 @@ async def public_link_delete(form_id: str, who: Who = Depends(who_dep)) -> Dict[
         await database.execute(update(S.FORMS).where(S.FORMS.c.id == ctx.form["id"]).values(public_results=stored))
         ctx.form["public_results"] = stored
     return await _link_payload(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Terminy (24.11.2026): obsada, propozycja przydziału, zatwierdzenie z pushem
+# ---------------------------------------------------------------------------
+
+
+async def _slot_ctx(form_id: str, question_id: str, who: Who) -> tuple:
+    ctx = await S.context(form_id, who.viewer)
+    if ctx.kind != "form":
+        raise R.FormError("wrong_kind", "Terminy są tylko w formularzu.", 400)
+    q = next((x for x in SLOTS.slot_questions(SC.sections_of(ctx.form.get("schema_json"))) if x.id == question_id), None)
+    if q is None:
+        raise R.FormError("no_question", "Nie ma takiego pytania z terminami - odśwież formularz.", 404)
+    return ctx, q
+
+
+@router.get("/{form_id}/slots", summary="Obsada terminów (zajęte, wolne, nazwiska w „kto pierwszy”) i mój przydział")
+async def slots_board(form_id: str, who: Who = Depends(who_dep)) -> Dict[str, Any]:
+    ctx = await S.context(form_id, who.viewer)
+    anonymous = bool((ctx.form.get("settings_json") or {}).get("anonymous"))
+    out: Dict[str, Any] = {"board": S.slot_board(ctx, names=not anonymous)}
+    if ctx.manager:
+        out["plans"] = ctx.form.get("slot_plans") or {}
+    return out
+
+
+def _availability(ctx: S.Ctx, q: SC.FormQuestion) -> Dict[str, List[str]]:
+    return {
+        jid: SLOTS.picks(e.get("answers_json") or {}, q.id)
+        for jid, e in ctx.entries.items()
+        if e.get("submitted_at") and jid in ctx.circles.participants
+    }
+
+
+@router.post("/{form_id}/slots/{question_id}/propose", summary="Propozycja przydziału (optimize): każdy termin obsadzony, równe obciążenie")
+async def slots_propose(form_id: str, question_id: str, who: Who = Depends(who_dep)) -> Dict[str, Any]:
+    ctx, q = await _slot_ctx(form_id, question_id, who)
+    _manager(ctx)
+    return SLOTS.propose_for(q, _availability(ctx, q))
+
+
+async def _store_plan(ctx: S.Ctx, q: SC.FormQuestion, assign: Dict[str, List[str]], *, approved_by: Optional[str]) -> Dict[str, Any]:
+    stamp = S.now()
+    plans = dict(ctx.form.get("slot_plans") or {})
+    plan = {"assign": assign, "updated_at": stamp.isoformat(),
+            "approved_at": stamp.isoformat() if approved_by else None, "approved_by": approved_by}
+    plans[q.id] = plan
+    await database.execute(update(S.FORMS).where(S.FORMS.c.id == ctx.form["id"]).values(slot_plans=plans))
+    ctx.form["slot_plans"] = plans
+    return plan
+
+
+def _clean_plan_body(ctx: S.Ctx, q: SC.FormQuestion, body: Mapping[str, Any]) -> Dict[str, List[str]]:
+    try:
+        return SLOTS.clean_assign(q, body.get("assign"), set(ctx.circles.participants))
+    except SLOTS.PlanError as error:
+        raise R.FormError("bad_plan", str(error), 400) from error
+
+
+@router.put("/{form_id}/slots/{question_id}/plan", summary="Zapisz roboczy przydział (bez powiadomień)")
+async def slots_plan_save(form_id: str, question_id: str, body: Dict[str, Any] = Body(...), who: Who = Depends(who_dep)) -> Dict[str, Any]:
+    ctx, q = await _slot_ctx(form_id, question_id, who)
+    _manager(ctx)
+    return {"plan": await _store_plan(ctx, q, _clean_plan_body(ctx, q, body), approved_by=None)}
+
+
+@router.post("/{form_id}/slots/{question_id}/approve", summary="Zatwierdź przydział i wyślij każdemu jego termin")
+async def slots_approve(form_id: str, question_id: str, body: Dict[str, Any] = Body(...), who: Who = Depends(who_dep)) -> Dict[str, Any]:
+    ctx, q = await _slot_ctx(form_id, question_id, who)
+    _manager(ctx)
+    assign = _clean_plan_body(ctx, q, body)
+    if not any(assign.values()):
+        raise R.FormError("empty_plan", "Przydział jest pusty - przydziel komuś termin, zanim zatwierdzisz.", 400)
+    plan = await _store_plan(ctx, q, assign, approved_by=who.judge_id)
+    sent = devices = 0
+    muted = False
+    for jid, slot_ids in SLOTS.per_person(q, assign).items():
+        title, text = SLOTS.push_text(ctx.form["title"], q, slot_ids)
+        result = await S.notify(ctx.form, [jid], kind="slot_plan", slot=f"{q.id}:{plan['approved_at']}", title=title, body=text)
+        sent += result["sent_to"]
+        devices += result["devices"]
+        muted = muted or bool(result.get("muted"))
+    return {"plan": plan, "sent_to": sent, "devices": devices, "muted": muted}
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ Formularz (`kind = "form"`): port 1:1 z Communio (`Communio_serwer/app/form_sche
         data / godzina / data i godzina      "RRRR-MM-DD" / "GG:MM" / "RRRR-MM-DDTGG:MM"
         plik                                 ["token", …]
         siatka                               {"wiersz": "kolumna"} | {"wiersz": ["kolumna", …]}
+        terminy                              ["id terminu", …] (optimize: dostępność, first_come: zapis)
 
 Różnica względem Communio: własny wzorzec przy krótkiej odpowiedzi przyjmujemy
 TYLKO prosty (bez zagnieżdżonych powtórzeń i odwołań wstecznych). Communio puszcza
@@ -214,6 +215,7 @@ QuestionType = Literal[
     "number",
     "email", "phone", "pesel", "postal",
     "file", "grid",
+    "slots",
 ]
 
 _ID = r"^[A-Za-z0-9_-]{1,24}$"
@@ -228,6 +230,7 @@ MAX_SECTIONS = 30
 SHORT_MAX = 500
 LONG_MAX = 5000
 PATTERN_MAX = 200
+MAX_SLOTS = 60
 
 _EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$")
 _POSTAL = re.compile(r"^\d{2}-?\d{3}$")
@@ -251,6 +254,17 @@ class FormOption(_Loose):
 class FormGridLine(_Loose):
     id: str = Field(..., pattern=_ID)
     label: str = Field(..., max_length=120)
+
+
+class FormSlot(_Loose):
+    """Termin pytania „Terminy”: początek i (opcjonalnie) koniec w czasie polskim, bez strefy."""
+
+    id: str = Field(..., pattern=_ID)
+    start: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$")
+    end: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$")
+    #: optimize: ilu ludzi potrzeba; first_come: ile jest miejsc.
+    capacity: int = Field(1, ge=1, le=50)
+    label: Optional[str] = Field(None, max_length=80)
 
 
 class FormQuestion(_Loose):
@@ -284,6 +298,11 @@ class FormQuestion(_Loose):
     grid_multi: bool = False
     max_files: int = Field(1, ge=1, le=10)
     accept: Literal["image", "any"] = "any"
+    # Terminy (zapisy na terminy, 24.11.2026)
+    slots: List[FormSlot] = Field(default_factory=list, max_length=MAX_SLOTS)
+    slot_mode: Literal["optimize", "first_come"] = "optimize"
+    #: Najwięcej terminów jednej osoby: first_come - ile wolno zająć, optimize - ile najwyżej dostanie w przydziale.
+    slot_max_per_person: Optional[int] = Field(None, ge=1, le=MAX_SLOTS)
 
 
 class FormSection(_Loose):
@@ -420,6 +439,49 @@ def pattern_matches(pattern: str, text: str) -> Optional[bool]:
 # --- Dokument ---------------------------------------------------------------
 
 
+def _check_slots(q: FormQuestion) -> None:
+    if not q.slots:
+        raise _bad(f"Pytanie {_label(q)}: dodaj co najmniej jeden termin.")
+    ids = [x.id for x in q.slots]
+    if len(set(ids)) != len(ids):
+        raise _bad(f"Pytanie {_label(q)}: dwa terminy mają ten sam identyfikator.")
+    seen = set()
+    for slot in q.slots:
+        try:
+            start = datetime.fromisoformat(slot.start)
+            end = datetime.fromisoformat(slot.end) if slot.end else None
+        except ValueError as error:
+            raise _bad(f"Pytanie {_label(q)}: termin ma datę, której nie ma.") from error
+        if end is not None and end <= start:
+            raise _bad(f"Pytanie {_label(q)}: termin {slot_label(slot)} kończy się przed początkiem.")
+        if (slot.start, slot.end) in seen:
+            raise _bad(f"Pytanie {_label(q)}: termin {slot_label(slot)} jest dodany dwa razy.")
+        seen.add((slot.start, slot.end))
+    if q.slot_max_per_person is not None and q.slot_max_per_person > len(q.slots):
+        raise _bad(f"Pytanie {_label(q)}: limit terminów na osobę jest większy niż liczba terminów.")
+
+
+_WEEKDAYS = ("pon.", "wt.", "śr.", "czw.", "pt.", "sob.", "niedz.")
+
+
+def slot_label(slot: Any) -> str:
+    """„pt 27.11, 14:00-16:00” - ten sam zapis w pushu, eksporcie i błędach."""
+    start = getattr(slot, "start", None) or (slot.get("start") if isinstance(slot, Mapping) else "")
+    end = getattr(slot, "end", None) if not isinstance(slot, Mapping) else slot.get("end")
+    try:
+        when = datetime.fromisoformat(str(start))
+    except ValueError:
+        return str(start)
+    text = f"{_WEEKDAYS[when.weekday()]} {when:%d.%m}, {when:%H:%M}"
+    if end:
+        try:
+            until = datetime.fromisoformat(str(end))
+            text += f"-{until:%H:%M}" if until.date() == when.date() else f" - {until:%d.%m %H:%M}"
+        except ValueError:
+            pass
+    return text
+
+
 def _check_question(q: FormQuestion) -> None:
     if not q.title.strip():
         raise _bad("Każde pytanie potrzebuje treści.")
@@ -452,6 +514,8 @@ def _check_question(q: FormQuestion) -> None:
             ids = [x.id for x in lines]
             if len(set(ids)) != len(ids) or any(not x.label.strip() for x in lines):
                 raise _bad(f"Pytanie {_label(q)}: wiersze i kolumny siatki potrzebują treści.")
+    if q.type == "slots":
+        _check_slots(q)
     if q.pattern:
         if q.type != "short_text":
             raise _bad(f"Pytanie {_label(q)}: własny wzorzec ma tylko krótka odpowiedź.")
@@ -795,7 +859,27 @@ def _answer(q: FormQuestion, value: Any, files: Files) -> Any:
             raise AnswerError("Zaznacz odpowiedź w każdym wierszu.")
         return clean
 
+    if t == "slots":
+        if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+            raise AnswerError("Zaznacz terminy.")
+        order = {x.id: i for i, x in enumerate(q.slots)}
+        chosen = list(dict.fromkeys(value))
+        if any(x not in order for x in chosen):
+            raise AnswerError("Tego terminu już nie ma - odśwież formularz.")
+        if q.slot_mode == "first_come" and q.slot_max_per_person is not None and len(chosen) > q.slot_max_per_person:
+            raise AnswerError(f"Zapisać się można najwyżej na {q.slot_max_per_person} {terms_word(q.slot_max_per_person)}.")
+        return sorted(chosen, key=lambda x: order[x])
+
     raise AnswerError("Nieznany rodzaj pytania.")  # pragma: no cover
+
+
+def terms_word(n: int) -> str:
+    """Odmiana: 1 termin, 2 terminy, 5 terminów."""
+    if n == 1:
+        return "termin"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return "terminy"
+    return "terminów"
 
 
 def check_answers(
@@ -842,6 +926,9 @@ def answer_text(q: FormQuestion, value: Any, file_name: Optional[Callable[[str],
         if value.get("other"):
             parts.append(f"Inne: {value['other']}")
         return "; ".join(p for p in parts if p)
+    if q.type == "slots" and isinstance(value, list):
+        slots = {x.id: x for x in q.slots}
+        return "; ".join(slot_label(slots[x]) for x in value if x in slots)
     if q.type == "file" and isinstance(value, list):
         return "; ".join(file_name(x) if file_name else x for x in value)
     if q.type == "grid" and isinstance(value, dict):
@@ -959,6 +1046,19 @@ def _grid_stat(q: FormQuestion, present: List[Any]) -> Dict[str, Any]:
     }
 
 
+def _slots_stat(q: FormQuestion, present: List[Any]) -> Dict[str, Any]:
+    counts = Counter(x for v in present if isinstance(v, list) for x in v)
+    return {
+        "kind": "slots",
+        "answered": sum(1 for v in present if isinstance(v, list) and v),
+        "mode": q.slot_mode,
+        "slots": [
+            {"id": x.id, "start": x.start, "end": x.end, "capacity": x.capacity, "count": counts.get(x.id, 0)}
+            for x in q.slots
+        ],
+    }
+
+
 def question_stat(q: FormQuestion, answers: List[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     """Zbiorczy wynik jednego pytania albo None - pytanie z danymi osobowymi."""
     if q.type in PERSONAL:
@@ -972,6 +1072,8 @@ def question_stat(q: FormQuestion, answers: List[Mapping[str, Any]]) -> Optional
         result = _number_stat(present)
     elif q.type == "grid":
         result = _grid_stat(q, present)
+    elif q.type == "slots":
+        result = _slots_stat(q, present)
     elif q.type == "time":
         counts = Counter(v for v in present if isinstance(v, str))
         result = {

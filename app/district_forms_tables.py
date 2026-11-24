@@ -58,6 +58,8 @@ def define_tables(metadata):
         #: Strona publiczna wyników (studio eksportu, 12.11.2026): kod, poziom jawności, motyw,
         #: zapamiętany widok listy, licznik wyświetleń, wyłączenie. Kod raz nadany zostaje.
         Column("public_results", _JSON, nullable=True),
+        #: Pytania „Terminy” w trybie optimize: przydział komisji (`app/district_form_slots.py`).
+        Column("slot_plans", _JSON, nullable=True),
         Column("created_by", String, nullable=False),
         Column("created_by_name", String, nullable=True),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
@@ -177,6 +179,8 @@ MIGRATIONS = (
     # Studio eksportu (12.11.2026): strona publiczna wyników pod /public/forms/results/<kod>.
     "ALTER TABLE district_forms ADD COLUMN IF NOT EXISTS public_results JSONB",
     "CREATE INDEX IF NOT EXISTS ix_district_forms_public_code ON district_forms ((public_results->>'code'))",
+    # Zapisy na terminy (24.11.2026): przydział komisji do pytań „Terminy”.
+    "ALTER TABLE district_forms ADD COLUMN IF NOT EXISTS slot_plans JSONB",
     # Bloki informacyjne (sec. 17) - tabela mogla juz powstac bez tej kolumny.
     "ALTER TABLE district_forms ADD COLUMN IF NOT EXISTS info_json JSONB DEFAULT '{\"above\":[],\"below\":[]}'::jsonb",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_district_forms_event ON district_forms (event_id) "

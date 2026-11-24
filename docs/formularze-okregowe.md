@@ -645,3 +645,16 @@ kieruje roboty komunikatorów (po `user-agent`) na serwer; ludzie dalej dostają
 - Karta i strona podglądu (§19) pokazują wtedy kartę marki „Ten link jest nieaktualny” z podpisem „Poproś komisję o nowy link”.
 - **Aplikacja:** w arkuszu „Strona WWW” jest przycisk „Wygeneruj nowy link” z potwierdzeniem w samym arkuszu. Link `/f/<stary>` otwarty w aplikacji pokazuje „Ten link jest nieaktualny”.
 - **Strona `/f/<stary>`** pokazuje to samo.
+
+## 21. Pytanie „Terminy” (zapisy na terminy, 24.11.2026)
+
+Nowy rodzaj pytania `slots` w zwykłym formularzu. Logika: `app/district_form_slots.py`, testy `tests/test_district_form_slots.py`.
+
+- Pola pytania: `slots: [{id, start: "RRRR-MM-DDTGG:MM" (czas polski), end?: ten sam zapis, capacity: 1-50, label?}]`,
+  `slot_mode: "optimize" | "first_come"`, `slot_max_per_person: int | null` (first_come: ile wolno zająć; optimize: ile najwyżej w przydziale).
+- Odpowiedź: lista id terminów (`["a", "c"]`). optimize = dostępność, first_come = zapis.
+- first_come: zapis na pełny termin kończy się 409 `slot_full` z `errors: {pytanie: zdanie}`. Liczone pod blokadą wiersza formularza (`SELECT ... FOR UPDATE`), więc ostatnie miejsce zajmuje jedna osoba. Termin już trzymany zostaje, nawet po zmniejszeniu limitu.
+- `FormDetail.slot_board` i `GET /{id}/slots`: `{pytanie: {mode, approved_at, mine?, slots: {id: {taken, free, people?}}}}`; `people` (nazwiska i zdjęcia) tylko w first_come i bez anonimowości. Zarządzający dostaje też `plans`.
+- optimize: `POST /{id}/slots/{q}/propose` (przepływ o najmniejszym koszcie: najpierw obsada, potem najmniejsza suma kwadratów obciążeń), `PUT /{id}/slots/{q}/plan {assign}` (roboczy), `POST /{id}/slots/{q}/approve {assign}` (zapis + push `slot_plan` z terminem każdej osoby, akcja `open`).
+- Plan leży w `district_forms.slot_plans` (JSONB). Eksport: kolumna „Przydział: <pytanie>” po zatwierdzeniu.
+- Statystyka: `kind: "slots"`, `slots: [{id, start, end, capacity, count}]`.
