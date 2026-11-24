@@ -954,6 +954,8 @@ async def _upsert_match(
             province_match_judges.c.judge_id.in_(removed_ids),
             province_match_judges.c.active.is_(True),
         ).values(active=False, missing_runs=2, updated_at=now).returning(province_match_judges.c.judge_id))
+        if removed_rows:
+            await _notify_mentor_pairs(province, match_id)
         if values["match_at"] is None or values["match_at"] > now:
             for removed_row in removed_rows:
                 removed_id = _str(removed_row["judge_id"])
@@ -1127,6 +1129,8 @@ async def _mark_missing_assignments(province: str, judge_id: str, seen_ids: set[
             )
             .values(missing_runs=missing, active=active, updated_at=_now())
         )
+        if not active:
+            await _notify_mentor_pairs(province, match_id)
         match_at = row["match_at"]
         if not active and (match_at is None or match_at > _now()):
             code = _str(row["match_code"])
@@ -1140,6 +1144,22 @@ async def _mark_missing_assignments(province: str, judge_id: str, seen_ids: set[
                 _str(row["fingerprint"]),
             )
     return created
+
+
+async def _notify_mentor_pairs(province: str, match_id: str, extra_ids: Any = ()) -> None:
+    """Mecz zdjęty z obsady: zrzuć karty pary w panelu Mentora i podbij `rev` (lista odświeża się od razu). Nigdy nie rzuca."""
+    try:
+        found = await database.fetch_all(
+            select(province_match_judges.c.judge_id)
+            .where(province_match_judges.c.province == province)
+            .where(province_match_judges.c.match_id == match_id)
+        )
+        ids = {_str(r["judge_id"]) for r in found} | {_str(i) for i in extra_ids}
+        from app.shared_match_pair import refresh_pairs
+
+        await refresh_pairs(sorted(i for i in ids if i), "", match_id)
+    except Exception:  # noqa: BLE001 - panel Mentora nie zatrzymuje monitora
+        logger.warning("monitor: odświeżenie par Mentora nieudane", exc_info=True)
 
 
 async def _province_has_baseline(province: str) -> bool:
@@ -1471,6 +1491,8 @@ async def _mark_missing_full_matches(province: str, seen_ids: set[str]) -> int:
             .where(and_(province_matches.c.province == province, province_matches.c.match_id == match_id))
             .values(missing_full_runs=missing, active=active, updated_at=_now())
         )
+        if not active:
+            await _notify_mentor_pairs(province, match_id)
         if not active and (match_at is None or match_at > _now()):
             targets = await _target_judges(province, match_id)
             created += await _create_event(

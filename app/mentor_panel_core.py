@@ -458,6 +458,8 @@ async def _province_cards(a: str, b: str) -> List[Dict[str, Any]]:
     J = province_match_judges
     hits = await rows(
         select(J.c.province, J.c.match_id).where(J.c.judge_id.in_([a, b]))
+        # Tylko AKTUALNA obsada: monitor gasi wiersz sędziego (`active = false`), gdy ZPRP zdjęło go z meczu.
+        .where(J.c.active.is_(True))
         .group_by(J.c.province, J.c.match_id).having(func.count(func.distinct(J.c.judge_id)) == 2)
     )
     if not hits:
@@ -466,6 +468,8 @@ async def _province_cards(a: str, b: str) -> List[Dict[str, Any]]:
     found = await rows(select(province_matches.c.match_id, province_matches.c.match_at, province_matches.c.state_json,
                               province_matches.c.active, province_matches.c.updated_at)
                        .where(province_matches.c.match_id.in_(ids)))
+    # Mecz zniknął z terminarza (monitor: `province_matches.active = false`) - karta pary znika razem z nim.
+    found = [r for r in found if r.get("active")]
     found.sort(key=lambda r: (bool(r.get("active")), R.aware(r.get("updated_at")) or datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
     out, seen = [], set()
     for r in found:
