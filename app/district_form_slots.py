@@ -12,6 +12,7 @@ Zatwierdzony przydział leży w `district_forms.slot_plans`:
 
     {"<id pytania>": {"assign": {"<id terminu>": ["judge_id", …]},
                       "approved_at": iso | None, "approved_by": judge_id | None,
+                      "notified_assign": {...} | None,   # ostatnio zatwierdzony przydział (przeżywa zapis roboczy)
                       "updated_at": iso}}
 
 Algorytm propozycji: przepływ o najmniejszym koszcie. Źródło -> termin (pojemność =
@@ -233,3 +234,21 @@ def push_text(form_title: str, q: FormQuestion, slot_ids: Sequence[str]) -> Tupl
     else:
         body = f"Twoje terminy: {'; '.join(labels)}."
     return title, body[:300]
+
+
+def plan_changes(q: FormQuestion, previous: Optional[Mapping[str, Sequence[str]]], new: Mapping[str, Sequence[str]]) -> Tuple[Dict[str, List[str]], List[str]]:
+    """(osoby do powiadomienia z nowym zestawem terminów, osoby zdjęte z przydziału).
+
+    `previous` = poprzednio zatwierdzony przydział; None = pierwsze zatwierdzenie (dostają wszyscy).
+    Zmiana = nowa osoba albo inny zestaw terminów. Zdjęta = miała terminy, teraz nie ma żadnego."""
+    now = per_person(q, new)
+    if previous is None:
+        return now, []
+    before = per_person(q, previous)
+    changed = {p: ids for p, ids in now.items() if before.get(p) != ids}
+    removed = [p for p in before if p not in now]
+    return changed, removed
+
+
+def removed_text(form_title: str) -> Tuple[str, str]:
+    return f"📅 {form_title}"[:80], "Twój termin został zdjęty z przydziału. Nie masz już przydzielonego terminu w tym formularzu."

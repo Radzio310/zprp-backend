@@ -230,3 +230,26 @@ def test_export_adds_assignment_column():
     assert rows[0][-1] == "pt. 27.11, 16:00"
     header, _rows = X.form_table(raw, responses, with_person=True, plans={"dyzur": {"assign": {}, "approved_at": None}})
     assert not header[-1].startswith("Przydział")
+
+
+def test_plan_changes_first_approval_notifies_everyone():
+    q = question(slots_question())
+    changed, removed = SLOTS.plan_changes(q, None, {"a": ["j1", "j2"], "c": ["j1"]})
+    assert changed == {"j1": ["a", "c"], "j2": ["a"]} and removed == []
+
+
+def test_plan_changes_only_changed_and_removed():
+    q = question(slots_question())
+    old = {"a": ["j1", "j2"], "c": ["j3"]}
+    new = {"a": ["j1"], "b": ["j4"], "c": ["j3", "j1"]}
+    changed, removed = SLOTS.plan_changes(q, old, new)
+    assert changed == {"j1": ["a", "c"], "j4": ["b"]}  # j1 dostał dodatkowy termin, j4 nowy
+    assert removed == ["j2"]                             # j3 bez zmian
+
+
+def test_plan_changes_nothing_changed():
+    q = question(slots_question())
+    same = {"a": ["j1"], "b": ["j2"]}
+    assert SLOTS.plan_changes(q, dict(same), dict(same)) == ({}, [])
+    assert "zdjęty" in SLOTS.removed_text("Turniej")[1]
+

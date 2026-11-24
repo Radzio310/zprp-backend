@@ -1256,11 +1256,22 @@ async def slots_propose(form_id: str, question_id: str, who: Who = Depends(who_d
     return SLOTS.propose_for(q, _availability(ctx, q))
 
 
+def _notified_assign(old: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Ostatnio zatwierdzony przydział (None = jeszcze nigdy nie zatwierdzano)."""
+    if not old:
+        return None
+    if old.get("notified_assign") is not None:
+        return old["notified_assign"]
+    return old.get("assign") or {} if old.get("approved_at") else None
+
+
 async def _store_plan(ctx: S.Ctx, q: SC.FormQuestion, assign: Dict[str, List[str]], *, approved_by: Optional[str]) -> Dict[str, Any]:
     stamp = S.now()
     plans = dict(ctx.form.get("slot_plans") or {})
+    notified = assign if approved_by else _notified_assign(plans.get(q.id))
     plan = {"assign": assign, "updated_at": stamp.isoformat(),
-            "approved_at": stamp.isoformat() if approved_by else None, "approved_by": approved_by}
+            "approved_at": stamp.isoformat() if approved_by else None, "approved_by": approved_by,
+            "notified_assign": notified}
     plans[q.id] = plan
     await database.execute(update(S.FORMS).where(S.FORMS.c.id == ctx.form["id"]).values(slot_plans=plans))
     ctx.form["slot_plans"] = plans
@@ -1288,16 +1299,20 @@ async def slots_approve(form_id: str, question_id: str, body: Dict[str, Any] = B
     assign = _clean_plan_body(ctx, q, body)
     if not any(assign.values()):
         raise R.FormError("empty_plan", "Przydział jest pusty - przydziel komuś termin, zanim zatwierdzisz.", 400)
+    previous = _notified_assign((ctx.form.get("slot_plans") or {}).get(q.id))
+    changed, removed = SLOTS.plan_changes(q, previous, assign)
     plan = await _store_plan(ctx, q, assign, approved_by=who.judge_id)
     sent = devices = 0
     muted = False
-    for jid, slot_ids in SLOTS.per_person(q, assign).items():
-        title, text = SLOTS.push_text(ctx.form["title"], q, slot_ids)
+    messages = [(jid, SLOTS.push_text(ctx.form["title"], q, ids)) for jid, ids in changed.items()]
+    messages += [(jid, SLOTS.removed_text(ctx.form["title"])) for jid in removed]
+    for jid, (title, text) in messages:
         result = await S.notify(ctx.form, [jid], kind="slot_plan", slot=f"{q.id}:{plan['approved_at']}", title=title, body=text)
         sent += result["sent_to"]
         devices += result["devices"]
         muted = muted or bool(result.get("muted"))
-    return {"plan": plan, "sent_to": sent, "devices": devices, "muted": muted}
+    return {"plan": plan, "sent_to": sent, "devices": devices, "muted": muted,
+            "changed": len(changed), "removed": len(removed), "unchanged": not messages}
 
 
 # ---------------------------------------------------------------------------
