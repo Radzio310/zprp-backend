@@ -141,6 +141,44 @@ def _changed_map(rows: list) -> dict[str, str]:
     return out
 
 
+async def _proel_live_codes(items: list, now: datetime) -> set[str]:
+    """Numery meczow z oknem `live` (-1 h..+4 h od terminu), ktore ProEl juz wystartowal. Jedno zapytanie na odswiezenie cache."""
+    codes = []
+    for it in items:
+        try:
+            at = datetime.fromisoformat(_s(it.get("match_at")))
+        except ValueError:
+            continue
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        if at - timedelta(hours=1) <= now <= at + R.LIVE_WINDOW and it.get("code"):
+            codes.append(it["code"])
+    if not codes:
+        return set()
+    try:
+        from app.db import proel_match_state as T
+
+        rows = await database.fetch_all(select(T.c.match_number).where(
+            T.c.match_number.in_(codes), T.c.live_started_at.is_not(None)))
+        return {r["match_number"] for r in rows}
+    except Exception:  # noqa: BLE001 - brak stanu ProEla to brak statusu, nie blad widoku
+        log.warning("obsada_view: stan ProEla nieczytelny", exc_info=True)
+        return set()
+
+
+async def _crest_lookup():
+    """Herb po nazwie druzyny z istniejacego indeksu `zprp_public_clubs` (cache 1 h, bez sieci). Brak = None."""
+    try:
+        from app.mentor_bastion_search import crest_for
+    except Exception:  # noqa: BLE001
+        log.warning("obsada_view: indeks herbow niedostepny", exc_info=True)
+
+        async def none(_name):
+            return None
+        return none
+    return crest_for
+
+
 async def _season_payload(province: str) -> dict:
     """Caly biezacy sezon okregu; krotki cache, bo klienci pytaja co 60 s."""
     hit = _cache.get(province)
@@ -164,6 +202,9 @@ async def _season_payload(province: str) -> dict:
             .where(province_judges.c.province.in_(spellings(province)))))
         matches, halls = [], {}
         stamp = ""
+        now = datetime.now(timezone.utc)
+        live_codes = await _proel_live_codes(base["matches"], now)
+        crest_for = await _crest_lookup()
         for item in base["matches"]:
             crew = item["crew"]
             # Cudze mecze (np. Liga Juniorow z innego okregu) tylko z naszym sedzia w obsadzie.
@@ -177,8 +218,10 @@ async def _season_payload(province: str) -> dict:
                 "match_at": item["match_at"],
                 "round_label": item["round_name"] or item["round"] or None,
                 "host": item["host"], "guest": item["guest"],
-                "host_logo": None, "guest_logo": None,
-                "score": item["score"], "status_live": None,
+                "host_logo": await crest_for(item["host"]),
+                "guest_logo": await crest_for(item["guest"]),
+                "score": item["score"],
+                "status_live": R.live_state(item, now, item["code"] in live_codes),
                 "hall": item["hall"], "city": item["city"], "address": item["address"],
                 "lat": None, "lng": None,
                 "crew": R.crew_view(crew, roster), "needs": R.needs_view(crew, item["needs"]),

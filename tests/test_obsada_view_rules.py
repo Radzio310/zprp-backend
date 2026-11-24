@@ -156,3 +156,16 @@ def test_roster_accepts_records_without_get():
     from app import obsada_view_rules as R
     roster = R.Roster([Record({"judge_id": "123", "full_name": "Jan Kowalski", "photo_url": "https://x/y.jpg"})])
     assert roster.by_id["123"] == "https://x/y.jpg"
+
+
+def test_live_state():
+    now = datetime(2026, 11, 21, 18, 30, tzinfo=timezone.utc)
+    at = "2026-11-21T18:00:00+00:00"
+    base = {"match_at": at, "score": None, "protocol_status": "", "status_mark": ""}
+    assert R.live_state({**base, "status_mark": "Odwołany"}, now) == "cancelled"
+    assert R.live_state({**base, "status_mark": "Przełożony"}, now) is None
+    assert R.live_state({**base, "score": {"label": "20:18"}}, now) == "finished"
+    assert R.live_state({**base, "protocol_status": "approved"}, now) == "finished"
+    assert R.live_state(base, now) is None
+    assert R.live_state(base, now, proel_live=True) == "live"
+    assert R.live_state(base, now.replace(day=22), proel_live=True) is None

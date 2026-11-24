@@ -283,6 +283,9 @@ def _item(
         "league": league_level(code) == "second" and (not access or access["organizer_kind"] != "drk"),
         "approved": bool(row["approved"]),
         "protocol_status": _s(state.get("protocol_status")),
+        # Surowy znacznik odwolania/przelozenia z migawki (dla Obsady na zywo).
+        "status_mark": next((_s(state.get(k)) for k in ("match_status", "status_meczu", "Status", "status")
+                             if _s(state.get(k))), ""),
         "updated_at": _iso(row["last_seen_at"] or row["updated_at"]),
     }
 

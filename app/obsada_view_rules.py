@@ -147,6 +147,31 @@ def status_live(state: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+LIVE_WINDOW = timedelta(hours=4)
+
+
+def live_state(item: Mapping[str, Any], now: datetime, proel_live: bool = False) -> Optional[str]:
+    """`cancelled` | `finished` | `live` | None (brak wiarygodnego stanu - klient liczy z godziny).
+
+    cancelled: znacznik z migawki mowi o odwolaniu (przelozenie to osobny `moved`).
+    finished: jest wynik albo protokol zatwierdzony. live: ProEl wystartowal
+    (`proel_live`) w oknie 4 h od terminu i nie ma jeszcze wyniku."""
+    if "odwo" in _s(item.get("status_mark")).lower():
+        return "cancelled"
+    if item.get("score") or _s(item.get("protocol_status")) == "approved":
+        return "finished"
+    if proel_live:
+        try:
+            at = datetime.fromisoformat(_s(item.get("match_at")))
+        except ValueError:
+            return None
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        if at - timedelta(hours=1) <= now <= at + LIVE_WINDOW:
+            return "live"
+    return None
+
+
 # --- rewizja ---------------------------------------------------------------
 
 def compute_rev(matches: Iterable[Mapping[str, Any]], updated_at: Any = None) -> str:
