@@ -646,6 +646,17 @@ def web_masked(column: Mapping[str, Any]) -> bool:
     return column.get("type") != "status" and (column.get("visibility") or "all") != "all"
 
 
+#: Status płatności ustawiany tylko przez komisję: osoba zwolniona z opłaty.
+EXEMPT = "exempt"
+
+
+def mask_exempt(column: Mapping[str, Any], value: Any, mode: str) -> Any:
+    """Uczestnik, obserwator i web widzą zwolnionego jako „Otrzymano" (confirmed) - bez ujawniania zwolnienia."""
+    if mode != "manager" and value == EXEMPT and column.get("type") == "confirm":
+        return "confirmed"
+    return value
+
+
 def filter_cells(columns: Sequence[Mapping[str, Any]], cells: Mapping[str, Any], mode: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for column in columns:
@@ -656,9 +667,11 @@ def filter_cells(columns: Sequence[Mapping[str, Any]], cells: Mapping[str, Any],
         if not has_value(column, cell.get("v")):
             continue
         if mode == "web":
-            out[cid] = {"set": True} if web_masked(column) else {"v": cell.get("v"), "src": cell.get("src"), "at": cell.get("at")}
+            out[cid] = {"set": True} if web_masked(column) else {"v": mask_exempt(column, cell.get("v"), mode), "src": cell.get("src"), "at": cell.get("at")}
         else:
-            out[cid] = dict(cell)
+            shown = dict(cell)
+            shown["v"] = mask_exempt(column, shown.get("v"), mode)
+            out[cid] = shown
     return out
 
 
@@ -699,9 +712,9 @@ def clean_value(column: Mapping[str, Any], value: Any) -> Any:
             return None
         raise bad("to pole zaznacza się albo nie.")
     if ctype == "confirm":
-        if value in ("declared", "confirmed"):
+        if value in ("declared", "confirmed", EXEMPT):
             return value
-        raise bad("dozwolone: zgłoszone albo potwierdzone.")
+        raise bad("dozwolone: zgłoszone, potwierdzone albo zwolnione.")
     if ctype == "choice":
         options = {o["id"] for o in column.get("options") or []}
         if column.get("multi"):
@@ -762,6 +775,11 @@ def cell_refusal(
     title = _s(column.get("title")) or _s(column.get("id"))
     if editor == "managers":
         return FormError("column_forbidden", f"„{title}” wpisuje komisja.", 403, column_id=column.get("id"))
+    if column.get("type") == "confirm":
+        if new == EXEMPT:
+            return FormError("column_forbidden", f"„{title}”: zwolnienie z opłaty ustawia komisja.", 403, column_id=column.get("id"))
+        if current == EXEMPT:
+            return FormError("confirmed_locked", f"„{title}”: komisja już to rozliczyła - zmianę zgłoś komisji.", 403, column_id=column.get("id"))
     if column.get("type") == "confirm" and editor == "self_confirm":
         if current == "confirmed":
             return FormError(
@@ -1064,9 +1082,6 @@ def list_stats(
             sources[source] += 1
     status = status_column(columns)
     positive = {o["id"] for o in (status or {}).get("options") or [] if o.get("tone") == "positive"}
-    expected_base = (
-        sum(1 for jid in people if _cell_value(cells_by[jid], status["id"]) in positive) if status else len(people)
-    )
     stats_columns: List[Dict[str, Any]] = []
     for column in columns:
         cid, ctype = column["id"], column.get("type")
@@ -1084,16 +1099,25 @@ def list_stats(
         elif ctype == "confirm":
             declared = sum(1 for v in present if v == "declared")
             confirmed = sum(1 for v in present if v == "confirmed")
+            exempt = sum(1 for v in present if v == EXEMPT)
+            # Zwolniony z opłaty nie wchodzi do oczekiwanej sumy, niezależnie od statusu obecności.
+            expected_due = sum(
+                1
+                for jid in people
+                if _cell_value(cells_by[jid], cid) != EXEMPT
+                and (not status or _cell_value(cells_by[jid], status["id"]) in positive)
+            )
             amount = column.get("amount")
             stats_columns.append(
                 {
                     "id": cid,
                     "type": "confirm",
-                    "none": len(values) - declared - confirmed,
+                    "none": len(values) - declared - confirmed - exempt,
                     "declared": declared,
                     "confirmed": confirmed,
+                    "exempt": exempt,
                     "amount": amount,
-                    "expected_total": _money(amount, expected_base),
+                    "expected_total": _money(amount, expected_due),
                     "declared_total": _money(amount, declared + confirmed),
                     "confirmed_total": _money(amount, confirmed),
                 }
@@ -1129,7 +1153,7 @@ def list_stats(
 # Opisy dla ludzi (push „To Ty?", log)
 # ---------------------------------------------------------------------------
 
-CONFIRM_LABELS = {"declared": "Zgłoszone", "confirmed": "Potwierdzone"}
+CONFIRM_LABELS = {"declared": "Zgłoszone", "confirmed": "Potwierdzone", "exempt": "Zwolniony"}
 
 
 def value_label(column: Mapping[str, Any], value: Any) -> str:

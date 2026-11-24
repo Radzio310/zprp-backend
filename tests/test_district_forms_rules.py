@@ -584,3 +584,35 @@ def test_event_rsvp_summary_liczy_przeniesione_i_czekajace():
     )
     assert out == {"yes": 3, "no": 1, "total": 4, "carried": 2, "pending": 2}
     assert R.event_rsvp_summary({"1": "yes"}, ["1"], {}, "status")["pending"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Zwolniony z opłaty (24.11.2026)
+# ---------------------------------------------------------------------------
+
+
+def test_zwolniony_tylko_komisja_i_uczestnik_widzi_otrzymano():
+    pay = {c["id"]: c for c in wigilia_columns()}["pay"]
+    assert R.clean_value(pay, "exempt") == "exempt"
+    assert R.cell_refusal(pay, source="app", current=None, new="exempt", closed=False).code == "column_forbidden"
+    assert R.cell_refusal(pay, source="app", current="exempt", new=None, closed=False).code == "confirmed_locked"
+    assert R.cell_refusal(pay, source="manager", current=None, new="exempt", closed=False) is None
+    cells = {"pay": cell("exempt", "manager")}
+    cols = [{**pay, "visibility": "all"}]
+    for mode in ("own", "roster", "observer", "web"):
+        assert R.filter_cells(cols, cells, mode)["pay"]["v"] == "confirmed"
+    assert R.filter_cells(cols, cells, "manager")["pay"]["v"] == "exempt"
+
+
+def test_zwolniony_nie_liczy_sie_do_wplywow_ani_oczekiwanej_sumy():
+    columns = wigilia_columns()
+    entries = {
+        "1": {"cells_json": {"status": cell("yes"), "pay": cell("confirmed", "manager")}},
+        "2": {"cells_json": {"status": cell("yes"), "pay": cell("exempt", "manager")}},
+        "3": {"cells_json": {"status": cell("yes")}},
+    }
+    stats = R.list_stats(columns, ["1", "2", "3"], entries)
+    pay = {c["id"]: c for c in stats["columns"]}["pay"]
+    assert pay["exempt"] == 1 and pay["confirmed"] == 1 and pay["none"] == 1
+    assert pay["expected_total"] == 160 and pay["confirmed_total"] == 80 and pay["declared_total"] == 80
+    assert R.value_label(columns[1] if columns[1]["id"] == "pay" else {"type": "confirm"}, "exempt") == "Zwolniony"

@@ -89,7 +89,7 @@ def list_table(
                 options = {o["id"]: o.get("tone") for o in column.get("options") or []}
                 tone = options.get(value) or ("neutral" if value is None else None)
             elif column.get("type") == "confirm":
-                tone = {"confirmed": "positive", "declared": "warning"}.get(value)
+                tone = {"confirmed": "positive", "declared": "warning", "exempt": "neutral"}.get(value)
             tone_row.append(tone)
         row += [_latest_source(cells), _local(entry.get("updated_at"))]
         tone_row += [None, None]
@@ -175,6 +175,8 @@ def summary_rows(kind: str, stats: Mapping[str, Any], columns: Sequence[Mapping[
         elif col["type"] == "confirm":
             out.append((f"{title}: zgłoszone", str(col.get("declared") or 0)))
             out.append((f"{title}: potwierdzone", str(col.get("confirmed") or 0)))
+            if col.get("exempt"):
+                out.append((f"{title}: zwolnieni", str(col.get("exempt"))))
             if col.get("amount") is not None:
                 out.append((f"{title}: oczekiwana kwota", f"{col.get('expected_total')} zł"))
                 out.append((f"{title}: zgłoszone wpłaty", f"{col.get('declared_total')} zł"))

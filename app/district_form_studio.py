@@ -171,6 +171,7 @@ def filter_options(column: Mapping[str, Any]) -> List[Dict[str, str]]:
         return [
             {"key": "confirmed", "label": "Otrzymano", "tone": "positive"},
             {"key": "declared", "label": "Zapłaciłem", "tone": "warning"},
+            {"key": "exempt", "label": "Zwolniony", "tone": "exempt"},
             {"key": "none", "label": "Nie zapłacono", "tone": "negative"},
         ]
     if ctype == "check":
@@ -187,7 +188,7 @@ def _rank(column: Mapping[str, Any], v: Any) -> Any:
         ids = [o["id"] for o in column.get("options") or []]
         return ids.index(first) if first in ids else 999
     if ctype == "confirm":
-        return 0 if v == "confirmed" else 1 if v == "declared" else None
+        return 0 if v == "confirmed" else 1 if v == "declared" else 2 if v == "exempt" else None
     if ctype == "check":
         return 0 if v is True else None
     if ctype == "number":
@@ -303,7 +304,7 @@ def _cell_tone(column: Mapping[str, Any], value: Any) -> str:
         options = {o["id"]: o.get("tone") for o in column.get("options") or []}
         return (options.get(value) or "") if js_has_value(value) else "neutral"
     if column.get("type") == "confirm":
-        return {"confirmed": "positive", "declared": "warning"}.get(value, "negative")
+        return {"confirmed": "positive", "declared": "warning", "exempt": "exempt"}.get(value, "negative")
     if column.get("type") == "check":
         return "positive" if value is True else ""
     return ""
@@ -311,7 +312,7 @@ def _cell_tone(column: Mapping[str, Any], value: Any) -> str:
 
 def cell_text(column: Mapping[str, Any], value: Any) -> str:
     if column.get("type") == "confirm":
-        return {"confirmed": "Otrzymano", "declared": "Zapłaciłem"}.get(value, "Nie zapłacono")
+        return {"confirmed": "Otrzymano", "declared": "Zapłaciłem", "exempt": "Zwolniony"}.get(value, "Nie zapłacono")
     if column.get("type") == "status" and not js_has_value(value):
         return "Brak głosu"
     if not R.has_value(column, value):
@@ -350,6 +351,7 @@ def charts_for_list(columns: Sequence[Mapping[str, Any]], stats: Mapping[str, An
         elif col["type"] == "confirm":
             funnels.append({"title": column["title"], "amount": col.get("amount"), "none": int(col.get("none") or 0),
                             "declared": int(col.get("declared") or 0), "confirmed": int(col.get("confirmed") or 0),
+                            "exempt": int(col.get("exempt") or 0),
                             "expected_total": col.get("expected_total"), "declared_total": col.get("declared_total"),
                             "confirmed_total": col.get("confirmed_total")})
         elif col["type"] == "number" and col.get("count"):
@@ -422,7 +424,7 @@ def group_aggs(columns: Sequence[Mapping[str, Any]], rows: Sequence[Mapping[str,
                 if declared:
                     out.append(f"zgłoszone {_money(declared * float(c['amount']))}")
             else:
-                out.append(f"{c['title']}: {got}/{len(rows)}")
+                out.append(f"{c['title']}: {got}/{len(rows) - sum(1 for v in values if v == 'exempt')}")
         elif c.get("type") == "number":
             nums = []
             for v in values:
@@ -460,7 +462,7 @@ def _money(n: Optional[float]) -> str:
 def tone_color(th: Mapping[str, Any], tone: str) -> str:
     return {
         "positive": th["pass"], "negative": th["seal"], "warning": th["warn"],
-        "neutral": th["accent"], "empty": th["line"],
+        "neutral": th["accent"], "empty": th["line"], "exempt": th["accent"],
     }.get(tone or "", th["soft"])
 
 
@@ -582,19 +584,20 @@ def dots_legend(th: Mapping[str, Any], pp: Mapping[str, Any], ink: str) -> str:
 def money_track(th: Mapping[str, Any], f: Mapping[str, Any]) -> str:
     """Tor wpłat - bohater środka: kwota wielką cyfrą, tor do oczekiwanej sumy, segmenty z liczbą osób w środku."""
     confirmed, declared, none = int(f["confirmed"]), int(f["declared"]), int(f["none"])
+    exempt = int(f.get("exempt") or 0)
     amount = float(f["amount"]) if f.get("amount") else 0.0
     if amount:
         expected_people = round(float(f.get("expected_total") or 0) / amount)
-        denom = max(expected_people, confirmed + declared, 1)
-        missing = max(0, denom - confirmed - declared)
+        denom = max(expected_people + exempt, confirmed + declared + exempt, 1)
+        missing = max(0, denom - confirmed - declared - exempt)
         big = _money(f.get("confirmed_total"))
         of = f"z {_money(f.get('expected_total'))}"
     else:
-        denom = max(1, confirmed + declared + none)
+        denom = max(1, confirmed + declared + exempt + none)
         missing = none
         big = f"{confirmed}"
         of = f"z {denom}"
-    segs = [(confirmed, th["pass"]), (declared, th["warn"])]
+    segs = [(confirmed, th["pass"]), (declared, th["warn"])] + ([(exempt, th["accent"])] if exempt else [])
     shown = [(n, c) for n, c in segs if n]
     html_segs = []
     for k, (n, color) in enumerate(shown):
@@ -610,6 +613,7 @@ def money_track(th: Mapping[str, Any], f: Mapping[str, Any]) -> str:
     legend = [
         f'<span class="lg"><i style="background:{th["pass"]}"></i>Otrzymano <b>{confirmed}</b>{esc(m(confirmed))}</span>',
         f'<span class="lg"><i style="background:{th["warn"]}"></i>Zgłoszone <b>{declared}</b>{esc(m(declared))}</span>',
+        *([f'<span class="lg"><i style="background:{th["accent"]}"></i>Zwolnieni <b>{exempt}</b></span>'] if exempt else []),
         f'<span class="lg"><i class="ho"></i>{"Brakuje" if amount else "Bez wpłaty"} <b>{missing}</b>{esc(m(missing))}</span>',
     ]
     return (f'<section class="money funnel"><div class="mline"><span class="mname">{esc(f["title"])}</span>'
@@ -1465,6 +1469,8 @@ def to_xlsx(doc: Mapping[str, Any], *, theme: str, province_key: Optional[str], 
         amt = bool(f.get("amount"))
         line(["Otrzymano", f["confirmed"], f.get("confirmed_total") if amt else None], [None, money_fmt])
         line(["Zgłoszone, czeka na potwierdzenie", f["declared"], f["declared"] * float(f["amount"]) if amt else None], [None, money_fmt])
+        if f.get("exempt"):
+            line(["Zwolnieni z opłaty", f["exempt"], None])
         line(["Bez wpłaty", f["none"], None])
         if amt:
             line(["Oczekiwane razem", round(float(f.get("expected_total") or 0) / float(f["amount"])), f.get("expected_total")], [None, money_fmt])
