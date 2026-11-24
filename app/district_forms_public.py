@@ -120,6 +120,15 @@ def _counts(ctx: S.Ctx) -> Dict[str, Any]:
     return out
 
 
+def public_slot_board(ctx: S.Ctx) -> Dict[str, Any]:
+    """Obsada terminów dla strony: tylko liczby (zajęte i wolne), bez nazwisk i zdjęć - strona nie ma logowania."""
+    board = S.slot_board(ctx, names=False)
+    for item in board.values():
+        item.pop("mine", None)
+        item["approved_at"] = None
+    return board
+
+
 def _people(ctx: S.Ctx):
     return sorted(ctx.circles.participants, key=lambda j: (S.judge_name(ctx.by_id, j).casefold(), j))
 
@@ -188,6 +197,9 @@ async def public_form(code: str) -> Dict[str, Any]:
         settings = form.get("settings_json") or {}
         out["fill_mode"] = settings.get("fill_mode") or "steps"
         out["confirmation"] = settings.get("confirmation")
+        board = public_slot_board(ctx)
+        if board:
+            out["slot_board"] = board
         out["rows"] = [] if ctx.circles.open and not ctx.circles.participants else [
             public_row(ctx, jid, with_cells=False) for jid in _people(ctx)
         ]

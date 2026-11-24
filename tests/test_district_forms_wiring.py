@@ -325,3 +325,10 @@ def test_insert_formularza_podaje_kolumny_z_default_w_pythonie():
         segment = ast.get_source_segment(text, funcs[name])
         for column in python_defaults:
             assert re.search(rf"\b{column}=", segment), (name, column)
+
+
+def test_strona_dostaje_obsade_terminow_bez_nazwisk():
+    public, fns = functions("app/district_forms_public.py")
+    board = ast.get_source_segment(public, fns["public_slot_board"])
+    assert "names=False" in board and 'pop("mine"' in board and "approved_at" in board
+    assert "public_slot_board(ctx)" in ast.get_source_segment(public, fns["public_form"])
