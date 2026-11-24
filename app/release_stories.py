@@ -1463,6 +1463,13 @@ def _clean_store_urls(raw: Any) -> dict[str, str]:
     return out
 
 
+def filter_rows_for_device(rows: list[dict[str, Any]], device: str) -> list[dict[str, Any]]:
+    """Tablet nie widzi wersji wymaganych bez oznaczenia required_tablets (jakby nie istniały)."""
+    if device != "tablet":
+        return rows
+    return [r for r in rows if not (r.get("required") and not r.get("required_tablets"))]
+
+
 async def _version_meta(row: Any, *, with_keys: bool) -> dict[str, Any]:
     data = dict(row)
     signed: dict[str, str] = {}
@@ -1476,6 +1483,7 @@ async def _version_meta(row: Any, *, with_keys: bool) -> dict[str, Any]:
         "version_id": int(data["id"]),
         "version": data["version"],
         "required": bool(data.get("required")),
+        "required_tablets": bool(data.get("required")) and bool(data.get("required_tablets")),
         "store_urls": {
             "ios": str(stored_urls.get("ios") or ""),
             "android": str(stored_urls.get("android") or ""),
@@ -1487,6 +1495,7 @@ async def _version_meta(row: Any, *, with_keys: bool) -> dict[str, Any]:
 class ReleaseMetaUpsert(BaseModel):
     preview_shots: Optional[list[dict[str, Any]]] = Field(default=None, max_length=v2.MAX_PREVIEW_SHOTS)
     required: Optional[bool] = None
+    required_tablets: Optional[bool] = None
     store_urls: Optional[dict[str, Any]] = None
 
 
@@ -1499,7 +1508,7 @@ async def get_release_meta(version_id: int, _admin: str = Depends(require_releas
 async def save_release_meta(
     version_id: int, req: ReleaseMetaUpsert, _admin: str = Depends(require_release_admin)
 ):
-    await _version_row(version_id)
+    version_row = await _version_row(version_id)
     experience = dict(await _ensure_experience(version_id))
     assets = await _assets_for(int(experience["id"]))
     values: dict[str, Any] = {}
@@ -1510,6 +1519,13 @@ async def save_release_meta(
         values["preview_shots"] = shots
     if req.required is not None:
         values["required"] = bool(req.required)
+    effective_required = (
+        bool(req.required) if req.required is not None else bool(dict(version_row).get("required"))
+    )
+    if not effective_required:
+        values["required_tablets"] = False
+    elif req.required_tablets is not None:
+        values["required_tablets"] = bool(req.required_tablets)
     if req.store_urls is not None:
         values["store_urls"] = _clean_store_urls(req.store_urls)
     if values:
@@ -1528,6 +1544,7 @@ async def save_release_meta(
 async def check_release(
     version: str = Query(..., min_length=1, max_length=40),
     platform: Literal["ios", "android"] = Query(...),
+    device: Literal["phone", "tablet"] = Query("phone"),
 ):
     """status: ok | suggest | required; latest = najnowsza wersja platformy; whats_new = premiera zainstalowanej."""
     platform_column = (
@@ -1538,7 +1555,7 @@ async def check_release(
         .where(platform_column == True)  # noqa: E712
         .where(app_versions.c.to_show == True)  # noqa: E712
     )
-    rows = [dict(r) for r in rows]
+    rows = filter_rows_for_device([dict(r) for r in rows], device)
     installed = version.strip()
     installed_key = _semver_key(installed)
     latest_row = max(rows, key=lambda r: _semver_key(str(r["version"])), default=None)
@@ -1556,6 +1573,7 @@ async def check_release(
             "preview_shots": meta["preview_shots"],
             "store_url": meta["store_urls"].get(platform) or "",
             "required": forced,
+            "required_tablets": bool(latest_row.get("required")) and bool(latest_row.get("required_tablets")),
             "frames": [],
         }
         # Kadry wachlarza, gdy wersja nie ma własnych zrzutów: media slajdów

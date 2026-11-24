@@ -2499,6 +2499,8 @@ app_versions = Table(
     Column("preview_shots", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("required", Boolean, nullable=False, server_default=text("false")),
     Column("store_urls", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # Wymuszenie dotyczy też tabletów tylko przy TRUE; bez tego tablet nie widzi wymaganej wersji.
+    Column("required_tablets", Boolean, nullable=False, server_default=text("false")),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
@@ -5065,6 +5067,7 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS preview_shots jsonb NOT NULL DEFAULT '[]'::jsonb"))
     _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS required boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS store_urls jsonb NOT NULL DEFAULT '{}'::jsonb"))
+    _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS required_tablets boolean NOT NULL DEFAULT false"))
     # Kalendarze drugorzędne Google: obie tabele stoją na produkcji.
     _conn.execute(text("ALTER TABLE calendar_tokens ADD COLUMN IF NOT EXISTS scope varchar"))
     _conn.execute(text("ALTER TABLE event_mappings ADD COLUMN IF NOT EXISTS calendar_id varchar"))

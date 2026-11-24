@@ -1606,6 +1606,7 @@ async def list_versions():
         # sprzed migracji, model i tak dostanie komplet pól.
         data.setdefault("available_ios", False)
         data.setdefault("available_android", False)
+        data.setdefault("required_tablets", False)
         versions.append(VersionItem(**data))
     return ListVersionsResponse(versions=versions)
 

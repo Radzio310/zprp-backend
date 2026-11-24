@@ -259,9 +259,7 @@ from app.presentation_middleware import PresentationMiddleware
 app.add_middleware(PresentationMiddleware)
 app.add_middleware(ClientKeyMiddleware)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+_CORS_ORIGINS = [
         "http://localhost:8081",
         "http://127.0.0.1:8081",
         "https://baza-web-two.vercel.app",
@@ -271,7 +269,11 @@ app.add_middleware(
         # Strona produktu (Hostinger) czyta `GET /public/baza-stats` z przeglądarki.
         "https://bazaapp.online",
         "https://www.bazaapp.online",
-    ],
+    ]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -315,6 +317,34 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         if isinstance(getattr(exc, "error_code", None), str):
             content["error"] = exc.error_code
     return JSONResponse(status_code=exc.status_code, content=content)
+
+SERVER_ERROR_MESSAGE = "Serwer BAZY ma krótką przerwę. Spróbuj ponownie za chwilę."
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Niezłapany wyjątek: czysty JSON zamiast strony awarii platformy.
+
+    Starlette trzyma ten handler w ServerErrorMiddleware, czyli NA ZEWNĄTRZ
+    CORSMiddleware, więc nagłówków CORS trzeba dołożyć tu ręcznie (inaczej
+    przeglądarka widzi 500 jako błąd sieci). HTTPException i RateLimitExceeded
+    mają własne handlery i tu nie trafiają. Traceback idzie tylko do logów.
+    """
+    logger.error(
+        "Niezłapany wyjątek: %s %s", request.method, request.url.path,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    headers: dict = {}
+    origin = request.headers.get("origin")
+    if origin and origin in _CORS_ORIGINS:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Vary"] = "Origin"
+    return JSONResponse(
+        status_code=500,
+        content={"error": SERVER_ERROR_MESSAGE, "code": "SERVER_ERROR", "message": SERVER_ERROR_MESSAGE},
+        headers=headers,
+    )
 
 # -------------------------
 # Static files (Railway Volume)
