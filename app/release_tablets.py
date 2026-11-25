@@ -96,3 +96,23 @@ def tablet_fields(row: Mapping[str, Any], now: datetime) -> dict[str, Any]:
         "required_since": _aware(since).isoformat() if since and required else None,
         "tablets_due_at": due.isoformat() if due is not None and not eff else None,
     }
+
+
+def backfill_values(row: Mapping[str, Any], now: datetime) -> Optional[dict[str, Any]]:
+    """Jednorazowy backfill starych wymaganych wersji (bez powiadomień).
+
+    Dotyczy tylko wierszy bez required_since, wymaganych na obu platformach. Ustawia
+    required_since = updated_at; jeśli termin już minął, a automat nie jest wstrzymany,
+    od razu required_tablets=true, source="auto". None = nie ruszaj wiersza.
+    """
+    if row.get("required_since") or not on_both_platforms(row):
+        return None
+    since = row.get("updated_at") or row.get("created_at") or now
+    values: dict[str, Any] = {"required_since": _aware(since)}
+    if (
+        not row.get("required_tablets")
+        and row.get("required_tablets_auto") is not False
+        and _aware(now) >= tablets_due_at(since)
+    ):
+        values.update(required_tablets=True, required_tablets_source="auto")
+    return values

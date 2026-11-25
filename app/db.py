@@ -5091,7 +5091,19 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS required_since timestamptz"))
     _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS required_tablets_auto boolean NOT NULL DEFAULT true"))
     _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS required_tablets_source text"))
-    _conn.execute(text("UPDATE app_versions SET required_since = updated_at WHERE required AND available_ios AND available_android AND required_since IS NULL"))
+    # Backfill jednorazowy i idempotentny (rusza tylko wiersze bez required_since): stare wersje
+    # z minionym terminem dostają required_tablets=true po cichu, bez powiadomienia adminów.
+    from app.release_tablets import backfill_values as _tablet_backfill
+    _now_bf = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+    for _r in _conn.execute(text(
+        "SELECT id, required, available_ios, available_android, required_tablets, required_tablets_auto, "
+        "required_since, updated_at, created_at FROM app_versions "
+        "WHERE required AND available_ios AND available_android AND required_since IS NULL"
+    )).mappings().all():
+        _vals = _tablet_backfill(dict(_r), _now_bf)
+        if _vals:
+            _sets = ", ".join(f"{k} = :{k}" for k in _vals)
+            _conn.execute(text(f"UPDATE app_versions SET {_sets} WHERE id = :_id AND required_since IS NULL"), {**_vals, "_id": _r["id"]})
     _conn.execute(text("UPDATE app_versions SET required_tablets_source = 'admin' WHERE required AND required_tablets AND required_tablets_source IS NULL"))
     # Kalendarze drugorzędne Google: obie tabele stoją na produkcji.
     _conn.execute(text("ALTER TABLE calendar_tokens ADD COLUMN IF NOT EXISTS scope varchar"))

@@ -89,3 +89,17 @@ def test_since_transition():
     assert since_transition(row(w(2026, 11, 1, 0, 0)), on, now) is None
     assert since_transition(row(w(2026, 11, 1, 0, 0)), off, now) is CLEAR
     assert since_transition(off, off, now) is None
+
+
+def test_backfill_cases():
+    from app.release_tablets import backfill_values
+    now = w(2026, 11, 25, 12, 0)
+    old = row(None, updated_at=w(2026, 10, 1, 10, 0))
+    got = backfill_values(old, now)
+    assert got["required_tablets"] is True and got["required_tablets_source"] == "auto"
+    fresh = row(None, updated_at=w(2026, 11, 24, 10, 0))
+    assert list(backfill_values(fresh, now)) == ["required_since"]
+    paused = row(None, updated_at=w(2026, 10, 1, 10, 0), required_tablets_auto=False)
+    assert list(backfill_values(paused, now)) == ["required_since"]
+    assert backfill_values(row(w(2026, 10, 1, 10, 0), updated_at=w(2026, 10, 1, 10, 0)), now) is None
+    assert backfill_values(row(None, updated_at=w(2026, 10, 1), available_ios=False), now) is None
