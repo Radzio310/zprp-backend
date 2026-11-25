@@ -78,7 +78,7 @@ async def _clips(pair_id: str, ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
 
 async def _compilation_items(ctx: Dict[str, Any], compilation_id: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     comp = await C.one(select(mentor_compilations).where(mentor_compilations.c.id == compilation_id))
-    if not comp or comp["pair_id"] != ctx["pair_id"]:
+    if not comp or comp["pair_id"] != ctx["pair_id"] or comp.get("deleted_at") is not None:
         raise C.err(404, "NOT_FOUND", "Nie ma takiego zestawienia.")
     rows = await C.rows(select(mentor_compilation_items).where(mentor_compilation_items.c.compilation_id == compilation_id)
                         .order_by(mentor_compilation_items.c.position.asc()))
@@ -292,18 +292,66 @@ def _summary(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def films_for(compilation_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
-    """Ostatni film każdego zestawienia (gotowy ma pierwszeństwo przed starszym w drodze). Do kafli i nagłówka zestawienia."""
+    """Film każdego zestawienia do kafli i nagłówka (25.11.2026):
+      - `film` = najnowszy gotowy (stary film odtwarza się dalej, dopóki nowy się robi), bez gotowego - najnowszy w ogóle,
+      - `film.stale` = zestawienie zmieniło się od zamówienia filmu (inne klipy, kolejność, etykiety, notatki, treść klipu),
+      - `film.update` = nowszy film w drodze albo nieudany (aktualizacja), gdy `film` jest gotowy.
+    Filmy w koszu i anulowane nie istnieją."""
     ids = [R.s(i) for i in compilation_ids if R.s(i)]
     if not ids:
         return {}
     rows = await C.rows(select(mentor_montages).where(mentor_montages.c.compilation_id.in_(ids))
-                        .where(mentor_montages.c.status.notin_(("cancelled",))).order_by(mentor_montages.c.updated_at.desc()))
-    out: Dict[str, Dict[str, Any]] = {}
+                        .where(mentor_montages.c.status.notin_(("cancelled",))).where(mentor_montages.c.deleted_at.is_(None))
+                        .order_by(mentor_montages.c.updated_at.desc()))
+    by_comp: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
-        cid = row["compilation_id"]
-        if cid not in out:
-            out[cid] = _summary(row)
+        by_comp.setdefault(row["compilation_id"], []).append(row)
+    if not by_comp:
+        return {}
+    current = await _current_contents(list(by_comp))
+    out: Dict[str, Dict[str, Any]] = {}
+    for cid, found in by_comp.items():
+        newest = found[0]
+        ready = next((r for r in found if r.get("status") == "ready"), None)
+        main = ready or newest
+        summary = _summary(main)
+        summary["stale"] = _is_stale(main, current.get(cid))
+        if ready is not None and newest["id"] != ready["id"] and newest.get("status") in (*MR.ACTIVE, "failed"):
+            summary["update"] = _summary(newest)
+        out[cid] = summary
     return out
+
+
+async def _current_contents(compilation_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Obecna treść zestawień (pozycje z żywymi klipami) do porównania z filmem: {cid: {sig, items}}."""
+    comps = {r["id"]: r for r in await C.rows(select(mentor_compilations).where(mentor_compilations.c.id.in_(compilation_ids)))}
+    rows = await C.rows(select(mentor_compilation_items).where(mentor_compilation_items.c.compilation_id.in_(compilation_ids))
+                        .order_by(mentor_compilation_items.c.position.asc()))
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        grouped.setdefault(r["compilation_id"], []).append(r)
+    clip_ids = list({r["clip_id"] for r in rows})
+    clips: Dict[str, Dict[str, Any]] = {}
+    if clip_ids:
+        clips = {r["id"]: r for r in await C.rows(select(mentor_clips).where(mentor_clips.c.id.in_(clip_ids))
+                                                   .where(mentor_clips.c.deleted_at.is_(None)))}
+    out: Dict[str, Dict[str, Any]] = {}
+    for cid, comp in comps.items():
+        mode = comp.get("mode") or "free"
+        found = grouped.get(cid, [])
+        ordered = R.playlist_items(found, mode) if mode == "contrast" else found
+        items = [{"clip_id": r["clip_id"], "label": R.legacy_label(r, mode), "note": r.get("note")} for r in ordered if r["clip_id"] in clips]
+        out[cid] = {"sig": MR.content_sig(items, clips), "items": items}
+    return out
+
+
+def _is_stale(row: Dict[str, Any], current: Optional[Dict[str, Any]]) -> bool:
+    if current is None:
+        return False
+    if row.get("content_sig"):
+        return row["content_sig"] != current["sig"]
+    # Film sprzed odcisku treści: porównanie samych pozycji (klip, etykieta, notatka).
+    return MR.items_key(_j(row.get("items_json"), [])) != MR.items_key(current["items"])
 
 
 # ─── Trasy ──────────────────────────────────────────────────────────────────
@@ -340,6 +388,7 @@ async def create_montage(pair_id: str, body: MontageBody, actor: Actor = Depends
     rsig = MR.request_sig(req["name"], req["description"], req["items"], req["clips"], body.skip_missing,
                           ranges={cid: st.get("range") for cid, st in planned.items()})
     same = await C.one(select(mentor_montages).where(mentor_montages.c.pair_id == ctx["pair_id"]).where(mentor_montages.c.request_sig == rsig)
+                       .where(mentor_montages.c.deleted_at.is_(None))
                        .where(mentor_montages.c.status.in_(("preparing", "queued", "rendering", "ready")))
                        .order_by(mentor_montages.c.updated_at.desc()).limit(1))
     if same:
@@ -353,6 +402,7 @@ async def create_montage(pair_id: str, body: MontageBody, actor: Actor = Depends
     row = {"id": mid, "pair_id": ctx["pair_id"], "compilation_id": req["compilation_id"], "name": req["name"],
            "description": req["description"] or None, "items_json": C.dumps(req["items"]), "states_json": "{}",
            "skip_missing": bool(body.skip_missing), "status": "preparing", "stage": "clips", "progress": 0.0, "request_sig": rsig,
+           "content_sig": MR.content_sig(req["items"], req["clips"]),
            "estimate_s": MR.estimate_render_s(req["film_s"], 720, len(req["items"]) + 2), "created_by": actor.judge_id,
            "acted_by": actor.acted_by, "created_at": now, "updated_at": now, "waiting_since": now}
     await database.execute(mentor_montages.insert().values(**row))
@@ -368,7 +418,7 @@ async def create_montage(pair_id: str, body: MontageBody, actor: Actor = Depends
 
 async def _montage(montage_id: str, actor: Any, action: str = "view") -> Tuple[Dict[str, Any], Dict[str, Any]]:
     row = await C.one(select(mentor_montages).where(mentor_montages.c.id == montage_id))
-    if not row or row.get("status") == "cancelled":
+    if not row or row.get("status") == "cancelled" or row.get("deleted_at") is not None:
         raise C.err(404, "NOT_FOUND", "Nie ma takiego filmu.")
     ctx = await C.pair_context(row["pair_id"], actor, action=action)
     return ctx, row
@@ -378,7 +428,8 @@ async def _montage(montage_id: str, actor: Any, action: str = "view") -> Tuple[D
 async def list_montages(pair_id: str, compilation_id: Optional[str] = Query(None), limit: int = Query(20, ge=1, le=60),
                         actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(pair_id, actor)
-    query = select(mentor_montages).where(mentor_montages.c.pair_id == ctx["pair_id"]).where(mentor_montages.c.status != "cancelled")
+    query = (select(mentor_montages).where(mentor_montages.c.pair_id == ctx["pair_id"]).where(mentor_montages.c.status != "cancelled")
+             .where(mentor_montages.c.deleted_at.is_(None)))
     if compilation_id:
         query = query.where(mentor_montages.c.compilation_id == R.s(compilation_id))
     rows = await C.rows(query.order_by(mentor_montages.c.updated_at.desc()).limit(limit))
@@ -435,12 +486,25 @@ async def delete_montage(montage_id: str, actor: Actor = Depends(mentor_actor)):
     ctx, row = await _montage(montage_id, actor)
     if not C.may(ctx, "edit", owner=R.s(row.get("created_by")) == actor.judge_id):
         raise C.err(403, "FORBIDDEN", "Film może usunąć jego autor albo administrator.")
-    await database.execute(update(mentor_montages).where(mentor_montages.c.id == row["id"]).values(status="cancelled", updated_at=C.now()))
+    if row.get("status") in MR.ACTIVE:
+        # Film w drodze nie ma czego przechowywać: anulowanie jak dotąd (worker porzuca render).
+        await database.execute(update(mentor_montages).where(mentor_montages.c.id == row["id"]).values(status="cancelled", updated_at=C.now()))
+        keys = [row.get("film_key"), row.get("poster_key")]
+        await asyncio.to_thread(M.delete_objects, [k for k in keys if k])
+        _live.pop(row["id"], None)
+        await C.touch(ctx, actor.judge_id, "montage_deleted", "compilations", data={"id": row["id"]})
+        return {"ok": True, "trashed": False}
+    # Gotowy, nieudany albo wygasły: do kosza pary na 30 dni, plik zostaje do przywrócenia (`mentor_trash`).
+    await database.execute(update(mentor_montages).where(mentor_montages.c.id == row["id"]).values(deleted_at=C.now(), deleted_by=actor.judge_id))
+    await C.touch(ctx, actor.judge_id, "montage_trashed", "compilations", data={"id": row["id"]})
+    return {"ok": True, "trashed": True}
+
+async def purge_montage(row: Dict[str, Any]) -> None:
+    """Koniec kosza (30 dni albo „Usuń na zawsze”): plik i okładka znikają z magazynu, wiersz zostaje jako anulowany."""
+    await database.execute(update(mentor_montages).where(mentor_montages.c.id == row["id"])
+                           .values(status="cancelled", film_key=None, poster_key=None, updated_at=C.now()))
     keys = [row.get("film_key"), row.get("poster_key")]
     await asyncio.to_thread(M.delete_objects, [k for k in keys if k])
-    _live.pop(row["id"], None)
-    await C.touch(ctx, actor.judge_id, "montage_deleted", "compilations", data={"id": row["id"]})
-    return {"ok": True}
 
 
 # ─── Worker: przygotowanie ──────────────────────────────────────────────────
@@ -995,6 +1059,7 @@ async def _render(row: Dict[str, Any], entries: List[Dict[str, Any]], folder: st
         _live.pop(mid, None)
         return
     _live.pop(mid, None)
+    await _supersede(row)
     await C.touch(pair_id, row["created_by"], "montage_ready", "compilations", data={"id": mid})
     try:
         from app.mentor_panel_notify import notify
@@ -1037,6 +1102,23 @@ async def render_next() -> bool:
 async def resume_interrupted() -> None:
     """Po restarcie render w toku zaczyna się od nowa (odcinki z księgi wracają od razu)."""
     await database.execute(update(mentor_montages).where(mentor_montages.c.status == "rendering").values(status="queued", stage="queued"))
+
+
+async def _supersede(row: Dict[str, Any]) -> int:
+    """Nowy gotowy film zestawienia zastępuje starsze gotowe (25.11.2026): te idą do kosza pary na 30 dni (z plikiem)."""
+    if not row.get("compilation_id"):
+        return 0
+    try:
+        older = await C.rows(select(mentor_montages.c.id).where(mentor_montages.c.compilation_id == row["compilation_id"])
+                             .where(mentor_montages.c.id != row["id"]).where(mentor_montages.c.status.in_(("ready", "expired", "failed")))
+                             .where(mentor_montages.c.deleted_at.is_(None)))
+        if older:
+            await database.execute(update(mentor_montages).where(mentor_montages.c.id.in_([r["id"] for r in older]))
+                                   .values(deleted_at=C.now(), deleted_by=row["created_by"]))
+        return len(older)
+    except Exception:  # noqa: BLE001 - porządek półki nie psuje gotowego filmu
+        logger.warning("montaż: odłożenie starszych filmów %s nieudane", row.get("id"), exc_info=True)
+        return 0
 
 
 async def retention_once() -> Dict[str, int]:

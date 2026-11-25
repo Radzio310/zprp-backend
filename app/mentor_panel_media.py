@@ -1030,6 +1030,14 @@ async def retention_once(now: Optional[datetime] = None) -> Dict[str, int]:
     except Exception:  # noqa: BLE001
         logger.warning("mentor: sprzątanie kosza nagrań nieudane", exc_info=True)
     try:
+        from app import mentor_trash as TR
+
+        swept = await TR.purge_expired(stamp)
+        if swept:
+            counts["trash_items"] = sum(swept.values())
+    except Exception:  # noqa: BLE001
+        logger.warning("mentor: sprzątanie kosza pary nieudane", exc_info=True)
+    try:
         from app.mentor_panel_auth import cleanup_auth
 
         await cleanup_auth(stamp)

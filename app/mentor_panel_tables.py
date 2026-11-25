@@ -94,6 +94,8 @@ def define_tables(metadata):
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("deleted_at", DateTime(timezone=True), nullable=True),
+        #: Kto wrzucił do kosza (25.11.2026). Ustawiony = pozycja w koszu pary na 30 dni (`mentor_trash`).
+        Column("deleted_by", String, nullable=True),
         Column("mp4_status", String, nullable=False, server_default=text("'none'")),
         Column("mp4_key", String, nullable=True),
         Column("mp4_size", BigInteger, nullable=True),
@@ -132,6 +134,9 @@ def define_tables(metadata):
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("public_token", String, nullable=True, unique=True),
         Column("published_at", DateTime(timezone=True), nullable=True),
+        #: Kosz (25.11.2026): zestawienie wraca z pozycjami przez 30 dni (`mentor_trash`).
+        Column("deleted_at", DateTime(timezone=True), nullable=True),
+        Column("deleted_by", String, nullable=True),
     )
     compilation_items = Table(
         "mentor_compilation_items",
@@ -385,6 +390,10 @@ MIGRATIONS = (
     "ALTER TABLE mentor_comments ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_audit ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_compilation_items ADD COLUMN IF NOT EXISTS label VARCHAR",
+    # Kosz pary (25.11.2026): klipy, zrzuty, zestawienia i filmy wracają przez 30 dni.
+    "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS deleted_by VARCHAR",
+    "ALTER TABLE mentor_compilations ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    "ALTER TABLE mentor_compilations ADD COLUMN IF NOT EXISTS deleted_by VARCHAR",
     # Wątki przy klipie (26.10.2026): dawny jedyny, płaski wątek klipu (bez tytułu)
     # staje się pierwszym wątkiem „Rozmowa”. Nowe wątki klipu tytuł mają zawsze.
     "UPDATE mentor_threads SET title = 'Rozmowa' WHERE target_kind = 'clip' AND (title IS NULL OR title = '')",

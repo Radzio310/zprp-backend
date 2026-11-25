@@ -45,6 +45,8 @@ def define_tables(metadata):
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("deleted_at", DateTime(timezone=True), nullable=True),
+        #: Kosz pary (25.11.2026): ustawiony = zrzut z obrazem czeka 30 dni na przywrócenie.
+        Column("deleted_by", String, nullable=True),
     )
     Index("ix_mentor_shots_pair_match", shots.c.pair_id, shots.c.match_id)
     Index("ix_mentor_shots_video", shots.c.video_id)
@@ -55,6 +57,7 @@ def define_tables(metadata):
 #: Wykonywane przy starcie przez `app/db.py` (PostgreSQL), każde osobno i idempotentnie.
 MIGRATIONS = (
     "ALTER TABLE mentor_shots ADD COLUMN IF NOT EXISTS view_json TEXT",
+    "ALTER TABLE mentor_shots ADD COLUMN IF NOT EXISTS deleted_by VARCHAR",
     "CREATE INDEX IF NOT EXISTS ix_mentor_shots_pair_match ON mentor_shots (pair_id, match_id)",
     "CREATE INDEX IF NOT EXISTS ix_mentor_shots_video ON mentor_shots (video_id)",
     "CREATE INDEX IF NOT EXISTS ix_mentor_shots_clip ON mentor_shots (clip_id)",

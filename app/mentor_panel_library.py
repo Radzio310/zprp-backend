@@ -508,18 +508,10 @@ async def _notify_clip_to_discuss(ctx: Dict[str, Any], actor: Actor, row: Dict[s
 async def delete_clip(clip_id: str, actor: Actor = Depends(mentor_actor)):
     ctx, row = await _ctx_for(mentor_clips, clip_id, actor, missing="Nie ma takiego klipu.")
     C.check(ctx, "edit", owner=R.s(row.get("author_id")) == actor.judge_id)
+    # Kosz pary (25.11.2026): 30 dni na przywrócenie, pliki MP4 zostają do końca kosza (`mentor_trash.purge_clip`).
+    # Publiczny link wygasa od razu i po przywróceniu trzeba go udostępnić ponownie.
     await database.execute(update(mentor_clips).where(mentor_clips.c.id == clip_id)
-                           .values(deleted_at=C.now(), public_token=None, published_at=None))
-    if row.get("mp4_key"):
-        from app.mentor_panel_media import forget_object
-
-        forget_object(row.get("mp4_key"))
-    try:
-        from app import mentor_bastion_jobs as J
-
-        await J.discard_clip_media(clip_id)  # zadania anulowane, pliki wszystkich rewizji skasowane
-    except Exception:  # noqa: BLE001
-        pass
+                           .values(deleted_at=C.now(), deleted_by=actor.judge_id, public_token=None, published_at=None))
     await C.touch(ctx, actor.judge_id, "clip_deleted", "clips", row["match_id"], {"id": clip_id})
     from app.mentor_shots import on_clip_deleted
 
@@ -790,7 +782,7 @@ async def _valid_items(ctx: Dict[str, Any], raw: List[Dict[str, Any]], mode: str
 @router.get("/pairs/{pair_id}/compilations")
 async def list_compilations(pair_id: str, actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(pair_id, actor)
-    found = await C.rows(select(mentor_compilations).where(mentor_compilations.c.pair_id == ctx["pair_id"])
+    found = await C.rows(select(mentor_compilations).where(mentor_compilations.c.pair_id == ctx["pair_id"]).where(mentor_compilations.c.deleted_at.is_(None))
                          .order_by(mentor_compilations.c.updated_at.desc()))
     return {"compilations": await compilation_summaries(ctx, found)}
 
@@ -820,7 +812,7 @@ async def suggest_compilations(pair_id: str, match_id: Optional[str] = Query(Non
     from app import mentor_compilation_suggest as S
 
     ctx = await C.pair_context(pair_id, actor)
-    comps = await C.rows(select(mentor_compilations).where(mentor_compilations.c.pair_id == ctx["pair_id"])
+    comps = await C.rows(select(mentor_compilations).where(mentor_compilations.c.pair_id == ctx["pair_id"]).where(mentor_compilations.c.deleted_at.is_(None))
                          .order_by(mentor_compilations.c.updated_at.desc()))
     if not comps:
         return {"suggestions": []}
@@ -891,11 +883,12 @@ async def update_compilation(compilation_id: str, body: CompilationPatch, actor:
 
 @router.delete("/compilations/{compilation_id}")
 async def delete_compilation(compilation_id: str, actor: Actor = Depends(mentor_actor)):
+    """Do kosza pary na 30 dni (25.11.2026): pozycje zostają, publiczny link wygasa; koniec kosza kasuje wiersz i pozycje."""
     ctx, _row = await _editable_compilation(compilation_id, actor)
-    await database.execute(delete(mentor_compilation_items).where(mentor_compilation_items.c.compilation_id == compilation_id))
-    await database.execute(delete(mentor_compilations).where(mentor_compilations.c.id == compilation_id))
+    await database.execute(update(mentor_compilations).where(mentor_compilations.c.id == compilation_id)
+                           .values(deleted_at=C.now(), deleted_by=actor.judge_id, public_token=None, published_at=None))
     await C.touch(ctx, actor.judge_id, "compilation_deleted", "compilations", data={"id": compilation_id})
-    return {"ok": True}
+    return {"ok": True, "trashed": True}
 
 
 @router.put("/compilations/{compilation_id}/items")
@@ -995,7 +988,7 @@ async def _thread_target(ctx: Dict[str, Any], kind: str, target_id: str, match_i
         return shot["match_id"]
     if kind == "compilation":
         comp = await C.one(select(mentor_compilations).where(mentor_compilations.c.id == target_id))
-        if not comp or comp["pair_id"] != ctx["pair_id"]:
+        if not comp or comp["pair_id"] != ctx["pair_id"] or comp.get("deleted_at") is not None:
             raise C.err(404, "NOT_FOUND", "Nie ma takiego zestawienia.")
         return None
     if kind == "pair":
@@ -1389,7 +1382,7 @@ async def public_view(token: str):
         cards.update(await _watched_lookup(clip["pair_id"], [clip["match_id"]]))
         cats = await C.rows(select(mentor_categories).where((mentor_categories.c.pair_id == clip["pair_id"]) | mentor_categories.c.pair_id.is_(None)))
         return {"kind": "clip", **await _public_clip(clip, cards, cats)}
-    comp = await C.one(select(mentor_compilations).where(mentor_compilations.c.public_token == token))
+    comp = await C.one(select(mentor_compilations).where(mentor_compilations.c.public_token == token).where(mentor_compilations.c.deleted_at.is_(None)))
     if comp:
         pair = await _public_pair(comp["pair_id"])
         cards = {c["match_id"]: c for c in await C.pair_match_cards(pair["judge_ids"])}
