@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy import select, insert, update, delete, func
 from app.proel_lineup_fill import fill_shared_lineup
+from app.proel_attempts import record_lead_change as record_lease_change, record_lease_refusal
 from app.db import (
     database,
     proel_deleted_matches,
@@ -1035,6 +1036,26 @@ async def lease_proel_match(
     actor: Actor = Depends(proel_actor),
     rights: AdminRights = Depends(proel_admin_rights),
 ):
+    """Opakowanie: odmowy 409/412 trafiają do Rejestru prób (w tle, bez rzucania)."""
+    try:
+        return await _lease_proel_match_impl(req, actor, rights)
+    except HTTPException as exc:
+        if exc.status_code in (409, 412) and isinstance(exc.detail, dict):
+            record_lease_refusal(
+                match_number=str(req.match_number or ""),
+                code=str(exc.detail.get("code") or ""),
+                actor=actor,
+                holder_name=str(exc.detail.get("holder") or ""),
+                zprp_match_id=str(req.zprp_match_id or ""),
+            )
+        raise
+
+
+async def _lease_proel_match_impl(
+    req: ProElLeaseRequest,
+    actor: Actor = Depends(proel_actor),
+    rights: AdminRights = Depends(proel_admin_rights),
+):
     """W trakcie meczu pisze dokładnie JEDNA osoba.
 
     Twarda blokada, nie ostrzeżenie: kto nie ma leasingu, nie zapisuje bloba.
@@ -1282,6 +1303,16 @@ async def lease_proel_match(
                 **({"forced": True} if forced else {}),
             },
             event_key=f"lease:{match_number}:{epoch}",
+        )
+        record_lease_change(
+            match_number=match_number,
+            reclaimed=reclaimed,
+            actor=actor,
+            holder_name=state.get("lease_name") or "",
+            holder_install=state.get("lease_install") or "",
+            epoch=epoch,
+            forced=forced,
+            zprp_match_id=zprp_id,
         )
 
     return {
@@ -1974,6 +2005,13 @@ async def update_proel_match(
                 and _lease_active(state)
                 and state.get("lease_install") != str(x_installation_id or "").strip()
             ):
+                record_lease_refusal(
+                    match_number=str(match_number or ""),
+                    code="LEASE_LOST",
+                    actor=actor,
+                    holder_name=str(state.get("lease_name") or ""),
+                    app_version=x_app_version,
+                )
                 raise HTTPException(
                     412,
                     detail={

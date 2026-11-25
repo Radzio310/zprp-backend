@@ -59,6 +59,7 @@ EVENT_LABELS: Dict[str, str] = {
     "match.created": "Założenie meczu",
     "match.live_started": "Start prowadzenia",
     "table.taken_over": "Przejęcie stolika",
+    "table.reclaimed": "Odzyskanie prowadzenia meczu",
     "match.finished": "Zakończenie meczu",
     "match.approved": "Zatwierdzenie protokołu",
     "match.unapproved": "Cofnięcie zatwierdzenia",
@@ -1629,3 +1630,13 @@ async def journal_events(
         "next_cursor": next_cursor,
         "labels": EVENT_LABELS,
     }
+
+# ── Rejestr prób ProEla (`app/proel_attempts.py`) ─────────────────────────
+#
+# Trasy `/proel/attempts*` dopinamy do TEGO routera, który `main.py` już
+# rejestruje (przed `proel_router`, więc nic ich nie przesłania). Ścieżki w
+# trasach rejestru są pełne, dlatego kopiujemy same obiekty tras. Import na
+# końcu pliku: rejestr czyta stąd `soft_actor` leniwie, w funkcjach.
+from app.proel_attempts import router as _attempts_router  # noqa: E402
+
+router.routes.extend(_attempts_router.routes)

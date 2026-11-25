@@ -23,7 +23,7 @@ import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func as sa_func, or_, select, update
 from passlib.context import CryptContext
@@ -368,8 +368,28 @@ async def create_user(req: ProelUserCreateRequest):
     return _to_user_item(dict(row))
 
 
+def _note_login_failure(req: ProelLoginRequest, request: Request, status_code: int, detail: str) -> None:
+    """Rejestr prób ProEla: nieudane logowanie (w tle, bez hasła, nigdy nie rzuca)."""
+    try:
+        from app.proel_attempts import record_login_failure
+
+        fwd = request.headers.get("x-forwarded-for") or ""
+        ip = fwd.split(",")[0].strip() or (request.client.host if request.client else "")
+        record_login_failure(
+            login=req.login or "",
+            status_code=status_code,
+            detail=detail,
+            ip=ip[:64],
+            app_version=req.app_version,
+            install=req.device_id or "",
+            platform=req.device_platform or "",
+        )
+    except Exception:
+        pass
+
+
 @router.post("/login", response_model=ProelLoginResponse, summary="Logowanie kontem ProEl")
-async def login_user(req: ProelLoginRequest):
+async def login_user(req: ProelLoginRequest, request: Request):
     database, users_t = _db()
     login_value = (req.login or "").strip()
     if not login_value:
@@ -387,12 +407,15 @@ async def login_user(req: ProelLoginRequest):
             )
         )
     if not row:
+        _note_login_failure(req, request, 401, "Nie ma takiego użytkownika")
         raise HTTPException(status_code=401, detail="Nie ma takiego użytkownika")
 
     u = dict(row)
     if not u.get("is_active", True):
+        _note_login_failure(req, request, 403, "Konto zostało dezaktywowane")
         raise HTTPException(status_code=403, detail="Konto zostało dezaktywowane")
     if not _verify_password(password, u["password_hash"]):
+        _note_login_failure(req, request, 401, "Nieprawidłowe hasło")
         raise HTTPException(status_code=401, detail="Nieprawidłowe hasło")
 
     now = datetime.now(timezone.utc)
