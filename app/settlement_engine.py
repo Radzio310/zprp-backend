@@ -73,6 +73,13 @@ class Assignment:
     #: Numer oficjalnego dokumentu, ktory zamrozil miasto zamieszkania i dojazd
     #: (`settlement_home_lock`, 06.11.2026). None - mecz jeszcze nierozliczony.
     home_locked: Optional[str] = None
+    #: Placacy za mecz (klub albo grupa budzetowa klubow, `OKREG` gdy placi okreg)
+    #: - ustawia warstwa bazy (`province_settlement_trips`), silnik go nie zgaduje.
+    #: None = nieznany: taki mecz nie skleja sie z innymi (dojazd osobno).
+    payer: Optional[str] = None
+    #: Reczna decyzja o dojezdzie TEJ obsady: "together" (bez wlasnego dojazdu)
+    #: albo "separate" (wlasny dojazd). None = decyduje automat.
+    trip_mode: Optional[str] = None
 
 
 def _zprp_reason(assignment: "Assignment") -> Optional[str]:
@@ -137,6 +144,23 @@ class SettledMatch:
     exclude_hint: Optional[str] = None
     #: Dokument, ktory zamrozil miasto zamieszkania i dojazd (`Assignment.home_locked`).
     home_locked: Optional[str] = None
+    #: Wyjazd zbiorczy zwyklych meczow (25.11.2026, `_mark_day_trips`). Pola
+    #: widac w odpowiedzi HTTP, zeby panel pokazal stan sytuacji do scalenia.
+    #: Czy mecz moze brac udzial w regule (zwykly, od `TRIP_SHARE_SINCE`).
+    trip_eligible: bool = True
+    payer: Optional[str] = None
+    #: Dowolny mecz tego dnia w tej miejscowosci u tego sedziego, ktory tez moze
+    #: byc scalony - „sytuacja do scalenia".
+    trip_candidate: bool = False
+    trip_group: Optional[str] = None
+    #: "auto" | "together" | "separate" - reczna decyzja albo automat.
+    trip_mode: str = "auto"
+    #: "own" (ma wlasny dojazd) | "shared" (jedzie na dojezdzie innego meczu)
+    #: | "none" (bez dojazdu: brak kilometrow).
+    trip_result: Optional[str] = None
+    #: "same-payer" | "different-payers" | "unknown-payer" | "manual-together"
+    #: | "manual-separate"; None poza sytuacja do scalenia.
+    trip_reason: Optional[str] = None
 
 
 @dataclass
@@ -310,6 +334,114 @@ def _mark_tournaments(
             item.gross = 0
             item.rate_shared = True
 
+#: Od tego dnia zwykle mecze tego samego sedziego, tego samego dnia, w tej samej
+#: miejscowosci i u tego samego platnika maja JEDEN dojazd (decyzja z 25.11.2026).
+#: Wczesniejsze miesiace licza sie bez zmian - sa rozliczone.
+TRIP_SHARE_SINCE = date(2026, 11, 1)
+
+MODE_AUTO = "auto"
+MODE_TOGETHER = "together"
+MODE_SEPARATE = "separate"
+TRIP_MODES = (MODE_TOGETHER, MODE_SEPARATE)
+
+
+def _clean_mode(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in TRIP_MODES else MODE_AUTO
+
+
+def _mark_day_trips(matches: list[SettledMatch], *, enabled: bool = True) -> None:
+    """
+    Wyjazd zbiorczy zwyklych meczow: sedzia + DZIEN (polski) + MIEJSCOWOSC.
+
+    Kandydat do scalenia: zwykly mecz okregowy od `TRIP_SHARE_SINCE`, z miastem
+    i data, nie turniej dzieci/MlMR (te maja wlasna regule `_mark_tournaments`),
+    nie reczny mecz z gotowa kwota i nie obsada rozliczana przez ZPRP. Cala doba,
+    bez bufora czasowego, hala nie ma znaczenia.
+
+    Automat: mecze tego SAMEGO platnika (`payer`) daja jeden dojazd, placi go
+    najwczesniejszy z nich, ktory ma dojazd; pozostale dostaja `travel = 0`
+    i `travel_shared`. Rozni platnicy i platnik nieznany - dojazdy osobno.
+
+    Reczna decyzja wygrywa z automatem: „together" zeruje dojazd tej obsady, o ile
+    w grupie zostaje ktos z wlasnym dojazdem (inaczej obsada go zachowuje:
+    `manual-together-alone`), „separate" zostawia jej wlasny i wylacza ja z automatu. Dziala tez bez
+    kandydata (np. drugi mecz lezy w innym okresie).
+    """
+    if not enabled:
+        return
+    groups: dict[tuple[str, str, str], list[SettledMatch]] = {}
+    for item in matches:
+        if not item.trip_eligible or item.origin == "manual" or item.zprp_reason:
+            continue
+        if _trip_kind(item.match_code) is not None:
+            continue
+        day = _local_day(item)
+        if day is None or day < TRIP_SHARE_SINCE:
+            continue
+        city = _city_key(item.city)
+        if not city:
+            continue
+        groups.setdefault((item.judge_id, day.isoformat(), city), []).append(item)
+
+    for (judge, day_iso, city), members in groups.items():
+        members.sort(
+            key=lambda m: (m.match_at or datetime.min.replace(tzinfo=timezone.utc), m.match_key)
+        )
+        candidate = len(members) >= 2
+        group_id = f"tg:{judge}:{day_iso}:{city}"
+        auto: list[SettledMatch] = []
+        own_travel = {id(item): item.travel for item in members}
+        for item in members:
+            item.trip_candidate = candidate
+            item.trip_group = group_id if candidate else None
+            if item.trip_mode == MODE_TOGETHER:
+                item.trip_reason = "manual-together"
+                _share(item)
+            elif item.trip_mode == MODE_SEPARATE:
+                item.trip_reason = "manual-separate" if candidate else None
+                item.trip_result = "own" if item.travel else "none"
+            else:
+                auto.append(item)
+        by_payer: dict[str, list[SettledMatch]] = {}
+        for item in auto:
+            if item.payer:
+                by_payer.setdefault(item.payer, []).append(item)
+        for item in auto:
+            item.trip_result = "own" if item.travel else "none"
+            if not candidate:
+                continue
+            if not item.payer:
+                item.trip_reason = "unknown-payer"
+            elif len(by_payer[item.payer]) >= 2:
+                item.trip_reason = "same-payer"
+            elif len(members) >= 2:
+                item.trip_reason = "different-payers"
+        for same in by_payer.values():
+            if len(same) < 2:
+                continue
+            paying = next((m for m in same if m.travel), None)
+            for item in same:
+                if item is not paying and item.travel:
+                    _share(item)
+        # „together" nie moze zostawic sedziego bez zadnego dojazdu: gdy w grupie
+        # nikt nie ma wlasnego, dojazd wraca do najwczesniejszej obsady z „together".
+        if not any(m.travel for m in members):
+            lone = next(
+                (m for m in members if m.trip_mode == MODE_TOGETHER and own_travel[id(m)] > 0), None
+            )
+            if lone is not None:
+                lone.travel = own_travel[id(lone)]
+                lone.travel_shared = False
+                lone.trip_result = "own"
+                lone.trip_reason = "manual-together-alone"
+
+
+def _share(item: SettledMatch) -> None:
+    item.travel_shared = True
+    item.travel = 0
+    item.trip_result = "shared"
+
 
 def settle_match(
     assignment: Assignment,
@@ -401,6 +533,8 @@ def settle_match(
         status=status,
         zprp_reason=_zprp_reason(assignment),
         triple_table=triple,
+        payer=assignment.payer,
+        trip_mode=_clean_mode(assignment.trip_mode),
     )
 
 
@@ -436,6 +570,7 @@ def _settle_fixed(assignment: Assignment, when_date: Optional[date], now: dateti
         future=_is_future(assignment.match_at, now),
         approved=assignment.approved,
         status="computed",
+        trip_eligible=False,
     )
 
 
@@ -451,6 +586,7 @@ def settle_judges(
     include_future: bool = False,
     include_zprp: bool = False,
     names: Optional[dict[str, str]] = None,
+    share_trips: bool = True,
 ) -> list[JudgeSettlement]:
     """
     Miesiac wszystkich sedziow.
@@ -493,6 +629,9 @@ def settle_judges(
     # Sklejanie turnieju MUSI isc po odsiewie, bo dojazd i stawke placi
     # najwczesniejszy mecz Z TYCH, ktore weszly do rozliczenia.
     _mark_tournaments(settled, province_versions=province_versions)
+    # `share_trips=False` liczy STARA regula (dojazd przy kazdym meczu) - dla
+    # skryptu, ktory szuka sytuacji sprzed nowej reguly.
+    _mark_day_trips(settled, enabled=share_trips)
 
     by_judge: dict[str, JudgeSettlement] = {}
     for item in settled:

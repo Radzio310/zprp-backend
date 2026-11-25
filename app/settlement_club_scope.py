@@ -117,16 +117,27 @@ async def _with_splits(province: str, rows) -> list:
     return out
 
 
-async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
+async def club_scope_many(
+    province: str,
+    by_season: dict[str, list],
+    *,
+    load_hosts: bool = True,
+    extra_hosts: dict[str, str] | None = None,
+    extra_guests: dict[str, str] | None = None,
+) -> dict:
     """
     To samo, co `club_scope`, ale dla KILKU sezonow naraz i jednym odczytem bazy.
 
     Siatka miesiecy siega kilka sezonow wstecz - jeden odczyt zamiast zapytania na
     sezon. Druzyny dopasowujemy SEZON PO SEZONIE (numer druzyny bywa inny).
+
+    `load_hosts=False` pomija odczyt stanow WSZYSTKICH meczow okregu (gospodarze
+    z terminarza) - dla prognozy z telefonu, gdzie mecze nie maja wpisu w bazie,
+    a gospodarza niesie `extra_hosts`/`extra_guests` (klucz meczu -> nazwa).
     """
     seasons = [season for season in by_season if season]
     if not seasons:
-        return {"match_keys": set(), "excluded_keys": set(), "clubs": [], "club_of": {}}
+        return {"match_keys": set(), "excluded_keys": set(), "clubs": [], "club_of": {}, "payer_of": {}}
 
     rows = await database.fetch_all(
         select(province_club_teams).where(
@@ -191,16 +202,20 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
         for row in tournament_rows
     }
 
-    host_rows = await database.fetch_all(
-        select(province_matches.c.match_id, province_matches.c.state_json).where(
-            and_(
-                province_matches.c.province.in_(spellings(province)),
-                province_matches.c.active.is_(True),
+    host_rows = (
+        await database.fetch_all(
+            select(province_matches.c.match_id, province_matches.c.state_json).where(
+                and_(
+                    province_matches.c.province.in_(spellings(province)),
+                    province_matches.c.active.is_(True),
+                )
             )
         )
+        if load_hosts
+        else []
     )
-    hosts: dict[str, str] = {}
-    guests: dict[str, str] = {}
+    hosts: dict[str, str] = dict(extra_hosts or {})
+    guests: dict[str, str] = dict(extra_guests or {})
     swapped_matches: set[str] = set()
     for row in host_rows:
         state = _state(row["state_json"])
@@ -219,6 +234,9 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
     #: mecz -> klub, który za niego płaci (widok jednego sędziego liczy
     #: kluby tylko ze swoich meczów, choć turniej rozstrzygał się na całym).
     club_of: dict[str, str] = {}
+    #: mecz -> platnik (numer klubu albo `OKREG`) takze dla meczow, ktore wyplaca
+    #: okreg - potrzebny wyjazdowi zbiorczemu (`province_settlement_trips`).
+    payer_of: dict[str, str] = {}
     for season, matches in by_season.items():
         by_id, by_key = teams.get(season, ({}, {}))
         charges = C.build_charges(
@@ -241,8 +259,14 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
             # Mecz przeniesiony na OKRĘG jako płatnika (`district_payer`) ma
             # status `charged`, nie `club-off` - zostaje w rozliczeniu okręgu,
             # bo to okręg płaci sędziom. Zmienia się tylko, kto jest obciążony.
+            if row.status in (C.CHARGED, C.CLUB_OFF) and row.club_id:
+                payer_of[row.match_key] = row.club_id
             if not C.paid_by_club(row, foreign.get(season, set())):
                 continue
+            # Gospodarz bez nazwy to platnik NIEZNANY (dojazdy osobno), nie wspolny
+            # „host:?" - dwa rozne nieznane kluby nie maja jednego dojazdu.
+            if row.club_id or row.host_name:
+                payer_of.setdefault(row.match_key, row.club_id or f"host:{row.host_name}")
             club_keys.add(row.match_key)
             # Gospodarz spoza panelu (np. klub z Kielc w II lidze) nie ma
             # numeru klubu - grupujemy po nazwie z terminarza.
@@ -267,4 +291,5 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
         "excluded_keys": excluded_keys,
         "clubs": list(details.values()),
         "club_of": club_of,
+        "payer_of": payer_of,
     }

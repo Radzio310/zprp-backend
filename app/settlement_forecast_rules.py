@@ -103,6 +103,9 @@ def pick_forecast(
                 "city": str(raw.get("city") or "").strip(),
                 "hall": str(raw.get("hall") or "").strip(),
                 "teams": str(raw.get("teams") or "").strip(),
+                # Opcjonalne (nowy telefon): faktyczny gospodarz i gosc po zamianie stron.
+                "host": str(raw.get("host") or "").strip(),
+                "guest": str(raw.get("guest") or "").strip(),
                 "round_text": raw.get("round") or None,
                 "series_text": raw.get("series") or None,
             }

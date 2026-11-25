@@ -309,6 +309,17 @@ async def _base(province: str) -> dict:
         central_versions, province_versions = await _versions(province)
         names = await _judge_names(province)
         everything = await _assignments(province)
+        # Placacy i reczne decyzje o wyjezdzie zbiorczym (25.11.2026) - na
+        # obsadach, zanim pojda do ktoregokolwiek rachunku.
+        from app.province_settlement_trips import annotate_trips
+
+        await annotate_trips(
+            province,
+            everything,
+            central_versions=central_versions,
+            province_versions=province_versions,
+            now=_now(),
+        )
         # Bomby z Rejestru nieobecnosci (06.10.2026): obsada z czynna bomba nie
         # jest wyplacana ani doliczana klubowi. Odsiew TUTAJ, bo z tej bazy licza
         # sie wszystkie zestawienia, PDF-y, „Moje rozliczenie", siatka miesiecy
@@ -836,6 +847,13 @@ def _match_json(match: E.SettledMatch) -> dict:
         "rate_shared": match.rate_shared,
         # „Z rozgrywek E/JmK zdjeto juz 3 mecze - zdjac tez ten?" albo None.
         "exclude_hint": match.exclude_hint,
+        # Wyjazd zbiorczy zwyklych meczow (25.11.2026) - stan do pokazania w panelu.
+        "trip_candidate": match.trip_candidate,
+        "trip_group": match.trip_group,
+        "trip_mode": match.trip_mode,
+        "trip_result": match.trip_result,
+        "trip_reason": match.trip_reason,
+        "trip_payer": match.payer,
     }
 
 
@@ -1610,6 +1628,10 @@ class ForecastMatch(BaseModel):
     city: Optional[str] = None
     hall: Optional[str] = None
     teams: Optional[str] = None
+    #: Opcjonalne (telefon od 25.11.2026): faktyczny gospodarz i gosc (po zamianie
+    #: stron). Stary telefon ich nie wysyla - wtedy gospodarz z napisu `teams`.
+    host: Optional[str] = None
+    guest: Optional[str] = None
     round: Optional[str] = None
     series: Optional[str] = None
 
@@ -1744,6 +1766,20 @@ async def _forecast_assignments(
                 and R.province_pays_field(item["code"], managed, item["match_at"]),
             )
         )
+    # Platnik i reczna decyzja o wspolnym dojezdzie - ta sama regula co obsady
+    # z bazy (`annotate_trips`), liczona tylko dla kilku doslanych meczow.
+    from app.province_settlement_trips import annotate_forecast
+
+    await annotate_forecast(
+        key,
+        str(judge_id),
+        out,
+        central_versions=base["central_versions"],
+        province_versions=base["province_versions"],
+        now=_now(),
+        hosts={item["match_key"]: item["host"] for item in picked if item.get("host")},
+        guests={item["match_key"]: item["guest"] for item in picked if item.get("guest")},
+    )
     return out
 
 

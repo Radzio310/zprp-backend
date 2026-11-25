@@ -199,6 +199,29 @@ def fcm_message_payload(
 ) -> Dict[str, Any]:
     """Buduje wiadomość FCM, również dla testów bez wykonywania sieci."""
     raw_data = data or {}
+    if _truthy(raw_data.get("dataOnly")):
+        # Cichy push danych: bez bloku `notification`, więc system niczego nie
+        # pokazuje, a aplikacja dostaje ładunek we własnym handlerze.
+        # `dataOnly` nie jedzie do telefonu - to flaga dla tej funkcji.
+        payload_data = {
+            k: json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)
+            for k, v in raw_data.items()
+            if k != "dataOnly"
+        }
+        return {
+            "message": {
+                "token": fcm_token,
+                "data": payload_data,
+                "android": {"priority": "high", "ttl": "3600s"},
+                "apns": {
+                    "headers": {
+                        "apns-push-type": "background",
+                        "apns-priority": "5",
+                    },
+                    "payload": {"aps": {"content-available": 1}},
+                },
+            }
+        }
     tag = notification_tag(raw_data, title, body)
     silent = _truthy(raw_data.get("notificationSilent"))
     android_notification: Dict[str, Any] = {

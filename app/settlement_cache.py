@@ -96,6 +96,8 @@ WATCHED_TABLES = frozenset(
         # 26.10.2026: rozbicie klubu zmienia, do którego klubu idzie drużyna.
         "province_club_splits",
         "province_club_split_teams",
+        # 25.11.2026: reczna decyzja o wspolnym dojezdzie.
+        "province_trip_decisions",
     }
 )
 
@@ -116,6 +118,18 @@ BASE_TABLES = frozenset(
         "match_bombs",
         "province_bomb_penalty_scale",
         "province_module_config",
+        # 25.11.2026: PLATNIK meczu i reczna decyzja o wspolnym dojezdzie sa
+        # wpisane w obsady wspolnej bazy (`province_settlement_trips`), wiec
+        # kazdy zapis zmieniajacy platnika przelicza tez baze: gospodarz
+        # turnieju, przelacznik klubu, budzety, rozbicia, druzyny klubu.
+        "province_tournament_hosts",
+        "province_clubs",
+        "province_club_teams",
+        "province_club_budgets",
+        "province_club_merge_rejections",
+        "province_club_splits",
+        "province_club_split_teams",
+        "province_trip_decisions",
     }
 )
 #: Rodzaje wyników, które zależą TYLKO od tabel faktów.

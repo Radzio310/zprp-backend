@@ -91,11 +91,11 @@ class TestWspolnyPodzial:
 
     def test_druzyny_dopasowywane_sezon_po_sezonie(self):
         """Ten sam numer druzyny bywa w innym sezonie w innym klubie."""
-        body = _body(SCOPE, "async def club_scope_many", 4000)
+        body = _body(SCOPE, "async def club_scope_many", 6000)
         assert "province_club_teams.c.season.in_(seasons)" in body
         assert "for season, matches in by_season.items():" in body
         assert "teams.get(season, ({}, {}))" in body
 
     def test_pusty_zakres_nie_pyta_bazy(self):
         body = _body(SCOPE, "async def club_scope_many")
-        assert 'return {"match_keys": set(), "excluded_keys": set(), "clubs": [], "club_of": {}}' in body
+        assert 'return {"match_keys": set(), "excluded_keys": set(), "clubs": [], "club_of": {}, "payer_of": {}}' in body

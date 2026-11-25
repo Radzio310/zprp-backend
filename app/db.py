@@ -1682,6 +1682,20 @@ province_tournament_hosts = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now()),
 )
 
+# Ręczna decyzja o dojeździe jednej obsady (25.11.2026): „licz razem" (bez
+# własnego dojazdu) albo „licz osobno" (własny dojazd). Brak wiersza = automat
+# (`settlement_engine._mark_day_trips`). Nowa tabela - `create_all` ją dołoży.
+province_trip_decisions = Table(
+    "province_trip_decisions",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("judge_id", String, primary_key=True),
+    Column("match_key", String, primary_key=True),
+    Column("mode", String, nullable=False),
+    Column("updated_by", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
+)
+
 # Cofnięte AUTOMATYCZNE scalenia klubów (06.10.2026). Drużyna bez numeru
 # klubu w ZPRP (klub zastępczy `eligible-team:`) dołącza sama do klubu
 # o tej samej nazwie bez liczebnika („SPR Pogoń 1945 II Zabrze" ->

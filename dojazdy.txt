@@ -1,0 +1,12 @@
+﻿2026-10-11 | PAZUR Leszek (1067) | Zabrze | mecze: IIK4/4 14:00; IKB/24 17:00 | płatnicy: SPR Pogoń 1945 Zabrze; SPR Pogoń 1945 Zabrze | ten sam płatnik | dojazdy: 2 = 35.20 zł | nadwyżka 17.60 zł
+2026-10-11 | POLOCZEK Kamil (189) | Chorzów | mecze: IIM4/15 13:00; IKB/21 17:00 | płatnicy: Ruch Chorzów Handball; Akademia Handballu Ruch Chorzów | różni płatnicy | dojazdy: 2 = 81.28 zł | nadwyżka 40.64 zł
+2026-10-20 | WINKLER Marceli (1187) | Rudnik | mecze: S/MłK1213/11 16:00; S/JmK/25 18:00 | płatnicy: UKS Start Pietrowice Wielkie; UKS Start Pietrowice Wielkie | ten sam płatnik | dojazdy: 2 = 17.36 zł | nadwyżka 8.68 zł
+2026-10-25 | KRAWCZYK Rafał (265) | Zabrze | mecze: IIK4/10 12:00; S/MłM1213/11 17:00 | płatnicy: SPR Pogoń 1945 Zabrze; TS Asy Sparta Zabrze | różni płatnicy | dojazdy: 2 = 68.00 zł | nadwyżka 28.00 zł
+2026-10-29 | PAZUR Mirosław (132) | Zabrze | mecze: S/MłM1213/13 15:00; S/JmM/46 16:30 | płatnicy: SPR Górnik Zabrze; SPR Górnik Zabrze | ten sam płatnik | dojazdy: 2 = 22.40 zł | nadwyżka 11.20 zł
+------------------------------------------------------------
+Sytuacje: 5, sędziowie: 5, łączna nadwyżka: 106.12 zł
+  ten sam płatnik (jeden dojazd wg nowej reguły): 3 sytuacji, sędziów 3, nadwyżka 37.48 zł
+  różni płatnicy: 2 sytuacji, sędziów 2, nadwyżka 68.64 zł
+Wg miesięcy:
+  2026-10: 5 sytuacji, nadwyżka 106.12 zł (ten sam płatnik 37.48, różni 68.64)
+Oszczędność wg nowej reguły (suma po płatnikach): 37.48 zł

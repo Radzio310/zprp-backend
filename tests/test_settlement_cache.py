@@ -274,3 +274,20 @@ def test_wplata_nie_czyta_faktow_okregu_od_nowa():
     assert clubs is None
     SC.bump("SLASKIE")  # jawne podbicie bez zakresu rusza wszystko
     assert SC.peek("base", "SLASKIE") is None
+
+
+def test_zapis_zmieniajacy_platnika_unieważnia_wspolna_baze():
+    # Platnik meczu jest wpisany w obsady wspolnej bazy (wspolny dojazd,
+    # 25.11.2026) - zapis, ktory go zmienia, nie moze zostawic starej bazy.
+    for table in (
+        "province_tournament_hosts",
+        "province_clubs",
+        "province_club_teams",
+        "province_club_budgets",
+        "province_club_merge_rejections",
+        "province_club_splits",
+        "province_club_split_teams",
+        "province_trip_decisions",
+        "province_match_overrides",
+    ):
+        assert table in SC.WATCHED_TABLES and table in SC.BASE_TABLES, table

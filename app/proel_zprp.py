@@ -149,6 +149,18 @@ def _journal_send_later(event: str, **kwargs: Any) -> None:
     task.add_done_callback(_journal_task_done)
 
 
+def _sync_push_later(id_zawody: Any, fields: Any, judge_id: Optional[str]) -> None:
+    """Cichy push z nowym wynikiem do obsady meczu (w tle, nigdy nie rzuca)."""
+    try:
+        from app.short_result_sync_push import notify_short_result_saved
+
+        task = asyncio.create_task(notify_short_result_saved(id_zawody, fields, judge_id))
+        _journal_tasks.add(task)
+        task.add_done_callback(_journal_task_done)
+    except Exception:
+        logger.debug("ProEl ZPRP: push synchronizacji wyniku nieudany", exc_info=True)
+
+
 def _kick_public(id_zawody: Any, delay: float, debounce: bool = False) -> None:
     """Wysyłka do ZPRP zmienia publiczny protokół meczu - portal dociąga go w tle.
 
@@ -703,6 +715,7 @@ async def zprp_summary(
         mark_task="shortResultSent",
     )
     _kick_public(payload.id_zawody, 10.0)
+    _sync_push_later(payload.id_zawody, payload.fields, x_judge_id)
     return out
 
 
