@@ -241,6 +241,20 @@ def is_hard_start_block(row: Dict[str, Any]) -> bool:
     )
 
 
+def attempt_push_data(row: Dict[str, Any]) -> Dict[str, str]:
+    """Ładunek push i `data_json` skrzynki: jak `admin_alerts.alert_payload`."""
+    rid = str(row.get("id") or "")
+    return {
+        "kind": "admin_alert",
+        "alertKind": "proel_attempt",
+        "type": "proel_attempt",
+        "ref": rid,
+        "id": rid,
+        "attemptKind": str(row.get("kind") or ""),
+        "match_number": str(row.get("match_number") or ""),
+    }
+
+
 def start_block_push(row: Dict[str, Any]) -> Dict[str, str]:
     who = row.get("actor_name") or "Sędzia"
     nr = row.get("match_number") or "?"

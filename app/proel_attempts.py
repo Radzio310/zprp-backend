@@ -36,6 +36,7 @@ from app.proel_attempt_rules import (
     bump_episode,
     clean_event,
     dispute_push,
+    attempt_push_data,
     dispute_push_due,
     is_hard_start_block,
     lease_episode_key,
@@ -180,15 +181,8 @@ async def _push(row: Dict[str, Any], texts: Dict[str, str], tag: str = "") -> in
             return 0
         from app.push.push import send_push_to_judges
 
-        rid = str(row.get("id") or "")
-        data = {
-            "type": "proel_attempt",
-            "alertKind": "proel_attempt",
-            "ref": rid,
-            "id": rid,
-            "kind": str(row.get("kind") or ""),
-            "match_number": str(row.get("match_number") or ""),
-        }
+        data = attempt_push_data(row)
+        rid = data["id"]
         # Skrzynka powiadomień: ten sam zapis co `admin_alerts.notify_admins`
         # (judge_id, kind, reference, event_key, title, body, data_json).
         try:

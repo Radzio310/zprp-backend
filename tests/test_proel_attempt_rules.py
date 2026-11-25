@@ -179,3 +179,12 @@ def test_summary_by_blocker_counts_only_blocked_with_blocker():
     assert summarize(rows)["by_blocker"] == [
         {"blocker": "zprp", "count": 4}, {"blocker": "other_device", "count": 1}]
     assert summarize([])["by_blocker"] == []
+
+
+def test_push_data_matches_admin_alert_shape():
+    from app.proel_attempt_rules import attempt_push_data
+
+    d = attempt_push_data({"id": 17, "kind": "lead", "match_number": "12/34"})
+    assert d == {"kind": "admin_alert", "alertKind": "proel_attempt", "type": "proel_attempt",
+                 "ref": "17", "id": "17", "attemptKind": "lead", "match_number": "12/34"}
+    assert all(isinstance(v, str) for v in d.values())
