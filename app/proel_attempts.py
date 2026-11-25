@@ -46,6 +46,7 @@ from app.proel_attempt_rules import (
     start_block_push,
     summarize,
 )
+from app.proel_attempt_stmt import build_list_stmt
 from app.proel_attempt_tables import attempt_alert_prefs, attempt_log, ensure_tables
 from app.proel_auth import Actor, proel_actor
 
@@ -171,20 +172,39 @@ async def _alert_admins() -> List[str]:
     return sorted({str(r["judge_id"]) for r in rows})
 
 
-async def _push(row: Dict[str, Any], texts: Dict[str, str]) -> int:
-    """Push do adminów z włączonym alertem. Nigdy nie rzuca."""
+async def _push(row: Dict[str, Any], texts: Dict[str, str], tag: str = "") -> int:
+    """Push do adminów z włączonym alertem + wpis w skrzynce aplikacji. Nigdy nie rzuca."""
     try:
         targets = await _alert_admins()
         if not targets:
             return 0
         from app.push.push import send_push_to_judges
 
+        rid = str(row.get("id") or "")
         data = {
             "type": "proel_attempt",
-            "id": str(row.get("id") or ""),
+            "alertKind": "proel_attempt",
+            "ref": rid,
+            "id": rid,
             "kind": str(row.get("kind") or ""),
             "match_number": str(row.get("match_number") or ""),
         }
+        # Skrzynka powiadomień: ten sam zapis co `admin_alerts.notify_admins`
+        # (judge_id, kind, reference, event_key, title, body, data_json).
+        try:
+            from app.db import admin_alert_notifications, database
+
+            for judge_id in targets:
+                try:
+                    await database.execute(admin_alert_notifications.insert().values(
+                        judge_id=judge_id, kind="proel_attempt", reference=rid or None,
+                        event_key=f"proel_attempt:{tag}:{rid}"[:120] if rid else None,
+                        title=texts["title"], body=texts["body"], data_json=data,
+                    ))
+                except Exception:
+                    logger.info("proel attempts: wpis skrzynki pominięty", exc_info=True)
+        except Exception:
+            logger.info("proel attempts: skrzynka niedostępna", exc_info=True)
         return await send_push_to_judges(targets, texts["title"], texts["body"], data)
     except Exception:
         logger.warning("proel attempts: push nieudany", exc_info=True)
@@ -196,7 +216,7 @@ async def _maybe_dispute_push(row: Dict[str, Any]) -> None:
         return
     if not dispute_push_due(_dispute_pushed, str(row.get("match_number") or ""), time.time()):
         return
-    await _push(row, dispute_push(row))
+    await _push(row, dispute_push(row), "dispute")
 
 
 async def _record_server(values: Dict[str, Any]) -> None:
@@ -422,7 +442,7 @@ async def escalate_attempt(event_key: str, request: Request, x_forwarded_for: Op
         )
         if claimed is None:
             return {"escalated": False}
-        spawn(_push(dict(row), start_block_push(dict(row))))
+        spawn(_push(dict(row), start_block_push(dict(row)), "start_block"))
         return {"escalated": True}
     except Exception:
         logger.warning("proel attempts: eskalacja nieudana", exc_info=True)
@@ -437,10 +457,6 @@ def _parse_bound(v: Optional[str], name: str) -> Optional[datetime]:
     except ValueError:
         raise HTTPException(400, detail={"code": "BAD_DATE", "message": f"Niepoprawna data: {name}."})
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
-
-
-def _like(v: str) -> str:
-    return "%" + v.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
 @router.get("", summary="Lista prób (admin), kursor before_id", dependencies=[Depends(proel_admin_guard)])
@@ -462,32 +478,10 @@ async def list_attempts(
     from app.db import database
 
     await ensure_tables()
-    T = attempt_log
-    stmt = select(T).order_by(T.c.id.desc())
-    if kind:
-        stmt = stmt.where(T.c.kind == kind)
-    if outcome:
-        stmt = stmt.where(T.c.outcome == outcome)
-    if reason:
-        stmt = stmt.where(T.c.reason == reason)
-    if match:
-        stmt = stmt.where(T.c.match_number == match.strip())
-    if actor:
-        stmt = stmt.where(T.c.actor_judge_id == actor.strip())
-    if q and q.strip():
-        pat = _like(q.strip())
-        stmt = stmt.where(or_(
-            T.c.actor_name.ilike(pat, escape="\\"), T.c.actor_login.ilike(pat, escape="\\"),
-            T.c.match_number.ilike(pat, escape="\\"), T.c.reason_text.ilike(pat, escape="\\"),
-            T.c.holder_name.ilike(pat, escape="\\"),
-        ))
-    lo, hi = _parse_bound(from_, "from"), _parse_bound(to, "to")
-    if lo:
-        stmt = stmt.where(T.c.last_at >= lo)
-    if hi:
-        stmt = stmt.where(T.c.last_at <= hi)
-    if before_id:
-        stmt = stmt.where(T.c.id < int(before_id))
+    stmt = build_list_stmt(
+        kind=kind, outcome=outcome, reason=reason, match=match, actor=actor, q=q,
+        lo=_parse_bound(from_, "from"), hi=_parse_bound(to, "to"), before_id=before_id,
+    )
     rows = await database.fetch_all(stmt.limit(limit))
     return {
         "items": [_out(r) for r in rows],
@@ -503,7 +497,8 @@ async def attempts_summary(
     who: Actor = Depends(proel_actor),
 ):
     """Odpowiedź: `{ totals:{start|login|lead:{ok,blocked,bypassed,abandoned}}, top_reasons:[{reason,label,kind,count}],
-    top_people:[{judge_id,name,blocked,total}], matches:[{match_number,blocked,lead_conflicts}], median_start_ms }`."""
+    top_people:[{judge_id,name,blocked,total}], matches:[{match_number,blocked,lead_conflicts}], median_start_ms,
+    by_blocker:[{blocker,count}] }`."""
     await _require_admin(who)
     from app.db import database
 
@@ -511,7 +506,7 @@ async def attempts_summary(
     T = attempt_log
     stmt = select(
         T.c.kind, T.c.outcome, T.c.reason, T.c.count, T.c.actor_judge_id, T.c.actor_name,
-        T.c.match_number, T.c.duration_ms,
+        T.c.match_number, T.c.duration_ms, T.c.blocker,
     ).order_by(T.c.id.desc()).limit(50_000)
     lo, hi = _parse_bound(from_, "from"), _parse_bound(to, "to")
     if lo:

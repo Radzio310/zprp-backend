@@ -280,12 +280,15 @@ def summarize(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     people: Dict[str, Dict[str, Any]] = {}
     matches: Dict[str, Dict[str, Any]] = {}
     start_ms: List[int] = []
+    blockers: Dict[str, int] = {}
     for r in rows:
         kind, outcome = r.get("kind"), r.get("outcome")
         n = max(1, int(r.get("count") or 1))
         if kind not in totals or outcome not in totals[kind]:
             continue
         totals[kind][outcome] += n
+        if outcome == "blocked" and r.get("blocker"):
+            blockers[r["blocker"]] = blockers.get(r["blocker"], 0) + n
         if outcome != "ok" and r.get("reason"):
             k = (r["reason"], kind)
             reasons[k] = reasons.get(k, 0) + n
@@ -321,6 +324,7 @@ def summarize(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         "top_people": top_people,
         "matches": top_matches,
         "median_start_ms": _median(start_ms),
+        "by_blocker": [{"blocker": b, "count": n} for b, n in sorted(blockers.items(), key=lambda kv: (-kv[1], kv[0]))],
     }
 
 

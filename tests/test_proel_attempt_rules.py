@@ -138,3 +138,44 @@ def test_summarize_counts_attempts_by_count_and_ranks():
 def test_summarize_empty():
     s = summarize([])
     assert s["median_start_ms"] is None and s["top_reasons"] == [] and s["matches"] == []
+
+
+# ── dopasowania pod zakładkę admina ──
+from sqlalchemy.dialects import postgresql
+
+from app.proel_attempt_stmt import build_list_stmt
+
+
+def _sql(**kw):
+    c = build_list_stmt(**kw).compile(dialect=postgresql.dialect())
+    return str(c), c.params
+
+
+def test_before_id_is_exclusive_and_works_alone():
+    sql, params = _sql(before_id=43)
+    where = sql.split("WHERE")[1].split("ORDER BY")[0]
+    assert "proel_attempt_log.id <" in where and "<=" not in where
+    assert " AND " not in where and "kind" not in where
+    assert 43 in params.values()
+
+
+def test_actor_matches_judge_id_or_login_case_insensitive():
+    sql, params = _sql(actor="  Jan.K ")
+    where = sql.split("WHERE")[1]
+    assert "lower(proel_attempt_log.actor_judge_id)" in where
+    assert "lower(proel_attempt_log.actor_login)" in where and " OR " in where
+    assert "LIKE" not in where.upper()
+    assert list(params.values()).count("jan.k") == 2
+
+
+def test_summary_by_blocker_counts_only_blocked_with_blocker():
+    rows = [
+        {"kind": "start", "outcome": "blocked", "blocker": "zprp", "count": 3},
+        {"kind": "lead", "outcome": "blocked", "blocker": "other_device", "count": 1},
+        {"kind": "start", "outcome": "blocked", "blocker": "zprp", "count": 1},
+        {"kind": "start", "outcome": "blocked", "blocker": None, "count": 5},
+        {"kind": "start", "outcome": "ok", "blocker": "app", "count": 7},
+    ]
+    assert summarize(rows)["by_blocker"] == [
+        {"blocker": "zprp", "count": 4}, {"blocker": "other_device", "count": 1}]
+    assert summarize([])["by_blocker"] == []
