@@ -30,6 +30,9 @@ def define_tables(metadata):
         Column("progress", Float, nullable=False, server_default=text("0")),
         Column("message", String, nullable=True),
         Column("request_sig", String, nullable=True),
+        #: Odcisk treści zestawienia z chwili zamówienia (`mentor_montage_rules.content_sig`, 25.11.2026): inny odcisk
+        #: obecnego zestawienia = film nieaktualny („Zaktualizuj film”).
+        Column("content_sig", String, nullable=True),
         Column("film_key", String, nullable=True),
         Column("poster_key", String, nullable=True),
         Column("size", BigInteger, nullable=True),
@@ -51,6 +54,9 @@ def define_tables(metadata):
         Column("waiting_since", DateTime(timezone=True), nullable=True),
         Column("ready_at", DateTime(timezone=True), nullable=True),
         Column("expires_at", DateTime(timezone=True), nullable=True),
+        #: Kosz pary (25.11.2026): film z plikiem czeka 30 dni na przywrócenie (`mentor_trash`).
+        Column("deleted_at", DateTime(timezone=True), nullable=True),
+        Column("deleted_by", String, nullable=True),
     )
     Index("ix_mentor_montages_pair", montages.c.pair_id, montages.c.updated_at)
     Index("ix_mentor_montages_compilation", montages.c.compilation_id)
@@ -74,6 +80,9 @@ def define_tables(metadata):
 #: Wykonywane przy starcie przez `app/db.py` (PostgreSQL), każde osobno i idempotentnie.
 MIGRATIONS = (
     "ALTER TABLE mentor_montages ADD COLUMN IF NOT EXISTS waiting_since TIMESTAMPTZ",
+    "ALTER TABLE mentor_montages ADD COLUMN IF NOT EXISTS content_sig VARCHAR",
+    "ALTER TABLE mentor_montages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    "ALTER TABLE mentor_montages ADD COLUMN IF NOT EXISTS deleted_by VARCHAR",
     "CREATE INDEX IF NOT EXISTS ix_mentor_montages_pair ON mentor_montages (pair_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS ix_mentor_montages_compilation ON mentor_montages (compilation_id)",
     "CREATE INDEX IF NOT EXISTS ix_mentor_montages_status ON mentor_montages (status)",

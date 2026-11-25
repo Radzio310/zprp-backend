@@ -312,7 +312,7 @@ def test_to_samo_zamowienie_zwraca_ten_sam_film_a_obcy_nie_usunie(d):
 
     one, two, denied, removed, gone = d.run(go)
     assert two["id"] == one["id"] and two["reused"] is True
-    assert denied["code"] == "NO_ACCESS" and removed == {"ok": True} and gone["code"] == "NOT_FOUND"
+    assert denied["code"] == "NO_ACCESS" and removed["ok"] is True and gone["code"] == "NOT_FOUND"
 
 
 def test_zbyt_wiele_klipow_i_pusty_wybor(d):

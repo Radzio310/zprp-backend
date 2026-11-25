@@ -101,7 +101,7 @@ async def build_snapshot(ctx: Dict[str, Any], config: Dict[str, Any]) -> Dict[st
     thread_rows = await C.rows(select(mentor_threads).where(mentor_threads.c.pair_id == ctx["pair_id"])
                                .where(mentor_threads.c.match_id.in_(match_ids or [""])).order_by(mentor_threads.c.created_at.asc()))
     threads = await C.threads_payload(ctx, thread_rows)
-    comp_rows = await C.rows(select(mentor_compilations).where(mentor_compilations.c.pair_id == ctx["pair_id"])
+    comp_rows = await C.rows(select(mentor_compilations).where(mentor_compilations.c.pair_id == ctx["pair_id"]).where(mentor_compilations.c.deleted_at.is_(None))
                              .order_by(mentor_compilations.c.updated_at.desc()))
     compilations = [c for c in await compilation_summaries(ctx, comp_rows) if c["items_count"]]
     delegate = [delegate_sheet_shape(r) for r in await C.delegate_sheet_rows(ctx["judge_ids"], match_ids)

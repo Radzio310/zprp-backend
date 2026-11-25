@@ -971,3 +971,32 @@ wchodzi do klucza; dubel w meczu dostaje `-2`, `-3`). Panel wylicza z minuty mec
   dziesiąte części sekundy). Odpowiedź: `{key, video_id, start_s, end_s, updated_by, updated_at}`.
 - `DELETE /pairs/{p}/matches/{m}/situations/{key}/time?video_id=` - powrót do czasu automatycznego.
 - Pokój meczu: `situation_times: [...]` (ten sam kształt). Zmiany podbijają `rev` w zakresie `videos` (odświeżenie na żywo).
+
+## 18. Kosz pary i nieaktualny film zestawienia (25.11.2026)
+
+**Kosz pary** (`app/mentor_trash.py`, Ustawienia → Kosz). Usunięcie klipu, zrzutu klatki, zestawienia i gotowego filmu z montażu
+nie kasuje już plików: pozycja czeka 30 dni. Nagrania meczów mają dalej własny kosz (sekcja o nagraniach), ale widać je też tutaj.
+
+- `DELETE /clips/{id}`, `DELETE /shots/{id}`, `DELETE /compilations/{id}` → `{ok, trashed: true}`: `deleted_at` + `deleted_by`, pliki
+  (MP4 klipu, obraz zrzutu) zostają; publiczny link klipu/zestawienia wygasa od razu (po przywróceniu trzeba udostępnić ponownie).
+- `DELETE /montages/{id}`: film gotowy, nieudany albo wygasły → kosz (`{trashed: true}`, plik zostaje); film w drodze → anulowanie
+  jak dotąd (`{trashed: false}`).
+- `GET /pairs/{p}/trash` → `{days: 30, items: TrashItem[]}` (najnowsze na górze). `TrashItem = {kind: clip|shot|compilation|montage|video,
+  id, title, deleted_at, deleted_by: Person|null, expires_at, can_restore, can_purge, match_id, match: SlimMatch|null, thumb_url?}` oraz:
+  klip `start_s, end_s, duration_s, match_ms, verdict`; zrzut `at_s`; zestawienie `items_count`; film `duration_s, status, compilation_id`;
+  nagranie `provider, duration_s`. Prawo: autor albo administrator (nagranie: prawo `video`); reszta pary widzi pozycję z `can_restore: false`.
+- `POST /pairs/{p}/trash/{kind}/{id}/restore` → `{ok, kind, id, match_id, compilation_id?}`; klip wraca też w zestawieniach (pozycje
+  zestawień zostają), zrzuty `auto` w jego zakresie dołączają z powrotem.
+- `DELETE /pairs/{p}/trash/{kind}/{id}` → `{ok}`: usunięcie na zawsze (pliki z magazynu; zestawienie z bazy). Bez cofania.
+- 404 `NOT_IN_TRASH` - pozycji nie ma w koszu (przywrócona, usunięta na zawsze albo po 30 dniach). Sprzątanie dzienne (retencja
+  mediów) robi po 30 dniach to samo co „Usuń na zawsze”. Pozycje usunięte przed 25.11.2026 (bez `deleted_by`) nie wracają - ich
+  plików już nie ma.
+
+**Nieaktualny film zestawienia.** `Compilation.film` (lista i szczegóły zestawienia):
+- to najnowszy GOTOWY film (stary gra dalej, dopóki nowy się robi); bez gotowego - najnowszy w ogóle,
+- `film.stale: bool` - zestawienie zmieniło się od zamówienia filmu: inne klipy, kolejność, etykiety, notatki albo treść klipu
+  (zakres, tytuł, plik, zoom, kategorie, ocena). Odcisk `mentor_montages.content_sig` (`mentor_montage_rules.content_sig`); filmy
+  sprzed odcisku porównują same pozycje. Klient pokazuje wtedy okładkę obecnego zestawienia i „Zaktualizuj film”
+  (`POST /pairs/{p}/montages {compilation_id}` - całe zestawienie),
+- `film.update: MontageSummary` - nowszy film w drodze albo nieudany, gdy `film` jest gotowy (postęp aktualizacji).
+Gotowy nowy film zestawienia odkłada starsze gotowe/nieudane/wygasłe filmy tego zestawienia do kosza pary (z plikiem, 30 dni).

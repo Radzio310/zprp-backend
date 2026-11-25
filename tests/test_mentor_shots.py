@@ -322,7 +322,7 @@ def test_tworzenie_lista_zmiana_i_kosz(env):
         assert patched["title"] == "Nowy" and patched["shapes"][0]["type"] == "arrow" and patched["at_s"] == 110.5
         assert (await denied(env.shots.update_shot(shot["id"], env.shots.ShotPatch(title="x"), await env.actor(B))))[0] == 403
         removed = await env.shots.delete_shot(shot["id"], await env.actor(A))
-        assert removed == {"ok": True}
+        assert removed == {"ok": True, "trashed": True}
         assert await denied(env.shots.get_shot(shot["id"], await env.actor(A))) == (404, "NOT_FOUND")
         listed = await env.shots.list_shots(PAIR, match_id="", clip_id="", video_id="", category="", author="", q="", standalone=False, actor=await env.actor(A))
         assert [s["id"] for s in listed["shots"]] == [other["id"]]
@@ -350,7 +350,7 @@ def test_walidacja_przy_tworzeniu_i_odmowy_dostepu(env):
         assert (await denied(env.shots.upload_image(shot["id"], FakeRequest(jpeg()), await env.actor(B))))[0] == 403
         assert (await denied(env.shots.download_png(shot["id"], False, True, await env.actor(STRANGER))))[0] == 403
         assert (await env.shots.get_shot(shot["id"], await env.actor(COMMITTEE)))["id"] == shot["id"]  # komisja czyta
-        assert (await env.shots.delete_shot(shot["id"], await env.actor(ADMIN))) == {"ok": True}  # administrator może wszystko
+        assert (await env.shots.delete_shot(shot["id"], await env.actor(ADMIN))) == {"ok": True, "trashed": True}  # administrator może wszystko
         # limit na mecz
         env.mp.setattr(SR, "MAX_SHOTS_PER_MATCH", 2)
         await new_shot(env, at=1)

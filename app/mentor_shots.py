@@ -641,14 +641,12 @@ async def update_shot(shot_id: str, body: ShotPatch, actor: Actor = Depends(ment
 
 @router.delete("/shots/{shot_id}")
 async def delete_shot(shot_id: str, actor: Actor = Depends(mentor_actor)):
-    """Do kosza jak klip (`deleted_at`); obraz w magazynie jest kasowany, wątki zostają."""
+    """Do kosza pary na 30 dni (25.11.2026): obraz zostaje w magazynie do końca kosza (`mentor_trash.purge_shot`), wątki zostają."""
     ctx, row = await _shot_ctx(shot_id, actor)
     _edit_check(ctx, row, actor)
-    await database.execute(update(mentor_shots).where(mentor_shots.c.id == shot_id).values(
-        deleted_at=C.now(), image_key=None, thumb_key=None, image_status="none", image_reason=None))
-    store_forget(row.get("image_key"), row.get("thumb_key"))
+    await database.execute(update(mentor_shots).where(mentor_shots.c.id == shot_id).values(deleted_at=C.now(), deleted_by=actor.judge_id))
     await C.touch(ctx, actor.judge_id, "shot_deleted", "shots", row["match_id"], {"id": shot_id})
-    return {"ok": True}
+    return {"ok": True, "trashed": True}
 
 
 async def _read_limited(request: Request) -> bytes:

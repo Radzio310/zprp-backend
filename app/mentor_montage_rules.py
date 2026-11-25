@@ -423,6 +423,24 @@ def request_sig(name: str, description: str, items: Sequence[Mapping[str, Any]],
     return sig("montage", LOOK_VERSION, name, description, shaped, bool(skip_missing))
 
 
+def content_sig(items: Sequence[Mapping[str, Any]], clips: Mapping[str, Mapping[str, Any]]) -> str:
+    """Odcisk TREŚCI filmu zestawienia (25.11.2026): klipy w kolejności, etykiety, notatki i to, co klip pokazuje (zakres,
+    tytuł, plik, zoom, kategorie, ocena). Bez nazwy, opisu i przebiegu przygotowania - porównujemy go z obecnym zestawieniem:
+    inny odcisk = film nieaktualny. Flagi „ważne”/„do omówienia” i znaczniki czasu nie zmieniają filmu."""
+    shaped = []
+    for item in items:
+        clip = clips.get(item["clip_id"]) or {}
+        shaped.append([item["clip_id"], item.get("label") or "", item.get("note") or "", clip.get("start_s"), clip.get("end_s"),
+                       clip.get("title") or "", clip.get("media_rev"), s(clip.get("zoom_track_json")), s(clip.get("category_ids")),
+                       clip.get("verdict") or ""])
+    return sig("content", shaped)
+
+
+def items_key(items: Sequence[Mapping[str, Any]]) -> list:
+    """Same pozycje (klip, etykieta, notatka) - porównanie dla starszych filmów bez `content_sig`."""
+    return [[i.get("clip_id"), i.get("label") or "", i.get("note") or ""] for i in items]
+
+
 def film_filename(name: Any) -> str:
     from app.mentor_clip_download_rules import fs_part
 

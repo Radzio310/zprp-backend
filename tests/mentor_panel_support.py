@@ -40,7 +40,7 @@ MODULES = (
     "app.delegate_sharing", "app.mentor_auto_found", "app.mentor_auto_found_rules",
     "app.mentor_drive", "app.mentor_drive_google", "app.mentor_drive_transfer", "app.mentor_shots", "app.mentor_watch",
     "app.shared_matches", "app.shared_match_pdf", "app.shared_match_pair", "app.shared_match_link", "app.shared_match_notify", "app.shared_match_rules", "app.mentor_proel_link", "app.mentor_veo",
-    "app.mentor_montage", "app.mentor_channels", "app.mentor_speech", "app.mentor_situations",
+    "app.mentor_montage", "app.mentor_channels", "app.mentor_speech", "app.mentor_trash", "app.mentor_situations",
 )
 
 PAIR = "pair-1"
@@ -186,6 +186,7 @@ class Env:
         self.channels = importlib.import_module("app.mentor_channels")
         self.speech = importlib.import_module("app.mentor_speech")
         self.situations = importlib.import_module("app.mentor_situations")
+        self.trash = importlib.import_module("app.mentor_trash")
         self.sent = []
 
         async def fake_notify(ctx, actor_id, title, body, **kwargs):
