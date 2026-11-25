@@ -1290,7 +1290,12 @@ class VersionItem(BaseModel):
     # Dostępność w sklepach — starsze aplikacje po prostu ignorują te pola.
     available_ios: bool = False
     available_android: bool = False
+    required: bool = False
     required_tablets: bool = False
+    required_tablets_auto: bool = True
+    required_tablets_source: Optional[str] = None
+    required_since: Optional[str] = None
+    tablets_due_at: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

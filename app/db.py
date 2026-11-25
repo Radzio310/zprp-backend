@@ -2515,6 +2515,11 @@ app_versions = Table(
     Column("store_urls", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     # Wymuszenie dotyczy też tabletów tylko przy TRUE; bez tego tablet nie widzi wymaganej wersji.
     Column("required_tablets", Boolean, nullable=False, server_default=text("false")),
+    # Automat tabletów (app/release_tablets.py): chwila, gdy wersja stała się wymagana na obu
+    # platformach; wstrzymanie automatu; kto ustawił required_tablets ("admin" | "auto").
+    Column("required_since", DateTime(timezone=True), nullable=True),
+    Column("required_tablets_auto", Boolean, nullable=False, server_default=text("true")),
+    Column("required_tablets_source", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
@@ -5082,6 +5087,12 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS required boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS store_urls jsonb NOT NULL DEFAULT '{}'::jsonb"))
     _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS required_tablets boolean NOT NULL DEFAULT false"))
+    # Automat tabletów (25.11.2026): idempotentne, backfill tylko wierszy bez wartości.
+    _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS required_since timestamptz"))
+    _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS required_tablets_auto boolean NOT NULL DEFAULT true"))
+    _conn.execute(text("ALTER TABLE app_versions ADD COLUMN IF NOT EXISTS required_tablets_source text"))
+    _conn.execute(text("UPDATE app_versions SET required_since = updated_at WHERE required AND available_ios AND available_android AND required_since IS NULL"))
+    _conn.execute(text("UPDATE app_versions SET required_tablets_source = 'admin' WHERE required AND required_tablets AND required_tablets_source IS NULL"))
     # Kalendarze drugorzędne Google: obie tabele stoją na produkcji.
     _conn.execute(text("ALTER TABLE calendar_tokens ADD COLUMN IF NOT EXISTS scope varchar"))
     _conn.execute(text("ALTER TABLE event_mappings ADD COLUMN IF NOT EXISTS calendar_id varchar"))

@@ -28,6 +28,7 @@ from app.db import (
 )
 from app.deps import Settings, get_settings
 from app import release_slides_v2 as v2
+from app import release_tablets as tab
 
 
 router = APIRouter(tags=["BAZA: Release Stories"])
@@ -1470,8 +1471,71 @@ def filter_rows_for_device(rows: list[dict[str, Any]], device: str) -> list[dict
     return [r for r in rows if not (r.get("required") and not r.get("required_tablets"))]
 
 
+async def apply_tablet_schedule(rows: list[dict[str, Any]], now: Optional[datetime] = None) -> list[dict[str, Any]]:
+    """Utrwala objęcie tabletów po terminie (required_tablets=true, source='auto').
+
+    Wartość skuteczna i tak liczona jest przy odczycie (tab.effective_required_tablets),
+    więc awaria zapisu nie opóźnia egzekwowania. UPDATE jest warunkowy (zajęcie wiersza),
+    więc powiadomienie adminów idzie raz, także przy kilku procesach. Mutuje i zwraca `rows`.
+    """
+    now = now or datetime.now(timezone.utc)
+    for row in rows:
+        if not tab.auto_promotion_due(row, now):
+            continue
+        try:
+            claimed = await database.fetch_one(
+                update(app_versions)
+                .where(app_versions.c.id == int(row["id"]))
+                .where(app_versions.c.required == True)  # noqa: E712
+                .where(app_versions.c.available_ios == True)  # noqa: E712
+                .where(app_versions.c.available_android == True)  # noqa: E712
+                .where(app_versions.c.required_tablets == False)  # noqa: E712
+                .where(app_versions.c.required_tablets_auto == True)  # noqa: E712
+                .values(required_tablets=True, required_tablets_source="auto")
+                .returning(app_versions.c.id)
+            )
+        except Exception:  # noqa: BLE001 - odczyt nie może paść przez utrwalenie
+            continue
+        row["required_tablets"] = True
+        row["required_tablets_source"] = "auto"
+        if claimed is not None:
+            try:
+                from app.admin_alerts import notify_admins
+
+                await notify_admins(
+                    "tablets_required",
+                    str(row["version"]),
+                    f"Wersja {row['version']} jest od teraz obowiązkowa także na tabletach.",
+                    reference=str(row["id"]),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+    return rows
+
+
+async def run_tablet_schedule_sweep(interval_sec: int = 300) -> None:
+    """Pętla w tle: utrwala i ogłasza objęcie tabletów w terminie, także bez ruchu w aplikacji."""
+    import asyncio
+
+    await asyncio.sleep(60)
+    while True:
+        try:
+            rows = await database.fetch_all(
+                select(app_versions)
+                .where(app_versions.c.required == True)  # noqa: E712
+                .where(app_versions.c.required_tablets == False)  # noqa: E712
+                .where(app_versions.c.required_since.is_not(None))
+            )
+            await apply_tablet_schedule([dict(r) for r in rows])
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            pass
+        await asyncio.sleep(interval_sec)
+
+
 async def _version_meta(row: Any, *, with_keys: bool) -> dict[str, Any]:
-    data = dict(row)
+    data = (await apply_tablet_schedule([dict(row)]))[0]
     signed: dict[str, str] = {}
     shots = []
     for shot in _json_value(data.get("preview_shots"), []):
@@ -1483,7 +1547,7 @@ async def _version_meta(row: Any, *, with_keys: bool) -> dict[str, Any]:
         "version_id": int(data["id"]),
         "version": data["version"],
         "required": bool(data.get("required")),
-        "required_tablets": bool(data.get("required")) and bool(data.get("required_tablets")),
+        **tab.tablet_fields(data, datetime.now(timezone.utc)),
         "store_urls": {
             "ios": str(stored_urls.get("ios") or ""),
             "android": str(stored_urls.get("android") or ""),
@@ -1496,6 +1560,7 @@ class ReleaseMetaUpsert(BaseModel):
     preview_shots: Optional[list[dict[str, Any]]] = Field(default=None, max_length=v2.MAX_PREVIEW_SHOTS)
     required: Optional[bool] = None
     required_tablets: Optional[bool] = None
+    required_tablets_auto: Optional[bool] = None
     store_urls: Optional[dict[str, Any]] = None
 
 
@@ -1523,9 +1588,31 @@ async def save_release_meta(
         bool(req.required) if req.required is not None else bool(dict(version_row).get("required"))
     )
     if not effective_required:
-        values["required_tablets"] = False
-    elif req.required_tablets is not None:
-        values["required_tablets"] = bool(req.required_tablets)
+        values.update(required_tablets=False, required_tablets_source=None, required_tablets_auto=True)
+    else:
+        if req.required_tablets is True:
+            values.update(required_tablets=True, required_tablets_source="admin")
+        elif req.required_tablets is False:
+            # Ręczne wyłączenie wstrzymuje automat tej wersji (nie nadpiszemy woli admina).
+            values.update(required_tablets=False, required_tablets_source=None, required_tablets_auto=False)
+        if req.required_tablets_auto is not None:
+            values["required_tablets_auto"] = bool(req.required_tablets_auto)
+    old_d = dict(version_row)
+    change = tab.since_transition(
+        old_d,
+        {
+            "required": effective_required,
+            "available_ios": old_d.get("available_ios"),
+            "available_android": old_d.get("available_android"),
+        },
+        datetime.now(timezone.utc),
+    )
+    if not effective_required:
+        values["required_since"] = None
+    elif change is tab.CLEAR:
+        values["required_since"] = None
+    elif change is not None:
+        values["required_since"] = change
     if req.store_urls is not None:
         values["store_urls"] = _clean_store_urls(req.store_urls)
     if values:
@@ -1555,7 +1642,11 @@ async def check_release(
         .where(platform_column == True)  # noqa: E712
         .where(app_versions.c.to_show == True)  # noqa: E712
     )
-    rows = filter_rows_for_device([dict(r) for r in rows], device)
+    rows = await apply_tablet_schedule([dict(r) for r in rows])
+    now_utc = datetime.now(timezone.utc)
+    for r in rows:
+        r["required_tablets"] = tab.effective_required_tablets(r, now_utc)
+    rows = filter_rows_for_device(rows, device)
     installed = version.strip()
     installed_key = _semver_key(installed)
     latest_row = max(rows, key=lambda r: _semver_key(str(r["version"])), default=None)
@@ -1573,7 +1664,7 @@ async def check_release(
             "preview_shots": meta["preview_shots"],
             "store_url": meta["store_urls"].get(platform) or "",
             "required": forced,
-            "required_tablets": bool(latest_row.get("required")) and bool(latest_row.get("required_tablets")),
+            "required_tablets": bool(latest_row.get("required_tablets")),
             "frames": [],
         }
         # Kadry wachlarza, gdy wersja nie ma własnych zrzutów: media slajdów

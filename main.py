@@ -1728,6 +1728,11 @@ async def startup():
     _alarm_scan_task = asyncio.create_task(run_alarm_scan())
     logger.info("✅ ProEl alarm scan started")
 
+    # Automat tabletów: wersja wymagana na obu platformach obejmuje tablety w poniedziałek
+    # 12:00 po tygodniu (`app/release_tablets.py`); pętla utrwala i ogłasza adminom.
+    from app.release_stories import run_tablet_schedule_sweep
+    asyncio.create_task(run_tablet_schedule_sweep())
+
     # Tabela Ryczaltow Sedziowskich: wersje startowe wchodza tylko do PUSTEJ
     # tabeli, wiec restart nigdy nie cofnie kwoty poprawionej przez czlowieka.
     try:

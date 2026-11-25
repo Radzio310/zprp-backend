@@ -31,6 +31,8 @@ ADMIN_ALERT_KINDS: Dict[str, Dict[str, str]] = {
     # Podejrzana zmiana w protokole ProEla (`app/proel_alarm_scan.py`): kara
     # wykluczająca zdjęta po dłuższej chwili albo zdjęta przed bramką tej osoby.
     "proel_suspicious": {"emoji": "🛡️", "label": "Podejrzana zmiana w protokole"},
+    # Automat objął tablety wersją wymaganą (`app/release_tablets.py`).
+    "tablets_required": {"emoji": "📱", "label": "Wersja obowiązkowa na tabletach"},
 }
 
 #: Rodzaje, których NIE DA SIĘ wyciszyć.

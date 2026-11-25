@@ -1596,10 +1596,16 @@ async def upsert_contact_club(req: UpsertContactJudgeRequest):
 
 @router.get("/versions", response_model=ListVersionsResponse, summary="Pobierz listę wersji")
 async def list_versions():
+    from app.release_stories import apply_tablet_schedule
+    from app.release_tablets import tablet_fields
+
     rows = await database.fetch_all(select(app_versions).order_by(app_versions.c.created_at.desc()))
+    rows = await apply_tablet_schedule([dict(r) for r in rows])
+    now = datetime.now(timezone.utc)
     versions: List[VersionItem] = []
     for r in rows:
         data = dict(r)
+        data.update(tablet_fields(data, now))
         # backward compatibility: jeśli w DB/rekordzie brak to_show, domyślnie False
         data.setdefault("to_show", False)
         # Kolumny platform doszły później — gdyby zapytanie trafiło na bazę
@@ -1660,6 +1666,18 @@ async def update_version(version_id: int, req: UpdateVersionRequest):
 
     if not values:
         return {"success": True}
+
+    if "available_ios" in values or "available_android" in values:
+        from app.release_tablets import CLEAR, since_transition
+
+        old = await database.fetch_one(select(app_versions).where(app_versions.c.id == version_id))
+        if old is not None:
+            old_d = dict(old)
+            change = since_transition(old_d, {**old_d, **values}, datetime.now(timezone.utc))
+            if change is CLEAR:
+                values["required_since"] = None
+            elif change is not None:
+                values["required_since"] = change
 
     query = update(app_versions).where(app_versions.c.id == version_id).values(**values).returning(app_versions.c.id)
     row = await database.fetch_one(query)
