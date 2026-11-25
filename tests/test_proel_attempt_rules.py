@@ -236,3 +236,12 @@ def test_fill_server_row_never_touches_count_or_holder():
     assert out["net"] == "online" and out["queued"] is True
     assert "count" not in out and not any(k.startswith("holder_") for k in out)
     assert fill_server_row({"actor_name": "Stary"}, {"actor_name": "Nowy"})["actor_name"] == "Stary"
+
+
+def test_clean_event_rejects_server_keys_and_future_times():
+    from app.proel_attempt_rules import clean_event
+    base = {"kind": "lead", "outcome": "blocked", "reason": "LEASE_HELD"}
+    assert clean_event({**base, "event_key": "srv:LEASE_HELD:1:x:1"}) is None
+    assert clean_event({**base, "event_key": "SRV:x"}) is None
+    ok = clean_event({**base, "event_key": "u-1", "last_at": "2999-01-01T00:00:00Z"})
+    assert ok is not None and ok["last_at"] is None

@@ -105,6 +105,13 @@ def _parse_dt(v: Any) -> Optional[datetime]:
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
+def _not_future(d: Optional[datetime]) -> Optional[datetime]:
+    """Czas z klienta z przyszłości (zły zegar, podróbka) odpada."""
+    if d is None:
+        return None
+    return d if d <= datetime.now(timezone.utc) + timedelta(minutes=5) else None
+
+
 def clean_steps(raw: Any) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     if not isinstance(raw, list):
@@ -152,6 +159,10 @@ def clean_event(raw: Any) -> Optional[Dict[str, Any]]:
     outcome = _choice(raw.get("outcome"), OUTCOMES)
     if not key or not kind or not outcome:
         return None
+    # Klucze `srv:` należą do serwera (epizody leasingu, logowania): klient nie
+    # może ich użyć, żeby nadpisać wpis serwera.
+    if key.lower().startswith("srv:"):
+        return None
     path_ok = START_PATHS if kind == "start" else LOGIN_PATHS if kind == "login" else ()
     official = raw.get("official")
     count = raw.get("count")
@@ -182,8 +193,8 @@ def clean_event(raw: Any) -> Optional[Dict[str, Any]]:
         "net": _choice(raw.get("net"), ("online", "offline", "unknown")),
         "device": clean_device(raw.get("device")),
         "app_version": _text(raw.get("app_version"), 32),
-        "first_at": _parse_dt(raw.get("first_at")),
-        "last_at": _parse_dt(raw.get("last_at")),
+        "first_at": _not_future(_parse_dt(raw.get("first_at"))),
+        "last_at": _not_future(_parse_dt(raw.get("last_at"))),
     }
     return row
 

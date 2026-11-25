@@ -65,6 +65,20 @@ _limiter = AttemptLimiter(limit=60, window=timedelta(minutes=1), max_keys=20_000
 _dispute_pushed: Dict[str, float] = {}
 _tasks: set = set()
 _last_login_cleanup = 0.0
+#: Czasy ostatnich pushy (każdego rodzaju): twardy bezpiecznik przed zalaniem adminów
+#: przez anonimowe zgłoszenia (maks. `PUSH_BUDGET` na `PUSH_BUDGET_WINDOW` s na proces).
+_push_times: List[float] = []
+PUSH_BUDGET = 12
+PUSH_BUDGET_WINDOW = 600
+
+
+def _push_budget_ok() -> bool:
+    now = time.time()
+    _push_times[:] = [t for t in _push_times if now - t < PUSH_BUDGET_WINDOW]
+    if len(_push_times) >= PUSH_BUDGET:
+        return False
+    _push_times.append(now)
+    return True
 
 
 def spawn(coro: Coroutine[Any, Any, Any]) -> None:
@@ -101,6 +115,8 @@ async def _upsert_client(values: Dict[str, Any], ip: str) -> bool:
     T = attempt_log
     found = await database.fetch_one(select(T).where(T.c.event_key == values["event_key"]))
     if found is not None:
+        if found["source"] == "server":
+            return False  # wpisu serwera klient nie nadpisuje
         await database.execute(
             update(T).where(T.c.id == found["id"]).values(**merge_update(dict(found), values, now))
         )
@@ -186,6 +202,13 @@ async def _cleanup_logins(force: bool = False) -> None:
     )
 
 
+async def _cleanup_logins_safe() -> None:
+    try:
+        await _cleanup_logins()
+    except Exception:
+        logger.debug("proel attempts: sprzątanie loginów nieudane", exc_info=True)
+
+
 async def _alert_admins() -> List[str]:
     from app.admin_alerts import admin_judge_ids
     from app.db import database
@@ -204,6 +227,9 @@ async def _alert_admins() -> List[str]:
 async def _push(row: Dict[str, Any], texts: Dict[str, str], tag: str = "") -> int:
     """Push do adminów z włączonym alertem + wpis w skrzynce aplikacji. Nigdy nie rzuca."""
     try:
+        if not _push_budget_ok():
+            logger.info("proel attempts: limit pushy wyczerpany, pomijam")
+            return 0
         targets = await _alert_admins()
         if not targets:
             return 0
@@ -420,7 +446,7 @@ async def post_attempts(
                 continue
             accepted += 1
             if values["kind"] == "login":
-                spawn(_cleanup_logins())
+                spawn(_cleanup_logins_safe())
             elif is_new and values["kind"] == "lead" and values.get("reason") in DISPUTE_REASONS:
                 spawn(_dispute_from_key(values["event_key"]))
     except Exception:
