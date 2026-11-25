@@ -213,6 +213,51 @@ def bump_episode(existing: Dict[str, Any], now: datetime) -> Dict[str, Any]:
     return {"count": int(existing.get("count") or 1) + 1, "last_at": now}
 
 
+MERGE_REASONS = frozenset({"LEASE_LOST", "LEASE_HELD"})
+MERGE_WINDOW_SECONDS = 600
+
+
+def should_merge_into_server(incoming: Dict[str, Any], server_row: Dict[str, Any],
+                             now: Optional[datetime] = None) -> bool:
+    """Czy wpis klienta to ta sama odmowa, którą serwer zapisał sam.
+
+    Tak, gdy: kind=lead, powód LEASE_LOST albo LEASE_HELD, wpis serwera ma ten
+    sam powód, mecz i niepustą instalację, a jego `last_at` leży w 10 minutach od
+    `client_at` klienta (bez niego: od teraz).
+    """
+    if incoming.get("kind") != "lead" or incoming.get("reason") not in MERGE_REASONS:
+        return False
+    if server_row.get("source") != "server" or server_row.get("kind") != "lead":
+        return False
+    if server_row.get("reason") != incoming.get("reason"):
+        return False
+    number = str(incoming.get("match_number") or "")
+    if not number or number != str(server_row.get("match_number") or ""):
+        return False
+    install = str(incoming.get("actor_install") or "")
+    if not install or install != str(server_row.get("actor_install") or ""):
+        return False
+    last = _parse_dt(server_row.get("last_at"))
+    ref = _parse_dt(incoming.get("client_at")) or now or datetime.now(timezone.utc)
+    if last is None:
+        return False
+    return abs((ref - last).total_seconds()) <= MERGE_WINDOW_SECONDS
+
+
+def fill_server_row(existing: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    """Pola, które klient dokłada do wpisu serwera. Nie rusza `count` ani `holder_*`."""
+    return {
+        "reason_text": incoming.get("reason_text") or existing.get("reason_text"),
+        "device": incoming.get("device") or existing.get("device"),
+        "net": incoming.get("net") or existing.get("net"),
+        "app_version": incoming.get("app_version") or existing.get("app_version"),
+        "actor_name": existing.get("actor_name") or incoming.get("actor_name"),
+        "client_at": incoming.get("client_at") or existing.get("client_at"),
+        "queued": bool(incoming.get("queued")),
+        "steps": incoming.get("steps") or existing.get("steps"),
+    }
+
+
 def lease_episode_key(code: str, match_number: str, install: str, epoch: int) -> str:
     return f"srv:{code}:{match_number}:{install or '-'}:{int(epoch)}"[:80]
 

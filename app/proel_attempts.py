@@ -32,12 +32,15 @@ from app.proel_admin_guard import proel_admin_guard
 from app.proel_attempt_rules import (
     DISPUTE_REASONS,
     MAX_EVENTS,
+    MERGE_WINDOW_SECONDS,
     REASON_LABELS,
     bump_episode,
     clean_event,
     dispute_push,
     attempt_push_data,
     dispute_push_due,
+    fill_server_row,
+    should_merge_into_server,
     is_hard_start_block,
     lease_episode_key,
     login_cutoff,
@@ -102,6 +105,31 @@ async def _upsert_client(values: Dict[str, Any], ip: str) -> bool:
             update(T).where(T.c.id == found["id"]).values(**merge_update(dict(found), values, now))
         )
         return False
+    # Ten sam klucz klienta wcześniej scalił się z epizodem serwera: znów ten wiersz.
+    merged = await database.fetch_one(select(T).where(T.c.client_event_key == values["event_key"]))
+    if merged is not None:
+        await database.execute(
+            update(T).where(T.c.id == merged["id"]).values(**fill_server_row(dict(merged), values))
+        )
+        return False
+    if values.get("kind") == "lead" and values.get("actor_install"):
+        ref = values.get("client_at") or now
+        near = await database.fetch_all(
+            select(T).where(
+                T.c.source == "server", T.c.kind == "lead", T.c.reason == values.get("reason"),
+                T.c.match_number == values.get("match_number"),
+                T.c.actor_install == values.get("actor_install"),
+                T.c.last_at >= ref - timedelta(seconds=MERGE_WINDOW_SECONDS),
+                T.c.last_at <= ref + timedelta(seconds=MERGE_WINDOW_SECONDS),
+            ).order_by(T.c.last_at.desc()).limit(5)
+        )
+        for cand in near:
+            if should_merge_into_server(values, dict(cand), now):
+                await database.execute(
+                    update(T).where(T.c.id == cand["id"]).values(
+                        **fill_server_row(dict(cand), values), client_event_key=values["event_key"])
+                )
+                return False
     ins = {k: v for k, v in values.items() if v is not None}
     ins["first_at"] = values.get("first_at") or now
     ins["last_at"] = values.get("last_at") or now

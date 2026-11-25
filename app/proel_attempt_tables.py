@@ -70,6 +70,8 @@ def define_tables(metadata: MetaData) -> Tuple[Table, Table]:
         Column("app_version", String(32), nullable=True),
         Column("client_ip", String(64), nullable=True),
         Column("source", String(8), nullable=False, server_default="client"),
+        # Klucz klienta, gdy jego wpis scalił się z epizodem serwera (`should_merge_into_server`).
+        Column("client_event_key", String(80), nullable=True, index=True),
         Column("escalated_at", DateTime(timezone=True), nullable=True),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Index("ix_proel_attempt_log_created_at", "created_at"),
@@ -97,6 +99,14 @@ def _create_sync() -> None:
     from app.db import engine
 
     _metadata.create_all(engine, checkfirst=True)
+    # Tabela z wcześniejszego wdrożenia nie dostaje nowej kolumny z `create_all`.
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE proel_attempt_log ADD COLUMN IF NOT EXISTS client_event_key VARCHAR(80)"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_proel_attempt_log_client_event_key "
+            "ON proel_attempt_log (client_event_key)"))
 
 
 async def ensure_tables() -> None:

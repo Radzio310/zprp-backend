@@ -188,3 +188,51 @@ def test_push_data_matches_admin_alert_shape():
     assert d == {"kind": "admin_alert", "alertKind": "proel_attempt", "type": "proel_attempt",
                  "ref": "17", "id": "17", "attemptKind": "lead", "match_number": "12/34"}
     assert all(isinstance(v, str) for v in d.values())
+
+
+# ── scalanie odmowy klienta z epizodem serwera ──
+from app.proel_attempt_rules import fill_server_row, should_merge_into_server
+
+_SRV = {"source": "server", "kind": "lead", "reason": "LEASE_LOST", "match_number": "M1",
+        "actor_install": "i1", "last_at": NOW, "count": 3, "holder_name": "Ewa"}
+
+
+def _cli(**kw):
+    base = {"kind": "lead", "reason": "LEASE_LOST", "match_number": "M1", "actor_install": "i1",
+            "client_at": NOW + timedelta(minutes=2)}
+    base.update(kw)
+    return base
+
+
+def test_merge_same_match_install_reason_in_window():
+    assert should_merge_into_server(_cli(), _SRV, NOW)
+    assert should_merge_into_server(_cli(client_at=None), _SRV, NOW + timedelta(minutes=9))
+    assert should_merge_into_server(_cli(reason="LEASE_HELD"), {**_SRV, "reason": "LEASE_HELD"}, NOW)
+
+
+def test_no_merge_outside_window():
+    assert not should_merge_into_server(_cli(client_at=NOW + timedelta(minutes=11)), _SRV, NOW)
+    assert not should_merge_into_server(_cli(client_at=None), _SRV, NOW + timedelta(minutes=11))
+
+
+def test_no_merge_other_reason_or_kind_or_source():
+    assert not should_merge_into_server(_cli(reason="LEASE_SHARED"), {**_SRV, "reason": "LEASE_SHARED"}, NOW)
+    assert not should_merge_into_server(_cli(reason="LEASE_HELD"), _SRV, NOW)
+    assert not should_merge_into_server(_cli(kind="start"), _SRV, NOW)
+    assert not should_merge_into_server(_cli(), {**_SRV, "source": "client"}, NOW)
+    assert not should_merge_into_server(_cli(match_number="M2"), _SRV, NOW)
+
+
+def test_no_merge_without_install():
+    assert not should_merge_into_server(_cli(actor_install=None), _SRV, NOW)
+    assert not should_merge_into_server(_cli(actor_install=""), {**_SRV, "actor_install": ""}, NOW)
+
+
+def test_fill_server_row_never_touches_count_or_holder():
+    out = fill_server_row({**_SRV, "reason_text": "ogólny", "actor_name": ""},
+                          {"reason_text": "Mecz prowadzi Ewa", "net": "online", "queued": True,
+                           "actor_name": "Jan", "steps": [{"step": "a", "result": "fail"}]})
+    assert out["reason_text"] == "Mecz prowadzi Ewa" and out["actor_name"] == "Jan"
+    assert out["net"] == "online" and out["queued"] is True
+    assert "count" not in out and not any(k.startswith("holder_") for k in out)
+    assert fill_server_row({"actor_name": "Stary"}, {"actor_name": "Nowy"})["actor_name"] == "Stary"
