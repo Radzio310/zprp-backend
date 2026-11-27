@@ -5065,6 +5065,17 @@ from app.presentation_tables import define_tables as _define_presentation_tables
 
 presentation_state, presentation_ops, presentation_overlay = _define_presentation_tables(metadata)
 
+# Wdrożenie okręgu (`app/district_onboarding.py`, `docs/wdrozenie-okregu.md`).
+from app.district_onboarding_tables import define_tables as _define_district_onboarding_tables
+
+(
+    district_onboarding,
+    district_onboarding_events,
+    district_onboarding_files,
+    sealed_secrets,
+    onboarding_sealing_keys,
+) = _define_district_onboarding_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
