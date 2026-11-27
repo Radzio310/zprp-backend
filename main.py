@@ -511,6 +511,15 @@ app.include_router(sms_config_router)
 app.include_router(sms_config_admin_router)
 app.include_router(young_referees_router)
 app.include_router(young_rating_drafts_router)
+# Wdrożenie okręgu: bazapodreka.app/okreg/start, sejf haseł, ekran admina (27.11.2026).
+from app.district_onboarding import (
+    admin_router as district_onboarding_admin_router,
+    district_router as district_onboarding_router,
+    public_router as district_onboarding_public_router,
+)
+app.include_router(district_onboarding_public_router)
+app.include_router(district_onboarding_router)
+app.include_router(district_onboarding_admin_router)
 app.include_router(agent_docs_router)
 app.include_router(agent_chat_router)
 app.include_router(upload_protocol_router)

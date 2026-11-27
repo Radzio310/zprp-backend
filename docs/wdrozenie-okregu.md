@@ -309,3 +309,37 @@ Na górze stołu zostaje jedno zdanie stanu, np. „Brakuje 2 kluczy do obsady�
 | 3. Admin | BAZA | ekran wdrożeń, sejf z odszyfrowaniem, powiadomienie z deep-linkiem, wydanie kodu. `tsc` czysty. |
 
 Każde repo: osobna gałąź `wdrozenie-okregu` i PR do `master`. **Nie scalać i nie pchać na master**, bo master BAZA_web wdraża Vercel, a master backendu idzie na produkcję.
+
+## 8. Ustalenia z realizacji (etap 1)
+
+Kod: `app/district_onboarding_rules.py` (reguły), `app/district_onboarding.py` (trasy),
+`app/district_onboarding_tables.py` (tabele). Testy: `tests/test_district_onboarding.py`.
+
+- Klucz okręgu w nowych tabelach i w API: kanoniczny (`SLASKIE`, `KUJAWSKO_POMORSKIE`).
+  Do starych tabel (`okreg_rates`, `okreg_distances`, mastersi, `active_provinces`, `baza_vips`)
+  serwer pisze nazwą wyświetlaną (`ŚLĄSKIE`), tak jak robi to aplikacja.
+- Trasy admina wymagają tokenu administratora ZAWSZE (`require_app_admin`), także odczyty i także
+  przed `ADMIN_WRITE_STRICT`. Sam `admin_write_guard` zostawia odczyty otwarte, a tu leżą nazwiska i szyfrogramy.
+- Wejście: `POST /public/onboarding/enter` z dobrym kodem i bez podpisu zwraca
+  `{need_name: true, province, label}`; z podpisem zwraca token. Błędy mają `detail.message`,
+  limit prób dodatkowo `detail.retry_after` (sekundy).
+- `PUT /onboarding/draft/{key}` zapisuje szkic zawsze (autozapis edytora) i oddaje `errors`.
+  Status `submitted` dopiero przy komplecie. Potwierdzenie szkicu admina („Zgadza się”) to ten sam PUT.
+- Plik: status `in_review`. Szkic admina: `in_review` + `draft_by_admin: true`, okręg widzi podgląd.
+- Kształt szkiców: ryczałty `{validFrom, content: {rola: {kategoria: kwota}}}` (role i kategorie:
+  `RATE_ROLES`, `RATE_CATEGORIES`), odległości `{validFrom, cities, edges: [{from, to, distance_km}]}`.
+- Ludzie: `PUT /onboarding/people/keeper` z `{person}`, pozostałe z `{people: [...]}`. Komisja:
+  `login`, `rights` z `assignments | settlements | admin`. Masterzy: `judge_id`, `kinds`. Mentorzy: `role`.
+- Zatwierdzenie `mentors` i `keeper` to sam status (pary mentoringu potrzebują młodego sędziego,
+  zakłada je komisja w BAZA). `zprp_assign` ustawia `province_module_config.assign_account_mode`.
+- `GET /onboarding/state` i stan admina niosą też `label`, `lit`, `missing`, `scope`, `files`, `catalog`
+  (nazwy i skutki kluczy z serwera, jedno źródło dla strony i aplikacji).
+- Plik dla admina: `GET /admin/onboarding/{province}/files/{id}`. Unieważnienie bez nowego kodu:
+  `POST /admin/onboarding/{province}/code/revoke`.
+- Push: rodzaj `district_onboarding`, tytuł „🗺️ Okręg pomorski: 3 nowe rzeczy”, dane
+  `{alertKind, province, screen: "district_onboarding", changes}`. Pierwsza zmiana po ciszy idzie od razu,
+  kolejne zbierają się do 10 minut (pamięć procesu; restart gubi najwyżej jedną paczkę).
+- Zmienne Railway (opcjonalne): `ONBOARDING_CODE_PEPPER`, `ONBOARDING_TOKEN_SECRET`.
+  Bez nich serwer wyprowadza je z `SECRET_KEY`.
+- `CLIENT_KEYS` to zmienna Railway, nie kod: klucz strony, jeśli jest zawężony, potrzebuje
+  dopisania `|/public/onboarding|/onboarding`.

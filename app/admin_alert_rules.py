@@ -33,6 +33,9 @@ ADMIN_ALERT_KINDS: Dict[str, Dict[str, str]] = {
     "proel_suspicious": {"emoji": "🛡️", "label": "Podejrzana zmiana w protokole"},
     # Automat objął tablety wersją wymaganą (`app/release_tablets.py`).
     "tablets_required": {"emoji": "📱", "label": "Wersja obowiązkowa na tabletach"},
+    # Okręg wgrał albo pominął coś na bazapodreka.app/okreg/start
+    # (`app/district_onboarding.py`). Tytuł mówi sam: "Okręg pomorski: 3 nowe rzeczy".
+    "district_onboarding": {"emoji": "🗺️", "label": "Wdrożenie okręgu", "bare": "1"},
 }
 
 #: Rodzaje, których NIE DA SIĘ wyciszyć.
@@ -58,6 +61,8 @@ def alert_title(kind: object, subject: str = "") -> str:
     meta = ADMIN_ALERT_KINDS.get(key)
     if not meta:
         return "🔔 BAZA" + (f" - {subject}" if subject else "")
+    if meta.get("bare") and subject:
+        return f"{meta['emoji']} {subject}"
     head = f"{meta['emoji']} {meta['label']}"
     return f"{head} - {subject}" if subject else head
 
