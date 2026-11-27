@@ -343,3 +343,15 @@ Kod: `app/district_onboarding_rules.py` (reguły), `app/district_onboarding.py` 
   Bez nich serwer wyprowadza je z `SECRET_KEY`.
 - `CLIENT_KEYS` to zmienna Railway, nie kod: klucz strony, jeśli jest zawężony, potrzebuje
   dopisania `|/public/onboarding|/onboarding`.
+
+### Etap 2 i 3 (strona i aplikacja)
+
+- Strona: `BAZA_web/components/pod-reka/screens/onboarding/` (czysty DOM jak `/okreg`), trasa `app/(okreg)/okreg/start.tsx`,
+  pętle z filmu w `public/okreg/petle/`. Podgląd `?demo=1` działa bez serwera.
+- BAZA: `components/admin/DistrictOnboardingManager.tsx` (Panel admina › Okręg › „Wdrożenia okręgów”),
+  sejf w `utils/onboardingVault.ts`. Pierwsze wejście zakłada klucz sejfu, gdy serwer nie ma żadnego;
+  gdy sejf ma klucz innego telefonu, ekran mówi to wprost i daje „Przejmij sejf na ten telefon”.
+  „Nowy klucz sejfu” stoi na karcie sejfu w tym ekranie, nie w ustawieniach aplikacji.
+- Deep-link powiadomienia: `alertKind = district_onboarding`, okręg z `ref` (`POMORSKIE:<czas>:<liczba>`),
+  bez zmian w mechanizmie odsyłaczy.
+
