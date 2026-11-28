@@ -272,6 +272,44 @@ def test_duplikat_pozwala_dolaczyc_tylko_do_pasujacego_meczu(env):
     assert forced["existing"] is False and forced["match"]["id"] != created["match"]["id"]
 
 
+def _main_http_exception_handler():
+    """`http_exception_handler` wprost ze źródła main.py — import main.py podnosiłby produkcyjną DB."""
+    import ast
+    import pathlib
+
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.responses import JSONResponse
+
+    src = (pathlib.Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+    node = next(n for n in ast.parse(src).body if isinstance(n, ast.AsyncFunctionDef) and n.name == "http_exception_handler")
+    node.decorator_list = []
+    scope = {"HTTPException": HTTPException, "Request": object, "JSONResponse": JSONResponse, "jsonable_encoder": jsonable_encoder}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "main.py", "exec"), scope)
+    return scope["http_exception_handler"]
+
+
+def test_duplikat_przez_koperte_bledu_to_409_z_data_iso_a_nie_500(env):
+    import json
+
+    async def go():
+        created = await make(env, crew=[])
+        body = dict(home_name="SPR Gliwice", away_name="KS Opole", match_at="2026-11-05T18:00:00", my_role="sedzia2")
+        try:
+            await env.shared.create_match(env.shared.CreateBody(**body), await env.actor(STRANGER))
+        except HTTPException as exc:
+            return created, await _main_http_exception_handler()(None, exc)
+        raise AssertionError("oczekiwano odmowy")
+
+    created, response = env.run(go)
+    payload = json.loads(response.body)
+    assert response.status_code == 409 and payload["code"] == "DUPLICATE_MATCH" and payload["can_join"] is True
+    dupe = payload["duplicates"][0]
+    assert dupe["id"] == created["match"]["id"] and isinstance(dupe["match_at"], str)
+    # Ten sam tekst ISO, co w zwykłej odpowiedzi meczu (18:00 Warszawa trzymane w UTC).
+    assert dupe["match_at"] == created["match"]["match_at"].isoformat() == "2026-11-05T17:00:00"
+    assert payload["error"]["code"] == "DUPLICATE_MATCH" and "już istnieje" in payload["message"]
+
+
 def test_rodzaj_meczu_wspolny_dla_obsady_z_base_rev_i_w_dzienniku(env):
     async def go():
         created = await make(env, match_kind="miedzypanstwowy", age_group="mlodziez", counts_in_stats=True)

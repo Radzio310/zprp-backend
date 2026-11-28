@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import os
 from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.openapi.utils import get_openapi
@@ -317,7 +318,8 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         # Wyjątek może wprost wskazać kod jako napis w "error" (np. BASTION_AUTH_REQUIRED w Trybunie).
         if isinstance(getattr(exc, "error_code", None), str):
             content["error"] = exc.error_code
-    return JSONResponse(status_code=exc.status_code, content=content)
+    # `detail` bywa z datami/UUID z bazy: bez kodowania odmowa (np. 409) kończyła się 500 przy serializacji.
+    return JSONResponse(status_code=exc.status_code, content=jsonable_encoder(content))
 
 SERVER_ERROR_MESSAGE = "Serwer BAZY ma krótką przerwę. Spróbuj ponownie za chwilę."
 

@@ -21,6 +21,7 @@ import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, func, insert, or_, select, update
 
@@ -541,8 +542,10 @@ async def _create(actor: Actor, params: Dict[str, Any], *, force: bool, crew_in:
     if not force:
         dupes = await _duplicates(actor, key=SR.duplicate_key(values.get("home_name"), values.get("away_name"), values.get("match_at")))
         if dupes:
-            raise HTTPException(409, detail={"code": "DUPLICATE_MATCH", "can_join": True, "duplicates": dupes,
-                                             "message": "Ten mecz już istnieje (te same drużyny i data). Możesz do niego dołączyć albo utworzyć drugi."})
+            # `match_at` to datetime: bez kodowania handler w main.py wywracał 409 w 500 (TypeError przy JSON).
+            raise HTTPException(409, detail=jsonable_encoder({
+                "code": "DUPLICATE_MATCH", "can_join": True, "duplicates": dupes,
+                "message": "Ten mecz już istnieje (te same drużyny i data). Możesz do niego dołączyć albo utworzyć drugi."}))
     if len(crew_in) + 1 > SR.MAX_MEMBERS:
         raise _bad(f"Obsada może mieć najwyżej {SR.MAX_MEMBERS} osób.")
     crew, skipped = await _prepare_crew([c for c in crew_in if s(c.judge_id) != s(actor.judge_id)], actor_id=actor.judge_id)
