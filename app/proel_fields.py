@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 # ─────────────────────────── fazy ───────────────────────────
 
@@ -1111,3 +1111,93 @@ def adopt_blob_exams(
             )
             withdrawn.append(player)
     return out, confirmed, withdrawn
+
+
+# ─────────────────────────── podpisy z pełnej treści ───────────────────────────
+#
+# SM/61, 28.11.2026. Delegat zebrał podpisy stolika i swój na telefonie, którego
+# zapisy pól serwer odrzucał (odpowiedź 200 z `rejected`). Podpisy zostały tylko
+# w PEŁNEJ treści protokołu z tego telefonu - poza overlayem. Pierwszy pełny zapis
+# z telefonu sędziego, który ich nie znał, wymienił treść, a reprojekcja nie miała
+# czego nałożyć z powrotem. Obrazki leżały na serwerze, protokół był bez podpisów.
+#
+# Reguła: podpis, który dotarł w treści protokołu (przychodzącej albo już
+# zapisanej), a którego rubryka NIE MA żadnego wpisu w overlayu, trafia do overlaya.
+# Od tej chwili chroni go reprojekcja - tak jak każdy podpis złożony przez `/patch`.
+#
+# Czego reguła nie robi:
+#   * nie rusza rubryki, która ma JAKIKOLWIEK wpis w overlayu - pusty wpis to
+#     świadome skasowanie podpisu (`/patch` z pustą wartością),
+#   * nie nadpisuje podpisu innym podpisem (zapis jednokrotny zostaje w `/patch`),
+#   * nie przyjmuje ścieżek z telefonu (`file:`, `content:`) - PDF ich nie otworzy.
+#
+# Uprawnień nie poszerza: pełny zapis i tak niósł ten podpis do treści protokołu.
+
+#: Ścieżka rejestru podpisu -> droga w treści protokołu (lustro `project_*`).
+SIGNATURE_BLOB_PATHS: Dict[str, Tuple[str, ...]] = {
+    **{
+        f"official.{role}.signature": ("matchConfig", "extras", "officials", role, "signature")
+        for role in ("referee1", "referee2", "secretary", "timekeeper", "delegate", "delegate2")
+    },
+    "sig.team.host": ("matchConfig", "extras", "hostTeamSignature"),
+    "sig.team.guest": ("matchConfig", "extras", "guestTeamSignature"),
+    "medic.signature": ("matchConfig", "extras", "medic", "signature"),
+}
+
+SIGNATURE_SRC_BLOB = "blob"
+
+_LOCAL_URI_PREFIXES = ("file:", "content:", "ph:", "assets-library:")
+
+
+def blob_signature(blob: Any, path: str) -> str:
+    """Podpis z rubryki treści protokołu albo `""`, gdy go nie ma lub jest nieużyteczny."""
+    route = SIGNATURE_BLOB_PATHS.get(path)
+    if not route:
+        return ""
+    cur: Any = blob
+    for key in route:
+        if not isinstance(cur, dict):
+            return ""
+        cur = cur.get(key)
+    if not isinstance(cur, str):
+        return ""
+    value = cur.strip()
+    if not value or value.startswith("[zdjęto:"):
+        return ""
+    if value.lower().startswith(_LOCAL_URI_PREFIXES):
+        return ""
+    return value
+
+
+def adopt_blob_signatures(
+    overlay: Any,
+    blobs: Sequence[Any],
+    *,
+    rev: int,
+    at: str,
+    by: Dict[str, Any],
+) -> Tuple[Dict[str, Any], List[str]]:
+    """Wciągnij do overlaya podpisy, które istnieją wyłącznie w treści. KOPIA, nie zmiana.
+
+    `blobs` w kolejności ważności: najpierw treść przychodząca, potem zapisana.
+    Zwraca (overlay po zmianie, ścieżki wciągnięte).
+    """
+    out = dict(overlay) if isinstance(overlay, dict) else {}
+    adopted: List[str] = []
+    for path in SIGNATURE_BLOB_PATHS:
+        if path in out:
+            continue
+        for blob in blobs:
+            value = blob_signature(blob, path)
+            if value:
+                out[path] = {
+                    "v": value,
+                    "rev": int(rev),
+                    "at": str(at),
+                    "by": dict(by or {}),
+                    "src": SIGNATURE_SRC_BLOB,
+                    "superseded_at": None,
+                }
+                adopted.append(path)
+                break
+    return out, adopted

@@ -32,6 +32,10 @@ from app.proel_admin_guard import (
     proel_admin_guard,
     proel_admin_rights,
 )
+from app.proel_signature_absorb import (
+    absorb_blob_signatures,
+    journal_absorbed_signatures,
+)
 from app.proel_exams import (
     absorb_blob_exams,
     ensure_state_row,
@@ -1538,6 +1542,7 @@ async def create_proel_match(
     )
 
     absorbed: Dict[str, Any] = {}
+    sig_absorbed: Dict[str, Any] = {}
     async with database.transaction():
         state = await _fetch_state(req.match_number, for_update=True)
         # Ręczne potwierdzenia z ekranu konfiguracji jadą WYŁĄCZNIE w kartach
@@ -1556,6 +1561,14 @@ async def create_proel_match(
                 str(x_installation_id or "").strip(),
             )
             state = absorbed["state"]
+            sig_absorbed = await absorb_blob_signatures(
+                req.match_number,
+                state,
+                [req.data_json],
+                actor,
+                str(x_installation_id or "").strip(),
+            )
+            state = sig_absorbed["state"]
         # Nakładamy overlay JUŻ na pierwszy zapis: sędzia mógł potwierdzić
         # badania na długo przed tym, jak stolikowy w ogóle otworzył mecz.
         data_json = _reproject_blob(state, copy.deepcopy(req.data_json))
@@ -1625,6 +1638,14 @@ async def create_proel_match(
         req.match_number,
         zprp_id,
         absorbed,
+        actor,
+        app_version=x_app_version,
+        ip=_client_ip(request, x_forwarded_for),
+    )
+    await journal_absorbed_signatures(
+        req.match_number,
+        zprp_id,
+        sig_absorbed,
         actor,
         app_version=x_app_version,
         ip=_client_ip(request, x_forwarded_for),
@@ -1805,6 +1826,7 @@ async def update_proel_match(
         authorization=authorization, x_elevation=x_elevation,
     )
     absorbed: Dict[str, Any] = {}
+    sig_absorbed: Dict[str, Any] = {}
     _guard_training_key(match_number, req.data_json)
     my_install = str(x_installation_id or "").strip()
     base_rev = parse_base_rev(x_proel_base_rev)
@@ -2074,6 +2096,17 @@ async def update_proel_match(
                     str(x_installation_id or "").strip(),
                 )
                 state = absorbed["state"]
+                # Podpisy obecne tylko w treści (przychodzącej albo zapisanej) -
+                # do overlaya, zanim ta treść zostanie wymieniona. SM/61, 28.11.2026:
+                # patrz `adopt_blob_signatures`.
+                sig_absorbed = await absorb_blob_signatures(
+                    match_number,
+                    state,
+                    [req.data_json, _json_value((version or {}).get("data_json"))],
+                    actor,
+                    str(x_installation_id or "").strip(),
+                )
+                state = sig_absorbed["state"]
 
             projected = _reproject_blob(state, copy.deepcopy(req.data_json))
             # Mecz ręczny: brakujące nazwiska i osoby A-E ze składu meczu wspólnego (07.11.2026) -
@@ -2260,6 +2293,14 @@ async def update_proel_match(
         match_number,
         incoming_id or known_id,
         absorbed,
+        actor,
+        app_version=x_app_version,
+        ip=_client_ip(request, x_forwarded_for),
+    )
+    await journal_absorbed_signatures(
+        match_number,
+        incoming_id or known_id,
+        sig_absorbed,
         actor,
         app_version=x_app_version,
         ip=_client_ip(request, x_forwarded_for),
