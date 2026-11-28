@@ -12,6 +12,10 @@ i `after_failure`.
   - `kick_on_proel_status`: koniec meczu w ProElu (`app/proel.py`). Koniec meczu = pierwszy sygnał (YouTube albo
     ProEl); próby co 5 minut przez 30 minut (+5 ... +30), a gdy żadna nie wyszła - jedna po 60 minutach.
 
+Wybrany moment (28.11.2026): `pick_moment` - para wskazuje godzinę kopii (albo „Teraz”), gdy ProEl nie zgłosił końca
+meczu; trwająca transmisja kopiuje się wtedy z tego, co YouTube już ma. `catch_up_live` (jednorazowo przy starcie, do
+`CATCH_UP_UNTIL`): transmisje, które trwały w chwili wdrożenia tej zmiany, dostają kopię od razu.
+
 Wyłączniki: `MENTOR_YT_COPY=0` (całe kopie), `MENTOR_LIVE_COPY=0` (sam automat). W testach (`ENVIRONMENT=test`)
 automat jest domyślnie wyłączony - test włącza go jawnie (`MENTOR_LIVE_COPY=1`).
 """
@@ -23,7 +27,7 @@ import importlib
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy import func, or_, select, update
@@ -40,6 +44,11 @@ PAGE_EVERY_S = 300
 PAGE_PER_TICK = 8
 ARM_TIMEOUT_S = 6.0
 PAIR_CACHE_S = 600
+
+#: Jednorazowe nadrobienie (decyzja właściciela 28.11.2026): transmisje uzbrojone przed wdrożeniem, które wciąż trwają,
+#: robią kopię od razu z tego, co YouTube już ma. Po tej chwili `catch_up_live` nic nie robi.
+CATCH_UP_ARMED_BEFORE = datetime(2026, 11, 28, 22, 0, tzinfo=timezone.utc)
+CATCH_UP_UNTIL = datetime(2026, 11, 29, 6, 0, tzinfo=timezone.utc)
 
 _api_at = 0.0
 _page_at: Dict[str, float] = {}
@@ -223,6 +232,20 @@ async def note_manual(video: Dict[str, Any], refresh: bool) -> None:
         await _save(video, L.on_start(video, _core().now(), refresh))
 
 
+async def pick_moment(video: Dict[str, Any], at: Optional[datetime]) -> bool:
+    """Para wybiera moment kopii (`at` w przeszłości = teraz; `None` = wróć do czekania na koniec meczu).
+    Moment, który już nadszedł, zamawia próbę od razu. False = nie wolno (mecz skończony w ProElu, próba ruszyła)."""
+    if not L.can_pick(video):
+        return False
+    now = _core().now()
+    await _save(video, L.pick_values(at, now))
+    if L.due(video, now):
+        await queue_attempt(video, now)
+    else:
+        await _touch(video)
+    return True
+
+
 # ─── Wynik próby (worker) ───────────────────────────────────────────────────
 
 
@@ -336,7 +359,7 @@ def kick_on_proel_status(match_number: Any, zprp_match_id: Any, previous: Option
 async def _watch(rows: List[Dict[str, Any]], now: datetime, *, force: bool = False) -> None:
     """YouTube: koniec transmisji (= koniec meczu, gdy ProEl nie był pierwszy) i godzina startu transmisji."""
     global _api_at
-    need = [r for r in rows if (L.state_of(r) == "waiting_end" and not r.get("live_ended_at"))
+    need = [r for r in rows if ((L.state_of(r) == "waiting_end" or L.picked(r)) and not r.get("live_ended_at"))
             or (L.state_of(r) in ("waiting_end", "scheduled") and not _has_start(r))]
     if not need:
         return
@@ -444,11 +467,47 @@ async def tick(now: Optional[datetime] = None, *, check_live: bool = True, force
     return queued
 
 
+async def catch_up_live(now: Optional[datetime] = None) -> int:
+    """Jednorazowo (28.11.2026): transmisje uzbrojone przed `CATCH_UP_ARMED_BEFORE`, które wciąż czekają na koniec
+    meczu i trwają (YouTube mówi „na żywo” albo znamy już start transmisji), dostają kopię teraz - jak „Teraz” pary.
+    Zapowiedzi zostają w czekaniu. Po `CATCH_UP_UNTIL` nic nie robi. Zwraca liczbę zamówionych kopii."""
+    now = now or _core().now()
+    if now >= CATCH_UP_UNTIL:
+        return 0
+    T = _db().mentor_match_videos
+    rows = await _core().rows(select(T).where(T.c.auto_copy_state == "waiting_end").where(T.c.deleted_at.is_(None))
+                              .where(T.c.auto_armed_at < CATCH_UP_ARMED_BEFORE))
+    if not rows:
+        return 0
+    try:
+        infos = await fetch_infos([Y.youtube_video_id(r.get("url")) or "" for r in rows])
+    except Exception:  # noqa: BLE001
+        infos = {}
+    done = 0
+    for row in rows:
+        info = infos.get(Y.youtube_video_id(row.get("url")) or "")
+        state = (info or {}).get("state")
+        if state != "live" and not (state is None and _has_start(row)):
+            continue  # zakończone łapie zwykły przegląd, zapowiedzi czekają dalej
+        try:
+            if await pick_moment(row, now):
+                done += 1
+        except Exception:  # noqa: BLE001
+            logger.warning("mentor: nadrobienie kopii transmisji %s nieudane", row.get("id"), exc_info=True)
+    if done:
+        logger.info("mentor: %s trwających transmisji - kopia od razu (nadrobienie)", done)
+    return done
+
+
 async def run_live_copy_loop() -> None:
     """Pętla w tle (start w `main.py`): co minutę przegląd uzbrojonych transmisji."""
     if not enabled():
         return
     await asyncio.sleep(40)
+    try:
+        await catch_up_live()
+    except Exception:  # noqa: BLE001
+        logger.warning("mentor: nadrobienie kopii trwających transmisji nieudane", exc_info=True)
     while True:
         try:
             await tick()

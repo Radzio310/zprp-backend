@@ -36,6 +36,7 @@ import os
 import shutil
 import subprocess
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends
@@ -282,6 +283,36 @@ async def start_copy(pair_id: str, match_id: str, video_id: str, actor: Actor = 
     return await M._video_payload(ctx, video_id)
 
 
+class AutoPickBody(BaseModel):
+    #: Moment kopii (ISO; przeszłość = teraz). `null` = wróć do czekania na koniec meczu (YouTube albo ProEl).
+    at: Optional[datetime] = None
+
+
+@router.post("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}/copy/moment")
+async def pick_copy_moment(pair_id: str, match_id: str, video_id: str, body: AutoPickBody, actor: Actor = Depends(mentor_actor)):
+    """Wybrany moment automatycznej kopii transmisji (28.11.2026): gdy ProEl nie zgłosił końca meczu, para sama wskazuje
+    godzinę (albo „Teraz”). Trwająca transmisja kopiuje się z tego, co YouTube już ma. Zwraca film (z `auto_copy`)."""
+    from app import mentor_live_copy_rules as L
+
+    ctx = await C.pair_context(pair_id, actor, action="video")
+    video = dict(await _youtube_video(ctx, match_id, video_id))
+    if not L.armed(video):
+        raise C.err(409, "COPY_AUTO_OFF", "Ten film nie czeka na automatyczną kopię.")
+    if not L.can_pick(video):
+        raise C.err(409, "COPY_AUTO_LOCKED", "Kopia już ruszyła albo mecz skończył się w ProElu - moment ustala automat.")
+    at = L.aware(body.at) if body.at is not None else None
+    if at is not None and at > C.now() + L.PICK_AHEAD:
+        raise C.err(422, "COPY_AUTO_TOO_FAR", "Wybierz moment w ciągu 12 godzin.")
+    if at is not None:
+        if not tool_ready():
+            raise C.err(503, "COPY_NO_TOOL", Y.MESSAGES["NO_TOOL"])
+        M._storage_or_503()
+    if not await _live_copy().pick_moment(video, at):
+        raise C.err(409, "COPY_AUTO_LOCKED", "Kopia już ruszyła albo mecz skończył się w ProElu - moment ustala automat.")
+    await C.touch(ctx, actor.judge_id, "copy_moment", "videos", video["match_id"], {"id": video_id, "at": L.iso(at)})
+    return await M._video_payload(ctx, video_id)
+
+
 @router.get("/pairs/{pair_id}/matches/{match_id}/videos/{video_id}/copy")
 async def copy_status(pair_id: str, match_id: str, video_id: str, actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(pair_id, actor)
@@ -393,6 +424,8 @@ def _download(upload_id: str, url: str, folder: str, proxy: Optional[str], cooki
         "progress_hooks": [hook], "postprocessor_hooks": [post_hook], "concurrent_fragment_downloads": 4,
         "retries": 5, "fragment_retries": 10, "socket_timeout": 30, "continuedl": False, "overwrites": True,
         "cachedir": os.path.join(folder, ".cache"),
+        # 28.11.2026: trwająca transmisja kopiuje się od początku do teraz (`_until_head`), nie od chwili pobrania.
+        "live_from_start": True,
     }
     if proxy:
         opts["proxy"] = proxy
@@ -411,7 +444,9 @@ def _download(upload_id: str, url: str, folder: str, proxy: Optional[str], cooki
             raise Y.CopyError(*Y.classify(exc, via_proxy=via)) from exc
         if upload_id in _cancelled:
             raise Y.CopyError("CANCELLED", Y.MESSAGES["CANCELLED"])
-        Y.check_info(info)
+        Y.check_info(info, time.time())
+        if Y.is_live(info):
+            _until_head(info)
         expected.extend((R.s(f.get("format_id")), float(f.get("filesize") or f.get("filesize_approx") or 0))
                         for f in Y.chosen_formats(info))
         _set_live(upload_id, "downloading", 0.0, total_bytes=Y.expected_bytes(info) or None, via_proxy=via)
@@ -427,6 +462,24 @@ def _download(upload_id: str, url: str, folder: str, proxy: Optional[str], cooki
     if not path:
         raise Y.CopyError("FAILED", Y.MESSAGES["FAILED"])
     return {"path": path, "info": info}
+
+
+def _until_head(info: Dict[str, Any]) -> None:
+    """Trwająca transmisja: fragmenty od początku do tego, który YouTube ma teraz, i koniec (bez czekania, aż
+    transmisja się skończy). yt-dlp z `live_from_start` daje generator fragmentów odświeżany do końca transmisji."""
+
+    def cut(gen: Any) -> Any:
+        def run(ctx: Any) -> Any:
+            for fragment in gen(ctx):
+                yield fragment
+                if Y.at_head(fragment):
+                    return
+
+        return run
+
+    for fmt in info.get("formats") or []:
+        if callable(fmt.get("fragments")):
+            fmt["fragments"] = cut(fmt["fragments"])
 
 
 class _YtLogger:

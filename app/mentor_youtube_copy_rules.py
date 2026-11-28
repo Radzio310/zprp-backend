@@ -120,21 +120,35 @@ MESSAGES: Dict[str, str] = {
 }
 
 
-def check_info(info: Mapping[str, Any]) -> None:
-    """Odrzuca, zanim zaczniemy ściągać gigabajty: transmisja na żywo/zapowiedź/świeży zapis, za długi, za duży."""
+def is_live(info: Mapping[str, Any]) -> bool:
+    return bool(info.get("is_live")) or str(info.get("live_status") or "") == "is_live"
+
+
+def check_info(info: Mapping[str, Any], now_s: Optional[float] = None) -> None:
+    """Odrzuca, zanim zaczniemy ściągać gigabajty: zapowiedź, za długi, za duży.
+
+    28.11.2026: trwająca transmisja (i świeży zapis `post_live`) NIE jest już błędem - kopia bierze to, co YouTube
+    ma od początku transmisji do teraz (`live_from_start`, `_download`). Długość trwającej transmisji = od startu."""
     live = str(info.get("live_status") or "")
-    if info.get("is_live") or live == "is_live":
-        raise CopyError("LIVE", MESSAGES["LIVE"])
     if live == "is_upcoming":
         raise CopyError("UPCOMING", MESSAGES["UPCOMING"])
-    if live == "post_live":
-        raise CopyError("POST_LIVE", MESSAGES["POST_LIVE"])
     duration = float(info.get("duration") or 0)
+    started = info.get("release_timestamp") or info.get("timestamp")
+    if not duration and is_live(info) and started and now_s:
+        duration = max(0.0, float(now_s) - float(started))
     if duration > MAX_DURATION_S:
         raise CopyError("TOO_LONG", MESSAGES["TOO_LONG"])
     size = expected_bytes(info)
     if size and size > MAX_BYTES:
         raise CopyError("TOO_BIG", MESSAGES["TOO_BIG"])
+
+
+def at_head(fragment: Mapping[str, Any]) -> bool:
+    """Fragment trwającej transmisji jest ostatnim, który YouTube już ma (`sq` = `fragment_count` - 1): kopia
+    „do teraz” kończy się tu, zamiast czekać na koniec transmisji."""
+    total = int(fragment.get("fragment_count") or 0)
+    found = re.search(r"[?&]sq=(\d+)", str(fragment.get("url") or ""))
+    return bool(total and found and int(found.group(1)) >= total - 1)
 
 
 def chosen_formats(info: Mapping[str, Any]) -> list:

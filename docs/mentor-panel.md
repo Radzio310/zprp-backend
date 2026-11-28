@@ -864,6 +864,12 @@ Decyzja właściciela (07.11.2026, wersja ostateczna): link do transmisji **na �
 - **„Odśwież kopię”**: `POST .../videos/{v}/copy?refresh=1` (albo body `{"refresh": true}`) na gotowej kopii pobiera film od nowa i nadpisuje kopię (ten sam wiersz, klucze R2 i nagranie-kopia). Idempotentne w trakcie (drugie wywołanie nic nie dubluje); kopia w koszu najpierw wraca z kosza; po „Usuń na zawsze” powstaje nowa kopia jak dotąd. Bez `refresh` gotowa kopia wraca bez zmian (jak dotąd).
 - Zdarzenia `rev` (zakres `videos`): dodatkowo `copy_auto` (zmiana stanu automatu), `copy_refresh_started`, `copy_refreshed`, `copy_refresh_failed`.
 
+**Wybrany moment i kopia trwającej transmisji (28.11.2026, decyzja właściciela)**
+- Trwająca transmisja (i świeży zapis `post_live`) nie jest już błędem kopii: yt-dlp z `live_from_start` pobiera to, co YouTube ma od początku transmisji do teraz, i kończy na ostatnim fragmencie (`_until_head`). Kolejne próby okna nadpisują kopię dłuższą wersją. Limit 5 h liczony od startu transmisji.
+- `POST /pairs/{p}/matches/{m}/videos/{v}/copy/moment` (akcja `video`), body `{at: ISO | null}` -> `Video`. Gdy ProEl nie zgłosił końca meczu, para wskazuje moment kopii; `at` w przeszłości = teraz (próba rusza od razu), `null` = wróć do czekania na koniec meczu. Wybrany moment działa jak koniec meczu + 5 min (dalej nadpisywanie co 5 min do `until`). Koniec meczu z YouTube albo ProEla wcześniejszy niż wybrany moment wygrywa, póki próba nie ruszyła. Odmowy: 409 `COPY_AUTO_OFF` (film nie jest uzbrojony), 409 `COPY_AUTO_LOCKED` (próba ruszyła albo ProEl zgłosił koniec), 422 `COPY_AUTO_TOO_FAR` (ponad 12 h naprzód), 503 `COPY_NO_TOOL`/`STORAGE_OFF`.
+- `auto_copy` dostaje `picked_at` (wybrany moment albo null) i `can_pick` (wolno wybrać albo zmienić moment). Kolumna `mentor_match_videos.auto_pick_at`. Zdarzenie `rev`: `copy_moment`.
+- Jednorazowo przy starcie (`catch_up_live`, do 29.11.2026 7:00): transmisje uzbrojone przed wdrożeniem, które wciąż trwają, dostają kopię od razu.
+
 **Dane i migracje (idempotentne `ADD COLUMN IF NOT EXISTS`, sprawdzone na PostgreSQL 16)**
 - `mentor_match_videos`: `auto_copy_state`, `auto_next_at`, `auto_attempts`, `auto_end_at`, `auto_reason`, `auto_armed_at`, `live_ended_at`, `proel_finished_at`.
 - `mentor_uploads`: `refresh_at` (zamówione nadpisanie gotowej kopii; worker bierze wiersze `downloading` oraz `ready` z `refresh_at`). Nowy status wiersza kopii: `waiting`.

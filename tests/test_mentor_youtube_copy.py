@@ -1,6 +1,7 @@
 """Kopia filmu YouTube na serwerze: reguły (format, postęp, błędy, proxy) i przebieg (zamówienie, worker, zapas przez
 proxy, błąd i ponowienie, usunięcie, MP4 klipu z kopii, kosz). Atrapy yt-dlp, ffmpeg i R2 - bez sieci."""
 
+import importlib
 import json
 import os
 from datetime import datetime, timezone
@@ -35,16 +36,40 @@ def test_klasyfikacja_bledow_yt_dlp():
 
 
 def test_sprawdzenie_przed_pobraniem():
-    for info, code in (({"is_live": True}, "LIVE"), ({"live_status": "is_upcoming"}, "UPCOMING"),
-                       ({"live_status": "post_live"}, "POST_LIVE"), ({"duration": 6 * 3600}, "TOO_LONG"),
+    for info, code in (({"live_status": "is_upcoming"}, "UPCOMING"), ({"duration": 6 * 3600}, "TOO_LONG"),
+                       ({"is_live": True, "release_timestamp": 1000}, "TOO_LONG"),
                        ({"duration": 5400, "requested_formats": [{"format_id": "137", "filesize": 13 * 1024 ** 3}]}, "TOO_BIG")):
         with pytest.raises(Y.CopyError) as caught:
-            Y.check_info(info)
+            Y.check_info(info, 1000 + 6 * 3600)
         assert caught.value.code == code
+    # 28.11.2026: trwająca transmisja i świeży zapis kopiują się z tego, co YouTube już ma.
+    Y.check_info({"is_live": True, "release_timestamp": 1000}, 1000 + 2 * 3600)
+    Y.check_info({"live_status": "post_live"})
+    Y.check_info({"is_live": True})
+    assert Y.is_live({"live_status": "is_live"}) and not Y.is_live({"live_status": "was_live"})
     ok = {"duration": 5400, "live_status": "was_live", "requested_formats": [{"format_id": "137", "filesize": 2_000_000_000, "height": 1080},
                                                                               {"format_id": "140", "filesize_approx": 90_000_000}]}
     Y.check_info(ok)
     assert Y.expected_bytes(ok) == 2_090_000_000 and Y.chosen_height(ok) == 1080
+
+
+def test_trwajaca_transmisja_konczy_sie_na_ostatnim_fragmencie():
+    base = "https://rr.googlevideo.com/videoplayback?itag=137&sq="
+    assert Y.at_head({"url": base + "119", "fragment_count": 120})
+    assert not Y.at_head({"url": base + "118", "fragment_count": 120})
+    assert not Y.at_head({"url": base + "5"}) and not Y.at_head({"fragment_count": 3})
+    copy = importlib.import_module("app.mentor_youtube_copy")
+    calls = []
+
+    def gen(ctx):
+        calls.append(ctx)
+        for n in range(6):  # generator yt-dlp czekałby dalej na nowe fragmenty transmisji
+            yield {"url": f"{base}{n}", "fragment_count": 3 if n < 3 else 6}
+
+    info = {"formats": [{"format_id": "137", "fragments": gen}, {"format_id": "140", "fragments": [{"url": "x"}]}]}
+    copy._until_head(info)
+    assert [f["url"][-1] for f in info["formats"][0]["fragments"]({"n": 1})] == ["0", "1", "2"] and calls == [{"n": 1}]
+    assert info["formats"][1]["fragments"] == [{"url": "x"}]
 
 
 def test_postep_dwoch_strumieni_nie_cofa_paska():

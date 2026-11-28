@@ -100,10 +100,39 @@ def test_czekanie_bez_konca_i_ksztalt_api():
                                    auto_reason="YouTube jeszcze przetwarza zapis transmisji.", proel_finished_at=M(0)))
     assert shape == {"state": "scheduled", "next_at": "2026-11-07T17:10:00Z", "attempt": 1, "until": "2026-11-07T17:30:00Z",
                      "last_try_at": "2026-11-07T18:00:00Z", "reason": "YouTube jeszcze przetwarza zapis transmisji.",
-                     "ended_at": "2026-11-07T17:00:00Z", "live_ended_at": None, "proel_finished_at": "2026-11-07T17:00:00Z"}
+                     "ended_at": "2026-11-07T17:00:00Z", "live_ended_at": None, "proel_finished_at": "2026-11-07T17:00:00Z",
+                     "picked_at": None, "can_pick": False}
     waiting = L.auto_shape(armed_row())
     assert waiting["state"] == "waiting_end" and waiting["next_at"] is None and waiting["until"] is None and waiting["ended_at"] is None
     assert L.auto_shape({"auto_copy_state": "off"}) is None and L.auto_shape({}) is None and L.auto_shape(None) is None
+
+
+def test_wybrany_moment_kopii():
+    row = armed_row()
+    assert L.can_pick(row) and L.auto_shape(row)["can_pick"] is True
+    # „Teraz” (moment w przeszłości) = próba od razu, okno nadpisywania liczone jak od końca meczu + 5 minut.
+    row.update(L.pick_values(M(-3), M(0)))
+    assert row["auto_copy_state"] == "scheduled" and row["auto_next_at"] == M(0) and row["auto_end_at"] == M(-5)
+    assert L.due(row, M(0)) == "window" and L.picked(row) and L.can_pick(row)
+    shape = L.auto_shape(row)
+    assert shape["picked_at"] == "2026-11-07T17:00:00Z" and shape["until"] == "2026-11-07T17:25:00Z"
+    # zmiana na później, potem powrót do czekania na koniec meczu
+    row.update(L.pick_values(M(40), M(1)))
+    assert row["auto_next_at"] == M(40) and L.due(row, M(39)) is None
+    # koniec meczu w YouTube wcześniej niż wybrany moment: wygrywa wcześniejszy termin
+    early = dict(row)
+    early.update(L.on_live_info(early, {"state": "vod", "ended_at": M(10)}, M(12)))
+    assert early["auto_next_at"] == M(15) and early["auto_pick_at"] is None and early["live_ended_at"] == M(10)
+    # ProEl później niż wybrany moment: wybór zostaje, ale zmienić go już nie wolno
+    late = dict(row)
+    late.update(L.on_proel_finished(late, M(38)))
+    assert late["auto_next_at"] == M(40) and late["auto_pick_at"] == M(40) and not L.can_pick(late)
+    row.update(L.pick_values(None, M(2)))
+    assert row["auto_copy_state"] == "waiting_end" and row["auto_next_at"] is None and row["auto_pick_at"] is None
+    # po pierwszej próbie albo przy końcu meczu z ProEla - moment ustala automat
+    assert not L.can_pick(armed_row(auto_copy_state="scheduled", auto_pick_at=M(0), auto_attempts=1))
+    assert not L.can_pick(armed_row(proel_finished_at=M(0)))
+    assert not L.can_pick(armed_row(auto_copy_state="scheduled", auto_end_at=M(0)))
 
 
 def test_stan_transmisji_ze_strony_i_z_api():
@@ -444,3 +473,56 @@ def test_zwykly_film_nie_jest_uzbrajany(d):
 
     added, row = d.run(go)
     assert added["auto_copy"] is None and row["auto_copy_state"] is None
+
+
+def test_wybrany_moment_teraz_robi_kopie_trwajacej_transmisji(d):
+    d.infos["abcdefghijk"] = {"state": "live", "started_ms": None, "ended_at": None}
+
+    async def go():
+        actor = await actor_for(d)
+        vid = (await add_live(d, actor))["id"]
+        at(d, 0)
+        later = await d.copy.pick_copy_moment(PAIR, "m1", vid, d.copy.AutoPickBody(at=d.t0 + timedelta(minutes=20)), actor)
+        back = await d.copy.pick_copy_moment(PAIR, "m1", vid, d.copy.AutoPickBody(at=None), actor)
+        now = await d.copy.pick_copy_moment(PAIR, "m1", vid, d.copy.AutoPickBody(at=d.t0 - timedelta(minutes=1)), actor)
+        worked = await d.copy.process_next()
+        ready = await d.copy.copy_status(PAIR, "m1", vid, actor)
+        try:
+            await d.copy.pick_copy_moment(PAIR, "m1", vid, d.copy.AutoPickBody(at=d.t0), actor)
+            locked = None
+        except Exception as exc:  # noqa: BLE001
+            locked = exc
+        await step(d, 5)  # nadpisanie w oknie: transmisja dalej trwa, kopia rośnie
+        return later, back, now, worked, ready, locked, await video_row(d, vid)
+
+    later, back, now, worked, ready, locked, row = d.run(go)
+    assert later["auto_copy"]["state"] == "scheduled" and L.aware(later["auto_copy"]["next_at"]) == d.t0 + timedelta(minutes=20)
+    assert later["auto_copy"]["picked_at"] and later["auto_copy"]["can_pick"] is True
+    assert back["auto_copy"]["state"] == "waiting_end" and back["auto_copy"]["picked_at"] is None
+    assert now["auto_copy"]["state"] == "copying" and now["mirror"]["status"] == "working"
+    assert worked is True and ready["mirror"]["status"] == "ready" and ready["auto_copy"]["state"] == "scheduled"
+    assert getattr(locked, "status_code", None) == 409
+    assert row["auto_attempts"] == 2 and len(d.calls) == 2
+
+
+def test_nadrobienie_trwajacych_transmisji_przy_starcie(d):
+    d.infos["abcdefghijk"] = {"state": "live", "started_ms": None, "ended_at": None}
+
+    async def go():
+        actor = await actor_for(d)
+        d.infos["zzzzzzzzzzz"] = {"state": "upcoming", "started_ms": None, "ended_at": None}
+        live = (await add_live(d, actor))["id"]
+        upcoming = (await add_live(d, actor, "https://www.youtube.com/watch?v=zzzzzzzzzzz"))["id"]
+        T = d.T["mentor_match_videos"]
+        await d.db.execute(T.update().values(auto_armed_at=d.live.CATCH_UP_ARMED_BEFORE - timedelta(hours=2)))
+        at(d, 0)
+        d.mp.setattr(d.live, "CATCH_UP_UNTIL", d.t0 + timedelta(hours=1))
+        first = await d.live.catch_up_live()
+        again = await d.live.catch_up_live()
+        d.mp.setattr(d.live, "CATCH_UP_UNTIL", d.t0)
+        expired = await d.live.catch_up_live()
+        return first, again, expired, await video_row(d, live), await video_row(d, upcoming)
+
+    first, again, expired, live, upcoming = d.run(go)
+    assert first == 1 and again == 0 and expired == 0
+    assert live["auto_copy_state"] == "copying" and upcoming["auto_copy_state"] == "waiting_end"

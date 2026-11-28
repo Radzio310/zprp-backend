@@ -23,6 +23,12 @@ Stany (`auto_copy_state`, takie same w API `auto_copy.state`):
   done          koniec automatu, kopia jest
   gave_up       koniec automatu bez kopii (`reason`)
   off           automat wyłączony ręcznie (anulowanie kopii, kopia do kosza) - w API `auto_copy: null`
+
+Wybrany moment (28.11.2026, decyzja właściciela): gdy ProEl nie zgłosił końca meczu, para może sama wskazać moment
+kopii (`auto_pick_at`, także „Teraz”). Wskazany moment działa jak koniec meczu + 5 minut: pierwsza próba o tej
+godzinie, potem nadpisywanie co 5 minut do końca okna. Trwająca transmisja kopiuje się z tego, co YouTube już ma
+(od początku do teraz). Gdy YouTube albo ProEl zgłosi koniec meczu wcześniej, niż wypada wybrany moment, a próby
+jeszcze nie było, wygrywa wcześniejszy termin.
 """
 
 from __future__ import annotations
@@ -35,6 +41,8 @@ FIRST_AFTER = timedelta(minutes=5)
 EVERY = timedelta(minutes=5)
 WINDOW = timedelta(minutes=30)
 LAST_TRY_AFTER = timedelta(minutes=60)
+#: Wybrany moment kopii najwyżej tyle naprzód (dłużej czeka się na koniec meczu).
+PICK_AHEAD = timedelta(hours=12)
 #: Transmisja, która przez tyle czasu się nie skończyła (zapowiedź na za tydzień, porzucony link) - automat odpuszcza.
 STALE_AFTER = timedelta(days=3)
 
@@ -113,17 +121,27 @@ def live_now(info: Optional[Mapping[str, Any]]) -> bool:
 def arm_values(now: datetime) -> Dict[str, Any]:
     """Kolumny świeżo uzbrojonego filmu: czekamy na koniec meczu."""
     return {"auto_copy_state": "waiting_end", "auto_armed_at": now, "auto_next_at": None, "auto_attempts": 0,
-            "auto_end_at": None, "auto_reason": None, "live_ended_at": None, "proel_finished_at": None}
+            "auto_end_at": None, "auto_reason": None, "live_ended_at": None, "proel_finished_at": None, "auto_pick_at": None}
 
 
 # ─── Koniec meczu: YouTube albo ProEl ───────────────────────────────────────
 
 
+def picked(row: Mapping[str, Any]) -> bool:
+    """Moment kopii wybrany przez parę, a pierwsza próba jeszcze nie ruszyła."""
+    return state_of(row) == "scheduled" and aware(row.get("auto_pick_at")) is not None and not int(row.get("auto_attempts") or 0)
+
+
 def _match_end(row: Mapping[str, Any], end: datetime) -> Dict[str, Any]:
-    """Pierwszy sygnał końca meczu ustawia okno: pierwsza próba 5 minut później."""
-    if state_of(row) not in WAITING:
-        return {}
-    return {"auto_copy_state": "scheduled", "auto_end_at": end, "auto_next_at": end + FIRST_AFTER, "auto_reason": None}
+    """Pierwszy sygnał końca meczu ustawia okno: pierwsza próba 5 minut później. Wybrany moment ustępuje wcześniejszemu."""
+    values = {"auto_copy_state": "scheduled", "auto_end_at": end, "auto_next_at": end + FIRST_AFTER, "auto_reason": None,
+              "auto_pick_at": None}
+    if state_of(row) in WAITING:
+        return values
+    chosen = aware(row.get("auto_next_at"))
+    if picked(row) and (chosen is None or end + FIRST_AFTER < chosen):
+        return values
+    return {}
 
 
 def on_live_info(row: Mapping[str, Any], info: Optional[Mapping[str, Any]], now: datetime) -> Dict[str, Any]:
@@ -132,6 +150,23 @@ def on_live_info(row: Mapping[str, Any], info: Optional[Mapping[str, Any]], now:
         return {}
     ended = min(aware(info.get("ended_at")) or now, now)
     return {"live_ended_at": ended, **_match_end(row, ended)}
+
+
+def can_pick(row: Mapping[str, Any]) -> bool:
+    """Wolno wybrać (albo zmienić) moment kopii: czekamy na koniec meczu, ProEl go nie zgłosił, próby jeszcze nie było."""
+    if row.get("proel_finished_at"):
+        return False
+    return state_of(row) in WAITING or picked(row)
+
+
+def pick_values(at: Optional[datetime], now: datetime) -> Dict[str, Any]:
+    """Wybrany moment kopii (`at` w przeszłości = teraz). `None` = wróć do czekania na koniec meczu."""
+    if at is None:
+        return {"auto_copy_state": "waiting_end", "auto_pick_at": None, "auto_end_at": None, "auto_next_at": None,
+                "auto_reason": None}
+    when = max(at, now)
+    return {"auto_copy_state": "scheduled", "auto_pick_at": when, "auto_end_at": when - FIRST_AFTER, "auto_next_at": when,
+            "auto_reason": None}
 
 
 def on_proel_finished(row: Mapping[str, Any], now: datetime) -> Dict[str, Any]:
@@ -250,6 +285,10 @@ def auto_shape(row: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
         "ended_at": iso(end),
         "live_ended_at": iso(row.get("live_ended_at")),
         "proel_finished_at": iso(row.get("proel_finished_at")),
+        #: moment kopii wybrany przez parę (null = koniec meczu z YouTube albo ProEla)
+        "picked_at": iso(row.get("auto_pick_at")),
+        #: wolno wybrać albo zmienić moment kopii (ProEl nie zgłosił końca meczu, próby jeszcze nie było)
+        "can_pick": can_pick(row),
     }
 
 
