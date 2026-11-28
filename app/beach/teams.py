@@ -73,13 +73,9 @@ def _abs_index_url(path_or_query: str) -> str:
     return f"/index.php?{s}"
 
 
-def _mask_secret(value: str, visible_prefix: int = 2, visible_suffix: int = 2) -> str:
-    v = value or ""
-    if not v:
-        return ""
-    if len(v) <= visible_prefix + visible_suffix:
-        return "*" * len(v)
-    return f"{v[:visible_prefix]}***{v[-visible_suffix:]}"
+def _mask_secret(value: str) -> str:
+    """Do logów: tylko informacja, czy sekret jest ustawiony — bez żadnego jego znaku."""
+    return "***" if value else ""
 
 
 def _table_has_column(col_name: str) -> bool:
@@ -259,11 +255,10 @@ async def _login_beach_client(settings: Settings) -> AsyncClient:
         }
 
         logger.warning(
-            "BEACH login request payload | login=%r | haslo_masked=%r | from=%r | body=%r",
+            "BEACH login request payload | login=%r | haslo_masked=%r | from=%r",
             login_payload["login"],
             _mask_secret(login_payload["haslo"]),
             login_payload["from"],
-            encoded_body,
         )
 
         resp_login = await client.request(
